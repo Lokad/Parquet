@@ -55,6 +55,52 @@ public sealed class ParquetLogicalAnnotation
     public bool? IsIntegerSigned { get; }
 }
 
+/// <summary>
+/// A known annotation normalized across modern and legacy metadata and validated
+/// against its physical storage type.
+/// </summary>
+public sealed class ParquetSemanticAnnotation
+{
+    internal ParquetSemanticAnnotation(
+        ParquetSemanticTypeKind kind,
+        int? scale,
+        int? precision,
+        ParquetTimeUnit? timeUnit,
+        bool? isAdjustedToUtc,
+        int? integerBitWidth,
+        bool? isIntegerSigned)
+    {
+        Kind = kind;
+        Scale = scale;
+        Precision = precision;
+        TimeUnit = timeUnit;
+        IsAdjustedToUtc = isAdjustedToUtc;
+        IntegerBitWidth = integerBitWidth;
+        IsIntegerSigned = isIntegerSigned;
+    }
+
+    /// <summary>Gets the normalized semantic kind.</summary>
+    public ParquetSemanticTypeKind Kind { get; }
+
+    /// <summary>Gets the decimal scale when <see cref="Kind"/> is decimal.</summary>
+    public int? Scale { get; }
+
+    /// <summary>Gets the decimal precision when <see cref="Kind"/> is decimal.</summary>
+    public int? Precision { get; }
+
+    /// <summary>Gets the unit when <see cref="Kind"/> is time or timestamp.</summary>
+    public ParquetTimeUnit? TimeUnit { get; }
+
+    /// <summary>Gets the UTC-adjustment flag when <see cref="Kind"/> is time or timestamp.</summary>
+    public bool? IsAdjustedToUtc { get; }
+
+    /// <summary>Gets the declared bit width when <see cref="Kind"/> is integer.</summary>
+    public int? IntegerBitWidth { get; }
+
+    /// <summary>Gets the signedness when <see cref="Kind"/> is integer.</summary>
+    public bool? IsIntegerSigned { get; }
+}
+
 /// <summary>One element in the flattened, depth-first Parquet schema.</summary>
 public sealed class ParquetSchemaElement
 {
@@ -73,6 +119,7 @@ public sealed class ParquetSchemaElement
         int? fieldId,
         ParquetLogicalAnnotation? logicalAnnotation,
         ParquetAnnotationStatus annotationStatus,
+        ParquetSemanticAnnotation? semanticAnnotation,
         int maximumDefinitionLevel,
         int maximumRepetitionLevel)
     {
@@ -90,6 +137,7 @@ public sealed class ParquetSchemaElement
         FieldId = fieldId;
         LogicalAnnotation = logicalAnnotation;
         AnnotationStatus = annotationStatus;
+        SemanticAnnotation = semanticAnnotation;
         MaximumDefinitionLevel = maximumDefinitionLevel;
         MaximumRepetitionLevel = maximumRepetitionLevel;
     }
@@ -147,6 +195,12 @@ public sealed class ParquetSchemaElement
 
     /// <summary>Gets the relationship between the modern and legacy annotations.</summary>
     public ParquetAnnotationStatus AnnotationStatus { get; }
+
+    /// <summary>
+    /// Gets the normalized annotation when it is known, internally consistent, and
+    /// compatible with the physical storage type.
+    /// </summary>
+    public ParquetSemanticAnnotation? SemanticAnnotation { get; }
 
     /// <summary>Gets the maximum definition level at this element.</summary>
     public int MaximumDefinitionLevel { get; }

@@ -61,6 +61,7 @@ public sealed class MetadataTests
         Assert.Equal(ParquetConvertedType.Date, element.ConvertedType);
         Assert.Null(element.LogicalAnnotation);
         Assert.Equal(ParquetAnnotationStatus.LegacyOnly, element.AnnotationStatus);
+        Assert.Equal(ParquetSemanticTypeKind.Date, element.SemanticAnnotation?.Kind);
     }
 
     [Fact]
@@ -79,6 +80,24 @@ public sealed class MetadataTests
         Assert.Equal(ParquetLogicalTypeKind.Time, annotation.Kind);
         Assert.Equal(9, column.SchemaElement.LogicalAnnotation.TimeUnitDiscriminator);
         Assert.Null(column.SchemaElement.LogicalAnnotation.TimeUnit);
+        Assert.Null(column.SchemaElement.SemanticAnnotation);
+        Assert.True(column.IsReadable);
+    }
+
+    [Fact]
+    public async Task LeavesUnsupportedAnnotationWithoutNormalizedSemantics()
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            RowGroupMode = FixtureRowGroupMode.Omitted,
+            LogicalTypeDiscriminator = (int)ParquetLogicalTypeKind.Variant,
+        });
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        var column = file.Metadata.Schema.Columns[0];
+
+        Assert.Equal(ParquetLogicalTypeKind.Variant, column.SchemaElement.LogicalAnnotation?.Kind);
+        Assert.Equal(ParquetAnnotationStatus.ModernOnly, column.SchemaElement.AnnotationStatus);
+        Assert.Null(column.SchemaElement.SemanticAnnotation);
         Assert.True(column.IsReadable);
     }
 
@@ -95,6 +114,23 @@ public sealed class MetadataTests
         var column = file.Metadata.Schema.Columns[0];
 
         Assert.Equal(ParquetAnnotationStatus.Conflict, column.SchemaElement.AnnotationStatus);
+        Assert.Null(column.SchemaElement.SemanticAnnotation);
+        Assert.True(column.IsReadable);
+    }
+
+    [Fact]
+    public async Task ReportsPhysicalAnnotationMismatchWithoutBlockingPhysicalRead()
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            RowGroupMode = FixtureRowGroupMode.Omitted,
+            LogicalTypeDiscriminator = (int)ParquetLogicalTypeKind.String,
+        });
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        var column = file.Metadata.Schema.Columns[0];
+
+        Assert.Equal(ParquetAnnotationStatus.Invalid, column.SchemaElement.AnnotationStatus);
+        Assert.Null(column.SchemaElement.SemanticAnnotation);
         Assert.True(column.IsReadable);
     }
 

@@ -783,6 +783,34 @@ public sealed class ScanTests
     }
 
     [Fact]
+    public async Task RetainsAnnotationsOnGeneratedMultiColumnFixtures()
+    {
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn
+            {
+                Name = "modern",
+                Pages = [[10]],
+                LogicalTypeDiscriminator = (int)ParquetLogicalTypeKind.Date,
+            },
+            new RequiredInt32FixtureColumn
+            {
+                Name = "legacy",
+                Pages = [[20]],
+                ConvertedType = (int)ParquetConvertedType.Date,
+            },
+        ]);
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+
+        Assert.Equal(ParquetAnnotationStatus.ModernOnly,
+            file.Metadata.Schema.Columns[0].SchemaElement.AnnotationStatus);
+        Assert.Equal(ParquetAnnotationStatus.LegacyOnly,
+            file.Metadata.Schema.Columns[1].SchemaElement.AnnotationStatus);
+        Assert.All(file.Metadata.Schema.Columns, column =>
+            Assert.Equal(ParquetSemanticTypeKind.Date, column.SchemaElement.SemanticAnnotation?.Kind));
+    }
+
+    [Fact]
     public async Task DisposingAlignedMultiColumnBatchInvalidatesEveryColumnView()
     {
         using var tracker = new PoolTracker();

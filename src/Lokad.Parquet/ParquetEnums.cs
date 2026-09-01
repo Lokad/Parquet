@@ -201,8 +201,45 @@ public enum ParquetAnnotationStatus
     Consistent,
     /// <summary>Both annotations are present but conflict.</summary>
     Conflict,
-    /// <summary>An annotation violates its structural constraints.</summary>
+    /// <summary>An annotation violates its structural or physical-type constraints.</summary>
     Invalid,
+}
+
+/// <summary>A normalized semantic annotation independent of its modern or legacy encoding.</summary>
+public enum ParquetSemanticTypeKind
+{
+    /// <summary>UTF-8 text.</summary>
+    String = 0,
+    /// <summary>Map group.</summary>
+    Map = 1,
+    /// <summary>Legacy map key/value group.</summary>
+    MapKeyValue = 2,
+    /// <summary>List group.</summary>
+    List = 3,
+    /// <summary>Enumerated UTF-8 text.</summary>
+    Enum = 4,
+    /// <summary>Decimal value.</summary>
+    Decimal = 5,
+    /// <summary>Date value.</summary>
+    Date = 6,
+    /// <summary>Time-of-day value.</summary>
+    Time = 7,
+    /// <summary>Timestamp value.</summary>
+    Timestamp = 8,
+    /// <summary>Signed or unsigned integer.</summary>
+    Integer = 9,
+    /// <summary>Always-null value.</summary>
+    Unknown = 10,
+    /// <summary>JSON document.</summary>
+    Json = 11,
+    /// <summary>BSON document.</summary>
+    Bson = 12,
+    /// <summary>UUID value.</summary>
+    Uuid = 13,
+    /// <summary>IEEE 754 binary16 value.</summary>
+    Float16 = 14,
+    /// <summary>Legacy twelve-byte interval.</summary>
+    Interval = 15,
 }
 
 /// <summary>Column ordering used to interpret raw minimum and maximum statistics.</summary>

@@ -90,6 +90,8 @@ internal sealed class RequiredInt32FixtureColumn
 {
     public required string Name { get; init; }
     public required int[][] Pages { get; init; }
+    public int? ConvertedType { get; init; }
+    public int? LogicalTypeDiscriminator { get; init; }
 }
 
 internal static class ParquetFixtureBuilder
@@ -170,36 +172,13 @@ internal static class ParquetFixtureBuilder
                     footer.Int32Field(ref leaf, 2, typeLength);
                 footer.Int32Field(ref leaf, 3, isOptional ? 1 : 0);
                 footer.StringField(ref leaf, 4, columnName);
-                if (options.ConvertedType is int converted)
-                    footer.Int32Field(ref leaf, 6, converted);
-                if (options.LogicalTypeDiscriminator is int logical)
-                {
-                    footer.StructField(ref leaf, 10, () =>
-                    {
-                        short union = 0;
-                        footer.StructField(ref union, (short)logical, () =>
-                        {
-                            if (logical is (int)ParquetLogicalTypeKind.Time or (int)ParquetLogicalTypeKind.Timestamp &&
-                                options.TimeUnitDiscriminator is int timeUnit)
-                            {
-                                short time = 0;
-                                footer.BooleanField(ref time, 1, options.TimeAdjustedToUtc);
-                                footer.StructField(ref time, 2, () =>
-                                {
-                                    short unit = 0;
-                                    footer.StructField(ref unit, checked((short)timeUnit), footer.Stop);
-                                    footer.Stop();
-                                });
-                                footer.Stop();
-                            }
-                            else
-                            {
-                                footer.Stop();
-                            }
-                        });
-                        footer.Stop();
-                    });
-                }
+                AddAnnotations(
+                    footer,
+                    ref leaf,
+                    options.ConvertedType,
+                    options.LogicalTypeDiscriminator,
+                    options.TimeUnitDiscriminator,
+                    options.TimeAdjustedToUtc);
                 footer.Stop();
             }
         });
@@ -328,6 +307,13 @@ internal static class ParquetFixtureBuilder
                 footer.Int32Field(ref leaf, 1, (int)ParquetPhysicalType.Int32);
                 footer.Int32Field(ref leaf, 3, (int)ParquetRepetition.Required);
                 footer.StringField(ref leaf, 4, column.Name);
+                AddAnnotations(
+                    footer,
+                    ref leaf,
+                    column.ConvertedType,
+                    column.LogicalTypeDiscriminator,
+                    timeUnitDiscriminator: null,
+                    timeAdjustedToUtc: false);
                 footer.Stop();
             }
         });
@@ -364,6 +350,46 @@ internal static class ParquetFixtureBuilder
         });
         footer.Stop();
         return CompleteFile(file, footer);
+    }
+
+    private static void AddAnnotations(
+        CompactTestWriter footer,
+        ref short previous,
+        int? convertedType,
+        int? logicalTypeDiscriminator,
+        int? timeUnitDiscriminator,
+        bool timeAdjustedToUtc)
+    {
+        if (convertedType is int converted)
+            footer.Int32Field(ref previous, 6, converted);
+        if (logicalTypeDiscriminator is not int logical)
+            return;
+
+        footer.StructField(ref previous, 10, () =>
+        {
+            short union = 0;
+            footer.StructField(ref union, checked((short)logical), () =>
+            {
+                if (logical is (int)ParquetLogicalTypeKind.Time or
+                    (int)ParquetLogicalTypeKind.Timestamp && timeUnitDiscriminator is int timeUnit)
+                {
+                    short time = 0;
+                    footer.BooleanField(ref time, 1, timeAdjustedToUtc);
+                    footer.StructField(ref time, 2, () =>
+                    {
+                        short unit = 0;
+                        footer.StructField(ref unit, checked((short)timeUnit), footer.Stop);
+                        footer.Stop();
+                    });
+                    footer.Stop();
+                }
+                else
+                {
+                    footer.Stop();
+                }
+            });
+            footer.Stop();
+        });
     }
 
     public static byte[] CreateRequiredInt32RowGroups(int[][] rowGroups)

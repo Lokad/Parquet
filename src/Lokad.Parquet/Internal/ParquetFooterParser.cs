@@ -886,8 +886,8 @@ internal static class ParquetFooterParser
             var columnCount = 0;
             var stack = new SchemaFrame[wire.Length];
             var stackCount = 0;
-            var rootStatus = GetAnnotationStatus(root);
-            elements[0] = BuildElement(root, 0, null, [], rootStatus, 0, 0);
+            var rootAnnotation = ResolveAnnotation(root);
+            elements[0] = BuildElement(root, 0, null, [], rootAnnotation, 0, 0);
             if (root.ChildCount.Value > 0)
                 stack[stackCount++] = new SchemaFrame(0, root.ChildCount.Value);
 
@@ -918,8 +918,8 @@ internal static class ParquetFooterParser
                 var repetition = current.RepetitionCode.Value;
                 var definitionLevel = parentElement.MaximumDefinitionLevel + (repetition is 1 or 2 ? 1 : 0);
                 var repetitionLevel = parentElement.MaximumRepetitionLevel + (repetition == 2 ? 1 : 0);
-                var status = GetAnnotationStatus(current);
-                var element = BuildElement(current, i, parent.ElementOrdinal, path, status, definitionLevel, repetitionLevel);
+                var annotation = ResolveAnnotation(current);
+                var element = BuildElement(current, i, parent.ElementOrdinal, path, annotation, definitionLevel, repetitionLevel);
                 elements[i] = element;
 
                 if (isLeaf)
@@ -952,7 +952,7 @@ internal static class ParquetFooterParser
         int ordinal,
         int? parentOrdinal,
         IReadOnlyList<string> path,
-        ParquetAnnotationStatus annotationStatus,
+        ResolvedAnnotation annotation,
         int definitionLevel,
         int repetitionLevel) => new(
             ordinal,
@@ -968,24 +968,48 @@ internal static class ParquetFooterParser
             wire.Precision,
             wire.FieldId,
             wire.LogicalAnnotation,
-            annotationStatus,
+            annotation.Status,
+            annotation.Semantic,
             definitionLevel,
             repetitionLevel);
 
-        static ParquetAnnotationStatus GetAnnotationStatus(SchemaElementWire element)
+        static ResolvedAnnotation ResolveAnnotation(SchemaElementWire element)
         {
             var modern = element.LogicalAnnotation;
             var legacy = element.ConvertedTypeCode;
             if (!IsAnnotationStructurallyValid(element))
-                return ParquetAnnotationStatus.Invalid;
+                return new(ParquetAnnotationStatus.Invalid, null);
             if (modern is null && legacy is null)
-                return ParquetAnnotationStatus.None;
+                return new(ParquetAnnotationStatus.None, null);
+
+            var modernSemantic = modern is null ? null : FromModern(modern);
+            var legacySemantic = legacy is null ? null : FromLegacy(legacy.Value, element.Scale, element.Precision);
+            ParquetAnnotationStatus status;
+            ParquetSemanticAnnotation? semantic;
             if (modern is null)
-                return ParquetAnnotationStatus.LegacyOnly;
-            if (legacy is null)
-                return ParquetAnnotationStatus.ModernOnly;
-            return AreAnnotationsConsistent(modern, legacy.Value, element.Scale, element.Precision)
-                ? ParquetAnnotationStatus.Consistent : ParquetAnnotationStatus.Conflict;
+            {
+                status = ParquetAnnotationStatus.LegacyOnly;
+                semantic = legacySemantic;
+            }
+            else if (legacy is null)
+            {
+                status = ParquetAnnotationStatus.ModernOnly;
+                semantic = modernSemantic;
+            }
+            else if (modernSemantic is not null && legacySemantic is not null &&
+                     AreSemanticallyEqual(modernSemantic, legacySemantic))
+            {
+                status = ParquetAnnotationStatus.Consistent;
+                semantic = modernSemantic;
+            }
+            else
+            {
+                return new(ParquetAnnotationStatus.Conflict, null);
+            }
+
+            return semantic is not null && !IsPhysicallyCompatible(element, semantic)
+                ? new(ParquetAnnotationStatus.Invalid, null)
+                : new(status, semantic);
         }
 
         static bool IsAnnotationStructurallyValid(SchemaElementWire element)
@@ -1006,56 +1030,158 @@ internal static class ParquetFooterParser
             return true;
         }
 
-        static bool AreAnnotationsConsistent(
-        ParquetLogicalAnnotation modern,
-        int legacyCode,
-        int? scale,
-        int? precision)
+        static ParquetSemanticAnnotation? FromModern(ParquetLogicalAnnotation annotation)
         {
-            if (!Enum.IsDefined(typeof(ParquetConvertedType), legacyCode) || modern.Kind is null)
-                return false;
-            var legacy = (ParquetConvertedType)legacyCode;
-            return modern.Kind switch
+            if (annotation.Kind is not { } kind)
+                return null;
+            var semanticKind = kind switch
             {
-                ParquetLogicalTypeKind.String => legacy == ParquetConvertedType.Utf8,
-                ParquetLogicalTypeKind.Map => legacy == ParquetConvertedType.Map,
-                ParquetLogicalTypeKind.List => legacy == ParquetConvertedType.List,
-                ParquetLogicalTypeKind.Enum => legacy == ParquetConvertedType.Enum,
-                ParquetLogicalTypeKind.Decimal => legacy == ParquetConvertedType.Decimal &&
-                    modern.Scale == scale && modern.Precision == precision,
-                ParquetLogicalTypeKind.Date => legacy == ParquetConvertedType.Date,
-                ParquetLogicalTypeKind.Time => modern.TimeUnit switch
-                {
-                    ParquetTimeUnit.Milliseconds => legacy == ParquetConvertedType.TimeMilliseconds,
-                    ParquetTimeUnit.Microseconds => legacy == ParquetConvertedType.TimeMicroseconds,
-                    _ => false,
-                },
-                ParquetLogicalTypeKind.Timestamp => modern.TimeUnit switch
-                {
-                    ParquetTimeUnit.Milliseconds => legacy == ParquetConvertedType.TimestampMilliseconds,
-                    ParquetTimeUnit.Microseconds => legacy == ParquetConvertedType.TimestampMicroseconds,
-                    _ => false,
-                },
-                ParquetLogicalTypeKind.Integer => IntegerAnnotationMatches(modern, legacy),
-                ParquetLogicalTypeKind.Json => legacy == ParquetConvertedType.Json,
-                ParquetLogicalTypeKind.Bson => legacy == ParquetConvertedType.Bson,
-                _ => false,
+                ParquetLogicalTypeKind.String => ParquetSemanticTypeKind.String,
+                ParquetLogicalTypeKind.Map => ParquetSemanticTypeKind.Map,
+                ParquetLogicalTypeKind.List => ParquetSemanticTypeKind.List,
+                ParquetLogicalTypeKind.Enum => ParquetSemanticTypeKind.Enum,
+                ParquetLogicalTypeKind.Decimal => ParquetSemanticTypeKind.Decimal,
+                ParquetLogicalTypeKind.Date => ParquetSemanticTypeKind.Date,
+                ParquetLogicalTypeKind.Time => ParquetSemanticTypeKind.Time,
+                ParquetLogicalTypeKind.Timestamp => ParquetSemanticTypeKind.Timestamp,
+                ParquetLogicalTypeKind.Integer => ParquetSemanticTypeKind.Integer,
+                ParquetLogicalTypeKind.Unknown => ParquetSemanticTypeKind.Unknown,
+                ParquetLogicalTypeKind.Json => ParquetSemanticTypeKind.Json,
+                ParquetLogicalTypeKind.Bson => ParquetSemanticTypeKind.Bson,
+                ParquetLogicalTypeKind.Uuid => ParquetSemanticTypeKind.Uuid,
+                ParquetLogicalTypeKind.Float16 => ParquetSemanticTypeKind.Float16,
+                _ => (ParquetSemanticTypeKind?)null,
             };
+            if (semanticKind is null ||
+                semanticKind is ParquetSemanticTypeKind.Time or ParquetSemanticTypeKind.Timestamp && annotation.TimeUnit is null)
+                return null;
+            return new ParquetSemanticAnnotation(
+                semanticKind.Value,
+                annotation.Scale,
+                annotation.Precision,
+                annotation.TimeUnit,
+                annotation.IsAdjustedToUtc,
+                annotation.IntegerBitWidth,
+                annotation.IsIntegerSigned);
         }
 
-        static bool IntegerAnnotationMatches(ParquetLogicalAnnotation modern, ParquetConvertedType legacy)
+        static ParquetSemanticAnnotation? FromLegacy(int legacyCode, int? scale, int? precision)
         {
-            if (modern.IntegerBitWidth is not int bitWidth || modern.IsIntegerSigned is not bool signed)
-                return false;
-            var expected = bitWidth switch
+            if (!Enum.IsDefined(typeof(ParquetConvertedType), legacyCode))
+                return null;
+            var legacy = (ParquetConvertedType)legacyCode;
+            var kind = legacy switch
             {
-                8 => signed ? ParquetConvertedType.Int8 : ParquetConvertedType.UInt8,
-                16 => signed ? ParquetConvertedType.Int16 : ParquetConvertedType.UInt16,
-                32 => signed ? ParquetConvertedType.Int32 : ParquetConvertedType.UInt32,
-                64 => signed ? ParquetConvertedType.Int64 : ParquetConvertedType.UInt64,
-                _ => (ParquetConvertedType)(-1),
+                ParquetConvertedType.Utf8 => ParquetSemanticTypeKind.String,
+                ParquetConvertedType.Map => ParquetSemanticTypeKind.Map,
+                ParquetConvertedType.MapKeyValue => ParquetSemanticTypeKind.MapKeyValue,
+                ParquetConvertedType.List => ParquetSemanticTypeKind.List,
+                ParquetConvertedType.Enum => ParquetSemanticTypeKind.Enum,
+                ParquetConvertedType.Decimal => ParquetSemanticTypeKind.Decimal,
+                ParquetConvertedType.Date => ParquetSemanticTypeKind.Date,
+                ParquetConvertedType.TimeMilliseconds or ParquetConvertedType.TimeMicroseconds =>
+                    ParquetSemanticTypeKind.Time,
+                ParquetConvertedType.TimestampMilliseconds or ParquetConvertedType.TimestampMicroseconds =>
+                    ParquetSemanticTypeKind.Timestamp,
+                ParquetConvertedType.UInt8 or ParquetConvertedType.UInt16 or ParquetConvertedType.UInt32 or
+                    ParquetConvertedType.UInt64 or ParquetConvertedType.Int8 or ParquetConvertedType.Int16 or
+                    ParquetConvertedType.Int32 or ParquetConvertedType.Int64 => ParquetSemanticTypeKind.Integer,
+                ParquetConvertedType.Json => ParquetSemanticTypeKind.Json,
+                ParquetConvertedType.Bson => ParquetSemanticTypeKind.Bson,
+                ParquetConvertedType.Interval => ParquetSemanticTypeKind.Interval,
+                _ => throw new ArgumentOutOfRangeException(nameof(legacyCode)),
             };
-            return legacy == expected;
+            var timeUnit = legacy switch
+            {
+                ParquetConvertedType.TimeMilliseconds or ParquetConvertedType.TimestampMilliseconds =>
+                    ParquetTimeUnit.Milliseconds,
+                ParquetConvertedType.TimeMicroseconds or ParquetConvertedType.TimestampMicroseconds =>
+                    ParquetTimeUnit.Microseconds,
+                _ => (ParquetTimeUnit?)null,
+            };
+            var integerWidth = legacy switch
+            {
+                ParquetConvertedType.UInt8 or ParquetConvertedType.Int8 => 8,
+                ParquetConvertedType.UInt16 or ParquetConvertedType.Int16 => 16,
+                ParquetConvertedType.UInt32 or ParquetConvertedType.Int32 => 32,
+                ParquetConvertedType.UInt64 or ParquetConvertedType.Int64 => 64,
+                _ => (int?)null,
+            };
+            var integerSigned = legacy switch
+            {
+                ParquetConvertedType.UInt8 or ParquetConvertedType.UInt16 or
+                    ParquetConvertedType.UInt32 or ParquetConvertedType.UInt64 => false,
+                ParquetConvertedType.Int8 or ParquetConvertedType.Int16 or
+                    ParquetConvertedType.Int32 or ParquetConvertedType.Int64 => true,
+                _ => (bool?)null,
+            };
+            return new ParquetSemanticAnnotation(
+                kind,
+                kind == ParquetSemanticTypeKind.Decimal ? scale : null,
+                kind == ParquetSemanticTypeKind.Decimal ? precision : null,
+                timeUnit,
+                kind is ParquetSemanticTypeKind.Time or ParquetSemanticTypeKind.Timestamp ? true : null,
+                integerWidth,
+                integerSigned);
+        }
+
+        static bool AreSemanticallyEqual(ParquetSemanticAnnotation left, ParquetSemanticAnnotation right) =>
+            left.Kind == right.Kind && left.Scale == right.Scale && left.Precision == right.Precision &&
+            left.TimeUnit == right.TimeUnit && left.IsAdjustedToUtc == right.IsAdjustedToUtc &&
+            left.IntegerBitWidth == right.IntegerBitWidth &&
+            left.IsIntegerSigned == right.IsIntegerSigned;
+
+        static bool IsPhysicallyCompatible(SchemaElementWire element, ParquetSemanticAnnotation annotation)
+        {
+            var physical = element.TypeCode is int typeCode && Enum.IsDefined(typeof(ParquetPhysicalType), typeCode)
+                ? (ParquetPhysicalType)typeCode : (ParquetPhysicalType?)null;
+            return annotation.Kind switch
+            {
+                ParquetSemanticTypeKind.String or ParquetSemanticTypeKind.Enum or
+                    ParquetSemanticTypeKind.Json or ParquetSemanticTypeKind.Bson =>
+                    physical == ParquetPhysicalType.ByteArray,
+                ParquetSemanticTypeKind.Decimal => IsValidDecimalPhysicalType(
+                    physical, element.TypeLength, annotation.Precision),
+                ParquetSemanticTypeKind.Date => physical == ParquetPhysicalType.Int32,
+                ParquetSemanticTypeKind.Time => annotation.TimeUnit switch
+                {
+                    ParquetTimeUnit.Milliseconds => physical == ParquetPhysicalType.Int32,
+                    ParquetTimeUnit.Microseconds or ParquetTimeUnit.Nanoseconds =>
+                        physical == ParquetPhysicalType.Int64,
+                    _ => false,
+                },
+                ParquetSemanticTypeKind.Timestamp => physical == ParquetPhysicalType.Int64,
+                ParquetSemanticTypeKind.Integer => physical == (annotation.IntegerBitWidth == 64
+                    ? ParquetPhysicalType.Int64 : ParquetPhysicalType.Int32),
+                ParquetSemanticTypeKind.Uuid => physical == ParquetPhysicalType.FixedLengthByteArray &&
+                    element.TypeLength == 16,
+                ParquetSemanticTypeKind.Float16 => physical == ParquetPhysicalType.FixedLengthByteArray &&
+                    element.TypeLength == 2,
+                ParquetSemanticTypeKind.Interval => physical == ParquetPhysicalType.FixedLengthByteArray &&
+                    element.TypeLength == 12,
+                ParquetSemanticTypeKind.Map or ParquetSemanticTypeKind.MapKeyValue or
+                    ParquetSemanticTypeKind.List => physical is null,
+                ParquetSemanticTypeKind.Unknown => physical is not null,
+                _ => false,
+            };
+
+            static bool IsValidDecimalPhysicalType(
+                ParquetPhysicalType? physical,
+                int? typeLength,
+                int? precision)
+            {
+                if (precision is not > 0)
+                    return false;
+                return physical switch
+                {
+                    ParquetPhysicalType.Int32 => precision <= 9,
+                    ParquetPhysicalType.Int64 => precision <= 18,
+                    ParquetPhysicalType.ByteArray => true,
+                    ParquetPhysicalType.FixedLengthByteArray when typeLength is > 0 =>
+                        precision <= Math.Floor((8D * typeLength.Value - 1D) * Math.Log10(2D)),
+                    _ => false,
+                };
+            }
         }
 
         static string? GetUnsupportedReason(ParquetSchemaElement element)
@@ -1217,5 +1343,8 @@ internal static class ParquetFooterParser
     }
 
     private readonly record struct ParsedTimeUnit(int Discriminator, ParquetTimeUnit? Unit);
+    private readonly record struct ResolvedAnnotation(
+        ParquetAnnotationStatus Status,
+        ParquetSemanticAnnotation? Semantic);
     private readonly record struct SchemaFrame(int ElementOrdinal, int RemainingChildren);
 }

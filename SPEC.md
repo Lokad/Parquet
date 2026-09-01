@@ -238,7 +238,15 @@ present, a logical interpretation is supported only when they are semantically
 consistent; otherwise the descriptor MUST report the conflict while
 structurally valid physical decoding remains available.
 
-Core 0.1 returns physical values. It does not promise a separate public
+For an annotation supported by Core 0.1, immutable metadata MUST expose a
+normalized semantic annotation only when the annotation is valid for the
+physical storage type. An invalid physical pairing MUST be reported without
+blocking physical decoding. Unsupported and unknown future annotations remain
+available through their raw metadata and do not acquire a guessed semantic
+interpretation.
+
+Core 0.1 returns physical values. The normalized semantic annotation describes
+those values but does not convert them or promise a separate public
 logical-conversion layer. In particular:
 
 - `STRING` and `ENUM` remain byte-array values with their annotation;

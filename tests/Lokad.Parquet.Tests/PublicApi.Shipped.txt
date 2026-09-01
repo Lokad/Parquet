@@ -257,7 +257,33 @@ type Lokad.Parquet.ParquetSchemaElement
   property System.Nullable<Lokad.Parquet.ParquetRepetition> Repetition { get; }
   property System.Nullable<System.Int32> RepetitionCode { get; }
   property System.Nullable<System.Int32> Scale { get; }
+  property Lokad.Parquet.ParquetSemanticAnnotation SemanticAnnotation { get; }
   property System.Nullable<System.Int32> TypeLength { get; }
+type Lokad.Parquet.ParquetSemanticAnnotation
+  property System.Nullable<System.Int32> IntegerBitWidth { get; }
+  property System.Nullable<System.Boolean> IsAdjustedToUtc { get; }
+  property System.Nullable<System.Boolean> IsIntegerSigned { get; }
+  property Lokad.Parquet.ParquetSemanticTypeKind Kind { get; }
+  property System.Nullable<System.Int32> Precision { get; }
+  property System.Nullable<System.Int32> Scale { get; }
+  property System.Nullable<Lokad.Parquet.ParquetTimeUnit> TimeUnit { get; }
+type Lokad.Parquet.ParquetSemanticTypeKind
+  enum String = 0
+  enum Map = 1
+  enum MapKeyValue = 2
+  enum List = 3
+  enum Enum = 4
+  enum Decimal = 5
+  enum Date = 6
+  enum Time = 7
+  enum Timestamp = 8
+  enum Integer = 9
+  enum Unknown = 10
+  enum Json = 11
+  enum Bson = 12
+  enum Uuid = 13
+  enum Float16 = 14
+  enum Interval = 15
 type Lokad.Parquet.ParquetSourceOwnership
   enum Caller = 0
   enum ParquetFile = 1
