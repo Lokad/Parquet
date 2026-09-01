@@ -1,0 +1,18 @@
+$ErrorActionPreference = "Stop"
+$project = Join-Path $PSScriptRoot "src\Lokad.Parquet\Lokad.Parquet.csproj"
+
+Push-Location $PSScriptRoot
+try {
+    & dotnet restore $project --tl:off -v minimal
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+
+    # The package project mirrors Lokad.Utf8Regex: a Release build creates the
+    # package through GeneratePackageOnBuild.
+    & dotnet build $project --configuration Release --tl:off --nologo -v minimal --no-restore
+    exit $LASTEXITCODE
+}
+finally {
+    Pop-Location
+}

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "id": "generated-minimal-parquet-family",
+      "origin": "Original test generator in this repository",
+      "license": "MIT",
+      "generator": "tests/Lokad.Parquet.Tests/ParquetFixtureBuilder.cs",
+      "generatorSha256": "0e528e9ee961066517946a95379d7856f614bc344989cc5f1b6e31b7c41e254e",
+      "generation": "Fixtures are generated in memory by individual tests; no binary input is committed.",
+      "committedBinary": false
+    },
+    {
+      "id": "apache-rle-dict-snappy-checksum",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/rle-dict-snappy-checksum.parquet",
+      "generatorSha256": "bb9de5fd817da4c403992ce2ee2c9dc93d4444f936e1a64722c65dd98d208578",
+      "generation": "Unmodified copy of data/rle-dict-snappy-checksum.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    },
+    {
+      "id": "apache-plain-dict-uncompressed-checksum",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/plain-dict-uncompressed-checksum.parquet",
+      "generatorSha256": "4c8abc17ad0354dc540b0ad2c519d998ffb4a1a5997471b4313864852d82dccc",
+      "generation": "Unmodified copy of data/plain-dict-uncompressed-checksum.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    },
+    {
+      "id": "apache-optional-binary",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/binary.parquet",
+      "generatorSha256": "b48b756e48a13f58e1234a8588c507a06a7a9bcdfb63994c86fe19d22864be8b",
+      "generation": "Unmodified copy of data/binary.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    },
+    {
+      "id": "apache-alltypes-plain",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/alltypes_plain.parquet",
+      "generatorSha256": "12a618d20a59ee0967fef45e7ec1ff6d451e724838edc1bbeac780ca15e8fcc4",
+      "generation": "Unmodified copy of data/alltypes_plain.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    },
+    {
+      "id": "apache-alltypes-dictionary",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/alltypes_dictionary.parquet",
+      "generatorSha256": "7b58c33503858c533e1521b3022b85a0de23e5a144420d7a3c1c426929e5f6fb",
+      "generation": "Unmodified copy of data/alltypes_dictionary.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    },
+    {
+      "id": "apache-fixed-length-byte-array",
+      "origin": "apache/parquet-testing at 09f3cdbde45302f0f0c689c950e465e98a9df960",
+      "license": "Apache-2.0; tests/fixtures/apache-parquet-testing/LICENSE.txt",
+      "generator": "tests/fixtures/apache-parquet-testing/fixed_length_byte_array.parquet",
+      "generatorSha256": "a5a24cfabf2d8882db861502a0fe1e4539a80772f472f014637a0d01519836a7",
+      "generation": "Unmodified copy of data/fixed_length_byte_array.parquet from the pinned Apache repository revision.",
+      "committedBinary": true
+    }
+  ]
+}

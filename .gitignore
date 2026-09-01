@@ -1,0 +1,49 @@
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+
+# Local planning and reference sources
+external/
+PLAN.md
+
+# Tests and benchmarks
+[Tt]est[Rr]esult*/
+coverage*.json
+coverage*.xml
+coverage*.info
+BenchmarkDotNet.Artifacts/
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+*.nuget.props
+*.nuget.targets
+
+# IDEs and user settings
+.vs/
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# OS and tooling
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.binlog
+*.log
+*.tmp
+*.swp
+*~
+.env
