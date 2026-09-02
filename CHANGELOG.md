@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 - 2026-09-02
+
 ### Added
 
 - Memory-safe managed `.NET 10` reader with bounded path, stream, and custom
