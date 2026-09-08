@@ -183,25 +183,62 @@ public sealed class ParquetFile : IAsyncDisposable
 
         void CompleteSynchronousDisposal(CancellationTokenSource? disposalCancellation)
         {
-            Task completedTask;
+            Exception? failure = null;
             try
             {
                 _pagePayloadCache.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
                 DisposeColumnValueCaches();
-                if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
+            {
+                try
                 {
                     var sourceDisposal = _source.DisposeAsync();
                     if (!sourceDisposal.IsCompletedSuccessfully)
                         throw new InvalidOperationException("A built-in source did not dispose synchronously.");
                     sourceDisposal.GetAwaiter().GetResult();
                 }
-                disposalCancellation?.Dispose();
-                completedTask = Task.CompletedTask;
+                catch (Exception exception) when (failure is null)
+                {
+                    failure = exception;
+                }
+                catch (Exception)
+                {
+                }
             }
-            catch (Exception exception)
+
+            try
             {
-                completedTask = Task.FromException(exception);
+                disposalCancellation?.Dispose();
             }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            Task completedTask = failure is null ? Task.CompletedTask : Task.FromException(failure);
 
             lock (_lifetimeLock)
             {
@@ -215,30 +252,105 @@ public sealed class ParquetFile : IAsyncDisposable
             TaskCompletionSource completion,
             CancellationTokenSource? disposalCancellation)
         {
+            Exception? failure = null;
             try
             {
                 disposalCancellation?.Cancel();
-                await operationsDrained.ConfigureAwait(false);
-
-                Action? terminateScan;
-                lock (_lifetimeLock)
-                {
-                    terminateScan = _activeScan;
-                    _activeScan = null;
-                }
-                terminateScan?.Invoke();
-
-                _pagePayloadCache.Dispose();
-                DisposeColumnValueCaches();
-                if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
-                    await _source.DisposeAsync().ConfigureAwait(false);
-                disposalCancellation?.Dispose();
-                completion.TrySetResult();
             }
-            catch (Exception exception)
+            catch (Exception exception) when (failure is null)
             {
-                completion.TrySetException(exception);
+                failure = exception;
             }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
+                await operationsDrained.ConfigureAwait(false);
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            Action? terminateScan;
+            lock (_lifetimeLock)
+            {
+                terminateScan = _activeScan;
+                _activeScan = null;
+            }
+
+            try
+            {
+                terminateScan?.Invoke();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
+                _pagePayloadCache.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
+                DisposeColumnValueCaches();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
+            {
+                try
+                {
+                    await _source.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception exception) when (failure is null)
+                {
+                    failure = exception;
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            try
+            {
+                disposalCancellation?.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+
+            if (failure is null)
+                completion.TrySetResult();
+            else
+                completion.TrySetException(failure);
         }
 
         Task? task = null;
@@ -304,6 +416,39 @@ public sealed class ParquetFile : IAsyncDisposable
         return cache.Rent(length);
     }
 
+    // Releases idle arrays retained by file-owned caches for columns outside the
+    // new projection, before any payload I/O. Arrays checked out to live owners
+    // or yielded batches are never touched. The linear keep-set scan runs once
+    // per scan start; wide projections use a sorted copy for binary search.
+    internal void EvictIdleColumnCaches(ReadOnlySpan<int> keepOrdinals)
+    {
+        int[]? sorted = null;
+        if (keepOrdinals.Length > 16)
+        {
+            sorted = keepOrdinals.ToArray();
+            Array.Sort(sorted);
+        }
+        for (var ordinal = 0; ordinal < _columnValueCaches.Length; ordinal++)
+        {
+            if (IsKept(keepOrdinals, sorted, ordinal))
+                continue;
+            if (_columnValueCaches[ordinal] is IEvictableArrayCache cache)
+                cache.EvictIdle();
+        }
+
+        static bool IsKept(ReadOnlySpan<int> keepOrdinals, int[]? sorted, int ordinal)
+        {
+            if (sorted is not null)
+                return Array.BinarySearch(sorted, ordinal) >= 0;
+            foreach (var keep in keepOrdinals)
+            {
+                if (keep == ordinal)
+                    return true;
+            }
+            return false;
+        }
+    }
+
     internal CancellationToken DisposalToken
     {
         get
@@ -318,8 +463,24 @@ public sealed class ParquetFile : IAsyncDisposable
 
     private void DisposeColumnValueCaches()
     {
+        Exception? failure = null;
         foreach (var cache in _columnValueCaches)
-            cache?.Dispose();
+        {
+            try
+            {
+                cache?.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     internal bool IsDisposed
@@ -446,10 +607,22 @@ public sealed class ParquetFile : IAsyncDisposable
             }
             catch (EndOfStreamException exception)
             {
-                throw new ParquetFormatException("The immutable input ended during an exact read.", exception, offset);
+                throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
             }
             if (read.IsCompletedSuccessfully)
+            {
+                try
+                {
+                    read.GetAwaiter().GetResult();
+                }
+                catch (EndOfStreamException exception)
+                {
+                    throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
+                }
+
                 return ValueTask.CompletedTask;
+            }
+
             return AwaitReadAsync(read);
 
             async ValueTask AwaitReadAsync(ValueTask pendingRead)
@@ -460,7 +633,7 @@ public sealed class ParquetFile : IAsyncDisposable
                 }
                 catch (EndOfStreamException exception)
                 {
-                    throw new ParquetFormatException("The immutable input ended during an exact read.", exception, offset);
+                    throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
                 }
             }
         }
@@ -472,19 +645,19 @@ public sealed class ParquetFile : IAsyncDisposable
         await ReadInputExactlyAsync(source.Length - tail.Count, tail).ConfigureAwait(false);
 
         if (!leading.AsSpan().SequenceEqual(Magic))
-            throw new ParquetFormatException("The leading Parquet magic is invalid.", byteOffset: 0);
+            throw new ParquetFormatException("The leading Parquet magic is invalid.", ParquetErrorLocation.AtOffset(0));
         if (tail.AsSpan()[4..].SequenceEqual(EncryptedFooterMagic))
-            throw new ParquetUnsupportedFeatureException("Encrypted Parquet footers are unsupported.", source.Length - 4);
+            throw new ParquetUnsupportedFeatureException("Encrypted Parquet footers are unsupported.", ParquetErrorLocation.AtOffset(source.Length - 4));
         if (!tail.AsSpan()[4..].SequenceEqual(Magic))
-            throw new ParquetFormatException("The trailing Parquet magic is invalid.", byteOffset: source.Length - 4);
+            throw new ParquetFormatException("The trailing Parquet magic is invalid.", ParquetErrorLocation.AtOffset(source.Length - 4));
 
         var footerLength = BinaryPrimitives.ReadInt32LittleEndian(tail.AsSpan());
         if (footerLength < 0)
-            throw new ParquetFormatException("The footer length is negative.", byteOffset: source.Length - 8);
+            throw new ParquetFormatException("The footer length is negative.", ParquetErrorLocation.AtOffset(source.Length - 8));
         if (footerLength > options.MaximumFooterBytes)
-            throw new ParquetLimitExceededException("The footer exceeds the configured byte limit.", source.Length - 8);
+            throw new ParquetLimitExceededException("The footer exceeds the configured byte limit.", ParquetErrorLocation.AtOffset(source.Length - 8));
         if (footerLength > source.Length - 12)
-            throw new ParquetFormatException("The footer range lies outside the input.", byteOffset: source.Length - 8);
+            throw new ParquetFormatException("The footer range lies outside the input.", ParquetErrorLocation.AtOffset(source.Length - 8));
 
         var footerOffset = source.Length - 8 - footerLength;
         var footer = ParquetArrayPool.Rent<byte>(Math.Max(footerLength, 1));
@@ -492,11 +665,13 @@ public sealed class ParquetFile : IAsyncDisposable
         {
             var footerSegment = new ArraySegment<byte>(footer, 0, footerLength);
             await ReadInputExactlyAsync(footerOffset, footerSegment).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             var metadata = ParquetFooterParser.Parse(
                 footerSegment.AsSpan(),
                 footerOffset,
                 source.Length,
-                options);
+                options,
+                cancellationToken);
             return new ParquetFile(source, sourceOwnership, options, metadata);
         }
         finally

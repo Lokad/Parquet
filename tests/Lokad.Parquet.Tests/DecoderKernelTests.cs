@@ -151,8 +151,9 @@ public sealed class DecoderKernelTests
     }
 
     [Fact]
-    public void HybridDecoderPermitsOnlyFinalBitPackedPadding()
+    public void HybridDecoderPermitsOnlyMinimalFinalBitPackedPadding()
     {
+        // Ordinary final-group padding: 3 values in one group of eight (five padding values).
         var source = new byte[] { 3, 0b0011_1001 };
         var values = new int[3];
 
@@ -160,7 +161,18 @@ public sealed class DecoderKernelTests
         Assert.Equal([1, 0, 0], values);
         Assert.Throws<ParquetFormatException>(() =>
             DecodeHybrid([8, 1], 1, new int[3], CancellationToken.None));
-        Assert.Equal(3, DecodeHybrid([5, 0, 0], 1, new int[1], CancellationToken.None));
+        // Wider allowance is rejected: two groups (sixteen values) for one destination slot.
+        Assert.Throws<ParquetFormatException>(() =>
+            DecodeHybrid([5, 0, 0], 1, new int[1], CancellationToken.None));
+        // Boundaries: eight values need exactly one group; nine values need exactly two groups.
+        Assert.Equal(2, DecodeHybrid([3, 0xFF], 1, new int[8], CancellationToken.None));
+        Assert.Equal(3, DecodeHybrid([5, 0xFF, 0xFF], 1, new int[9], CancellationToken.None));
+        Assert.Throws<ParquetFormatException>(() =>
+            DecodeHybrid([7, 0, 0, 0], 1, new int[9], CancellationToken.None));
+        // Bitmap lane mirrors the oracle: minimal final padding passes, wider fails.
+        Assert.Equal(2, DecodeHybridBitmap([3, 0b0011_1001], 3, new byte[1], CancellationToken.None, out _));
+        Assert.Throws<ParquetFormatException>(() =>
+            DecodeHybridBitmap([5, 0, 0], 1, new byte[1], CancellationToken.None, out _));
     }
 
     [Theory]

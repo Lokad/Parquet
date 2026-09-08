@@ -308,7 +308,7 @@ decoded dictionary count.
 |---|---|---|
 | `PLAIN` | All Core 0.1 physical types | Core 0.1 |
 | `PLAIN_DICTIONARY` | Legacy dictionary marker | Core 0.1 |
-| `RLE` / bit-packing hybrid | Definition levels, booleans, dictionary indices | Core 0.1 |
+| `RLE` / bit-packing hybrid | Definition levels and dictionary indices (boolean values are `PLAIN` only in Core 0.1) | Core 0.1 |
 | `RLE_DICTIONARY` | Dictionary indices | Core 0.1 |
 | `DELTA_BINARY_PACKED` | `INT32`, `INT64` | Expansion |
 | `DELTA_LENGTH_BYTE_ARRAY` | `BYTE_ARRAY` | Expansion |
@@ -333,10 +333,12 @@ produces exactly the expected number of physical values. It MUST reject:
 - truncated varints, runs, mini-blocks, lengths, or values;
 - zero or impossible block sizes;
 - integer overflow while accumulating deltas or lengths;
-- runs that exceed the remaining logical value count;
+- RLE runs that exceed the remaining logical value count; bit-packed runs that exceed it except for the final run with the minimal groups covering the remainder (at most seven padding values);
 - out-of-range dictionary indices;
 - binary lengths that exceed the page, batch, or configured value limit; and
 - trailing state that contradicts the page header.
+
+A final bit-packed run is padded to a multiple of eight values as defined by parquet-format; its padding values MUST be ignored. Any wider overlong run, any overlong intermediate run, and any final run that is not minimal or does not consume the payload exactly MUST be rejected.
 
 Definition levels MUST produce exactly the page's logical row count. The
 number of physical values MUST equal the number of defined values.
@@ -493,8 +495,7 @@ The scan contract is:
 
 The scanner MUST preserve source row order. All columns in one batch MUST
 describe the same global row interval and row count. A batch MUST NOT cross a
-row-group boundary. Page boundaries alone SHOULD NOT force a shorter batch,
-but row-group ends, the target row count, and byte or memory limits MAY.
+row-group boundary. In Core 0.1 a batch holds rows from at most one page per column; page boundaries, row-group ends, the target row count, and byte or memory limits MAY force a shorter batch. Page-boundary coalescing is Expansion.
 No empty batch may be yielded.
 
 Dictionary-encoded input is expanded into the ordinary physical batch view in
@@ -555,7 +556,9 @@ The public batch surface MUST avoid:
 
 An open file MAY retain bounded reusable pooled storage between its sequential
 scans. Retained storage remains charged to the file memory budget and MUST be
-cleared when it is returned to the shared pool.
+cleared when it is returned to the shared pool. Before reading payloads, a new
+scan MAY release idle retained storage for columns outside its projection to
+fit the shared budget.
 
 ### 8.4 Lifetime
 

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Reflection.Emit;
@@ -36,15 +37,24 @@ public sealed class SafetyPolicyTests
     [Fact]
     public void ShippedSourcesContainNoForbiddenMemoryAccessApi()
     {
+        // Textual guardrail only: comments and string literals are stripped so prose
+        // mentioning an API cannot fail the build, and generated obj/bin outputs are
+        // excluded. The IL assembly check below remains the authoritative
+        // memory-safety gate.
         var sourceRoot = Path.Combine(RepositoryTestPaths.Root, "src", "Lokad.Parquet");
         var violations = new List<string>();
+        var scanned = new List<string>();
         foreach (var path in Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories))
         {
-            var text = File.ReadAllText(path);
+            if (IsGeneratedOutputPath(path))
+                continue;
+            scanned.Add(path);
+            var text = StripCommentsAndStrings(File.ReadAllText(path));
             foreach (Match match in ForbiddenSourceTokens.Matches(text))
                 violations.Add($"{Path.GetRelativePath(RepositoryTestPaths.Root, path)}: {match.Value}");
         }
 
+        Assert.DoesNotContain(scanned, static path => IsGeneratedOutputPath(path));
         Assert.True(violations.Count == 0, "Forbidden shipped source tokens:\n" + string.Join('\n', violations));
     }
 
@@ -163,16 +173,18 @@ public sealed class SafetyPolicyTests
                 Path.Combine(RepositoryTestPaths.Root, sourceFolder),
                 "*.cs",
                 SearchOption.AllDirectories))
-            .Where(static path =>
-                !path.Split(Path.DirectorySeparatorChar).Contains("obj", StringComparer.OrdinalIgnoreCase))
+            .Where(static path => !IsGeneratedOutputPath(path))
             .Select(static path => (Path: path, Source: File.ReadAllText(path)))
             .ToArray();
         foreach (var (path, source) in sourceFiles)
         {
+            // Both textual checks inspect code only; prose in comments and string
+            // literals cannot violate them.
+            var code = StripCommentsAndStrings(source);
             var friendAssemblyToken = "Internals" + "VisibleTo";
-            if (source.Contains(friendAssemblyToken, StringComparison.Ordinal))
+            if (code.Contains(friendAssemblyToken, StringComparison.Ordinal))
                 violations.Add("friend assembly declaration in " + Path.GetRelativePath(RepositoryTestPaths.Root, path));
-            foreach (Match match in NullForgivingTokens.Matches(source))
+            foreach (Match match in NullForgivingTokens.Matches(code))
                 violations.Add($"null-forgiving token in {Path.GetRelativePath(RepositoryTestPaths.Root, path)}: {match.Value}");
         }
 
@@ -186,6 +198,30 @@ public sealed class SafetyPolicyTests
                 "paired reservation-accounting component operation",
             ["Lokad.Parquet.Internal.PooledArrayOwnerCache`1.Return"] =
                 "owner-to-cache transfer operation across the ownership boundary",
+            ["Lokad.Parquet.Internal.PooledArrayOwnerCache`1.EvictIdle"] =
+                "idle-storage eviction across the file/cache ownership boundary",
+            ["Lokad.Parquet.Internal.PagePayloadLease.SetOwned"] =
+                "owned payload transfer into the page lease across the pool/page ownership boundary",
+            ["Lokad.Parquet.Internal.PagePayloadLease.SetBorrowed"] =
+                "borrowed payload transfer into the page lease across the file/page ownership boundary",
+            ["Lokad.Parquet.Internal.PageValidityState.SetAllValid"] =
+                "implicit all-valid transition for required and dropped-bitmap pages",
+            ["Lokad.Parquet.Internal.PageValidityState.Dispose"] =
+                "page-validity ownership release across the page/batch ownership boundary",
+            ["Lokad.Parquet.Internal.ScanPageReader.ComputeCrc32"] =
+                "page-integrity CRC across the I/O/decode ownership boundary",
+            ["Lokad.Parquet.Internal.ScanPageReader.TryGetSourceMemory"] =
+                "retained-memory borrow across the source/page ownership boundary",
+            ["Lokad.Parquet.Internal.ScanPageReader.ReadPageHeaderAsync"] =
+                "cohesive bounded page-header I/O entry point",
+            ["Lokad.Parquet.Internal.ScanPageReader.ReadExactlyAsync"] =
+                "exact source-read with truncation translation across the source/scan boundary",
+            ["Lokad.Parquet.Benchmarks.BenchmarkEnvironment.EnsureNativeWorkspace"] =
+                "benchmark workspace qualification entry point",
+            ["Lokad.Parquet.ParquetErrorLocation.AtRowGroup"] =
+                "row-group error scope with a single row-group-level use",
+            ["Lokad.Parquet.ParquetErrorLocation.AtRowGroupColumnPage"] =
+                "offset-less page error scope with a single batch-limit use",
             ["Lokad.Parquet.Internal.RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap"] =
                 "independently tested optimized decoder entry point",
             ["Lokad.Parquet.Internal.ThriftCompactReader.ReadSByte"] =
@@ -194,6 +230,8 @@ public sealed class SafetyPolicyTests
                 "compact-wire reader primitive used by the schema parser",
             ["Lokad.Parquet.Tests.DecoderKernelTests.GetMethod"] =
                 "reflection bridge for testing internal decoders without a friend assembly",
+            ["Lokad.Parquet.Tests.ScanCancellationTests.GetCrc32Method"] =
+                "reflection bridge for testing the internal CRC helper without a friend assembly",
             ["Lokad.Parquet.Tests.OwnershipAndMutationTests+ConcurrentRecordingSource.ResetPeak"] =
                 "explicit measurement boundary on a sequential-I/O test double",
             ["Lokad.Parquet.Benchmarks.PairedParityRunner.RunAsync"] =
@@ -350,6 +388,150 @@ public sealed class SafetyPolicyTests
             "Lokad.Parquet.csproj"));
 
         Assert.DoesNotContain("PackageReference", project, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ForbiddenTokenMatcherIgnoresCommentsAndStrings()
+    {
+        // Without stripping, each raw sample matches: the stripped form must not.
+        Assert.NotEmpty(ForbiddenSourceTokens.Matches("// do not use unsafe code here"));
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("// do not use unsafe code here\nvar x = 1;")));
+        Assert.NotEmpty(ForbiddenSourceTokens.Matches("/* Unsafe, fixed (, Marshal */"));
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("/* Unsafe, fixed (, Marshal */\nvar x = 1;")));
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var s = \"MemoryMarshal and GCHandle\";\nvar x = 1;")));
+        // Negative controls: real code still matches after stripping.
+        Assert.NotEmpty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("fixed (byte* p = buffer) { }")));
+        Assert.NotEmpty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var h = GCHandle.Alloc(x);")));
+    }
+
+    [Fact]
+    public void NullForgivingMatcherIgnoresCommentsAndStrings()
+    {
+        Assert.NotEmpty(NullForgivingTokens.Matches("// retry!\n"));
+        Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("// retry! do not fail!\nvar x = 1;")));
+        Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = \"a!b\";\nvar x = 1;")));
+        Assert.NotEmpty(NullForgivingTokens.Matches(StripCommentsAndStrings("var x = value!;")));
+    }
+
+    [Fact]
+    public void GeneratedOutputExclusionRecognizesObjAndBin()
+    {
+        Assert.True(IsGeneratedOutputPath(Path.Combine("src", "Lokad.Parquet", "obj", "X.cs")));
+        Assert.True(IsGeneratedOutputPath(Path.Combine("src", "Lokad.Parquet", "bin", "X.cs")));
+        Assert.False(IsGeneratedOutputPath(Path.Combine("src", "Lokad.Parquet", "Internal", "X.cs")));
+    }
+
+    private static bool IsGeneratedOutputPath(string path) =>
+        path.Split(Path.DirectorySeparatorChar).Any(static segment =>
+            segment.Equals("obj", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("bin", StringComparison.OrdinalIgnoreCase));
+
+    // Removes line comments, block comments, string literals (regular, verbatim,
+    // interpolated, and raw), and character literals so textual guardrails only
+    // inspect code. It assumes the input parses.
+    private static string StripCommentsAndStrings(string source)
+    {
+        var builder = new StringBuilder(source.Length);
+        var index = 0;
+        while (index < source.Length)
+        {
+            var current = source[index];
+            if (current == '/' && index + 1 < source.Length && source[index + 1] == '/')
+            {
+                var newline = source.IndexOf('\n', index + 2);
+                if (newline < 0)
+                    break;
+                builder.Append('\n');
+                index = newline + 1;
+            }
+            else if (current == '/' && index + 1 < source.Length && source[index + 1] == '*')
+            {
+                var end = source.IndexOf("*/", index + 2, StringComparison.Ordinal);
+                index = end < 0 ? source.Length : end + 2;
+            }
+            else if (current == '"')
+            {
+                index = SkipString(source, index);
+            }
+            else if (current == '\'')
+            {
+                index = SkipCharacter(source, index);
+            }
+            else
+            {
+                builder.Append(current);
+                index++;
+            }
+        }
+        return builder.ToString();
+
+        static int SkipString(string text, int quoteIndex)
+        {
+            var run = 0;
+            while (quoteIndex + run < text.Length && text[quoteIndex + run] == '"')
+                run++;
+            if (run >= 3)
+            {
+                var position = quoteIndex + run;
+                while (position < text.Length)
+                {
+                    if (text[position] == '"')
+                    {
+                        var close = 0;
+                        while (position + close < text.Length && text[position + close] == '"')
+                            close++;
+                        if (close == run)
+                            return position + run;
+                        position++;
+                    }
+                    else
+                    {
+                        position++;
+                    }
+                }
+                return text.Length;
+            }
+            var verbatim = quoteIndex > 0 && text[quoteIndex - 1] == '@';
+            var offset = quoteIndex + 1;
+            while (offset < text.Length)
+            {
+                if (text[offset] == '"')
+                {
+                    if (offset + 1 < text.Length && text[offset + 1] == '"')
+                    {
+                        offset += 2;
+                        continue;
+                    }
+                    return offset + 1;
+                }
+                if (!verbatim && text[offset] == '\\')
+                {
+                    offset += 2;
+                    continue;
+                }
+                offset++;
+            }
+            return offset;
+        }
+
+        static int SkipCharacter(string text, int quoteIndex)
+        {
+            var offset = quoteIndex + 1;
+            while (offset < text.Length)
+            {
+                if (text[offset] == '\\')
+                {
+                    offset += 2;
+                    continue;
+                }
+                if (text[offset] == '\'')
+                    return offset + 1;
+                if (text[offset] == '\n')
+                    return offset;
+                offset++;
+            }
+            return offset;
+        }
     }
 
     private const BindingFlags AllDeclaredMembers = BindingFlags.Public | BindingFlags.NonPublic |

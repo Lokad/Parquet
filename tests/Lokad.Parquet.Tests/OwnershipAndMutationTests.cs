@@ -435,6 +435,7 @@ public sealed class OwnershipAndMutationTests
 
         for (var iteration = 0; iteration < 256; iteration++)
         {
+            using var tracker = new PoolTracker();
             var mutation = baseline.ToArray();
             var changes = random.Next(1, 4);
             for (var change = 0; change < changes; change++)
@@ -530,6 +531,7 @@ public sealed class OwnershipAndMutationTests
         {
             for (var iteration = 0; iteration < 96; iteration++)
             {
+                using var tracker = new PoolTracker();
                 var mutation = baselines[baselineOrdinal].ToArray();
                 var changes = random.Next(1, 4);
                 for (var change = 0; change < changes; change++)

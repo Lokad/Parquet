@@ -38,24 +38,26 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 throw new ArgumentException("A projected column descriptor belongs to another file.", "options");
             if (!column.IsReadable)
                 throw new ParquetUnsupportedFeatureException(
-                    column.UnsupportedReason ?? "The projected column is unsupported.",
-                    columnOrdinal: column.Ordinal);
-            if (_options.TargetBatchRowCount <= 0 || _options.TargetBatchRowCount > _file.Options.MaximumRowsPerBatch)
-                throw new ArgumentOutOfRangeException("options", "The target batch size is outside the reader limits.");
+                    column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(column.Ordinal));
+            ValidateTargetBatchRowCount(_file, _options);
             return new ScanPlan(column, BuildRowGroups(_file, _options));
         }
 
         var plan = BuildPlan();
+        _file.EvictIdleColumnCaches(new int[] { plan.Column.Ordinal });
         return new Enumerator(new ColumnCursor(
-                _file,
-                _options,
+                new ScanCursorServices(_file, _options, _file.ScanMemoryBudget, _file.PagePayloadCache),
                 plan.Column,
                 plan.RowGroups,
                 _cancellationToken,
                 cancellationToken,
-                _file.ScanMemoryBudget,
-                _file.PagePayloadCache,
                 ScanLifetimeOwnership.Enumerator));
+    }
+
+    internal static void ValidateTargetBatchRowCount(ParquetFile file, ParquetScanOptions options)
+    {
+        if (options.TargetBatchRowCount <= 0 || options.TargetBatchRowCount > file.Options.MaximumRowsPerBatch)
+            throw new ArgumentOutOfRangeException("options", "The target batch size is outside the reader limits.");
     }
 
     internal static ScanRowGroup[] BuildRowGroups(ParquetFile file, ParquetScanOptions options)
@@ -63,6 +65,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         HashSet<int>? selection = null;
         if (options.RowGroups is not null)
         {
+            if (options.RowGroups.Count == 0)
+                return [];
             selection = [];
             foreach (var rowGroup in options.RowGroups)
             {
@@ -79,7 +83,22 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         var range = options.RowRange ?? new ParquetRowRange(0, file.Metadata.RowCount);
         if (range.End > file.Metadata.RowCount)
             throw new ArgumentOutOfRangeException(nameof(options), "The row range lies outside the file.");
-        var plans = new ScanRowGroup[file.Metadata.RowGroups.Count];
+        if (range.Count == 0)
+            return [];
+        // Size the plan to the selection with two cheap metadata passes and no payload I/O.
+        var matchCount = 0;
+        foreach (var rowGroup in file.Metadata.RowGroups)
+        {
+            if (selection is not null && !selection.Contains(rowGroup.Ordinal))
+                continue;
+            var start = Math.Max(range.Start, rowGroup.RowOffset);
+            var end = Math.Min(range.End, checked(rowGroup.RowOffset + rowGroup.RowCount));
+            if (start < end)
+                matchCount++;
+        }
+        if (matchCount == 0)
+            return [];
+        var plans = new ScanRowGroup[matchCount];
         var planCount = 0;
         foreach (var rowGroup in file.Metadata.RowGroups)
         {
@@ -90,8 +109,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             if (start < end)
                 plans[planCount++] = new ScanRowGroup(rowGroup, start - rowGroup.RowOffset, end - start);
         }
-        if (planCount != plans.Length)
-            Array.Resize(ref plans, planCount);
         return plans;
     }
 
@@ -126,10 +143,15 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             return true;
         }
 
-        public ValueTask DisposeAsync() => cursor.DisposeAsync();
+        public ValueTask DisposeAsync()
+        {
+            cursor.Dispose();
+            return ValueTask.CompletedTask;
+        }
     }
 
-    internal sealed class ColumnCursor : IAsyncEnumerator<DecodedColumnBatch>
+    // Concrete internal cursor: disposal is synchronous, so coordinators release it directly without blocking fallback waits.
+    internal sealed class ColumnCursor
     {
         private readonly ParquetFile _file;
         private readonly ParquetScanOptions _options;
@@ -148,12 +170,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         private long _chunkEnd;
         private long _rowsSeenInGroup;
         private int _pageOrdinal;
-        // A page payload is either pool-owned or borrowed from the file's retained immutable memory, never both.
-        private PooledArrayOwner<byte>? _pagePayload;
-        private ReadOnlyMemory<byte> _pageBorrowedPayload;
+        // Fixed-width raw payload lease: an owned pool buffer or borrowed immutable memory. Kind distinguishes empty borrowed from none.
+        private PagePayloadLease _pagePayloadLease;
         private IDisposable? _pageRowValuesOwner;
         private Array? _pageRowValues;
-        private PooledArrayOwner<byte>? _pageValidity;
+        // Explicit validity: None means no page loaded, AllValid means implicitly all-valid, Explicit holds the bitmap.
+        private PageValidityState _pageValidity;
         private PooledArrayOwner<int>? _pageBinaryOffsets;
         private PooledArrayOwner<byte>? _pageBinaryPayload;
         private PooledArrayOwner<byte>? _pageFixedPayload;
@@ -181,14 +203,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             where T : unmanaged;
 
         public ColumnCursor(
-            ParquetFile file,
-            ParquetScanOptions options,
+            ScanCursorServices services,
             ParquetColumn column,
             ScanRowGroup[] rowGroups,
             CancellationToken scanCancellation,
             CancellationToken enumerationCancellation,
-            ParquetScanMemoryBudget memoryBudget,
-            PooledArrayOwnerCache<byte> pagePayloadCache,
             ScanLifetimeOwnership lifetimeOwnership)
         {
             void OnFileDisposed()
@@ -201,10 +220,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 _userLinkedCancellation?.Dispose();
             }
 
-            _file = file;
-            _options = options;
-            _memoryBudget = memoryBudget;
-            _pagePayloadCache = pagePayloadCache;
+            _file = services.File;
+            _options = services.Options;
+            _memoryBudget = services.MemoryBudget;
+            _pagePayloadCache = services.PagePayloadCache;
             _lifetimeOwnership = lifetimeOwnership;
             _column = column;
             _rowGroups = rowGroups;
@@ -228,19 +247,19 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 {
                     _linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                         userCancellation,
-                        file.DisposalToken);
+                        _file.DisposalToken);
                     _cancellationToken = _linkedCancellation.Token;
                 }
                 else
                 {
                     _linkedCancellation = null;
-                    _cancellationToken = file.DisposalToken;
+                    _cancellationToken = _file.DisposalToken;
                 }
             }
             try
             {
                 if (lifetimeOwnership == ScanLifetimeOwnership.Enumerator)
-                    file.RegisterScan(OnFileDisposed);
+                    _file.RegisterScan(OnFileDisposed);
             }
             catch
             {
@@ -269,7 +288,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 _cancellationToken.ThrowIfCancellationRequested();
                 while (true)
                 {
-                    if ((_pagePayload is not null || !_pageBorrowedPayload.IsEmpty || _pageRowValuesOwner is not null ||
+                    if ((_pagePayloadLease.HasPayload || _pageRowValuesOwner is not null ||
                         _pageBinaryOffsets is not null || _pageFixedPayload is not null) &&
                         TryCreateBatchFromPage(out var batch))
                     {
@@ -281,12 +300,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     if (_planIndex < 0 || _rowsSeenInGroup >= _plan.RowGroup.RowCount)
                     {
                         if (_planIndex >= 0 && _pageOffset != _chunkEnd)
-                            throw new ParquetFormatException(
-                                "A column chunk contains trailing pages or bytes after its declared rows.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
+                            throw new ParquetFormatException("A column chunk contains trailing pages or bytes after its declared rows.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         if (!MoveToNextRowGroup())
                         {
                             Terminate();
@@ -324,19 +339,13 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     var chunk = _plan.RowGroup.Columns[_column.Ordinal];
                     if (chunk.ExternalFilePath is not null)
                         throw new ParquetUnsupportedFeatureException(
-                            "External column chunks are unsupported.",
-                            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                            columnOrdinal: _column.Ordinal);
+                            "External column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(_plan.RowGroup.Ordinal, _column.Ordinal));
                     if (chunk.HasCryptoMetadata || chunk.HasEncryptedMetadata || _file.Metadata.IsEncrypted)
                         throw new ParquetUnsupportedFeatureException(
-                            "Encrypted column chunks are unsupported.",
-                            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                            columnOrdinal: _column.Ordinal);
+                            "Encrypted column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(_plan.RowGroup.Ordinal, _column.Ordinal));
                     if (chunk.CompressionCodec is not ParquetCompressionCodec.Uncompressed and not ParquetCompressionCodec.Snappy)
                         throw new ParquetUnsupportedFeatureException(
-                            "This scan path currently requires an uncompressed or Snappy column chunk.",
-                            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                            columnOrdinal: _column.Ordinal);
+                            "This scan path currently requires an uncompressed or Snappy column chunk.", ParquetErrorLocation.AtRowGroupColumn(_plan.RowGroup.Ordinal, _column.Ordinal));
 
                     _pageOffset = chunk.DictionaryPageOffset.HasValue
                         ? Math.Min(chunk.DictionaryPageOffset.Value, chunk.DataPageOffset)
@@ -352,115 +361,80 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
             async ValueTask LoadNextPageAsync()
             {
-                static uint ComputeCrc32(ReadOnlySpan<byte> input)
-                {
-                    var crc = uint.MaxValue;
-                    foreach (var value in input)
-                    {
-                        crc ^= value;
-                        for (var bit = 0; bit < 8; bit++)
-                            crc = (crc >> 1) ^ (0xEDB88320u & (uint)-(int)(crc & 1));
-                    }
-                    return ~crc;
-                }
-
-                bool TryGetSourceMemory(long offset, int count, out ReadOnlyMemory<byte> memory)
-                {
-                    if (_file.Source is MemoryRandomAccessSource memorySource)
-                    {
-                        SourceRange.Validate(_file.Length, offset, count);
-                        memory = memorySource.Content.Slice(checked((int)offset), count);
-                        return true;
-                    }
-                    if (_file.Source is StreamRandomAccessSource { MemoryBuffer: { } memoryBuffer })
-                    {
-                        SourceRange.Validate(_file.Length, offset, count);
-                        memory = memoryBuffer.AsMemory(checked((int)offset), count);
-                        return true;
-                    }
-                    memory = default;
-                    return false;
-                }
-
                 if (_pageOffset >= _chunkEnd)
                     throw new ParquetFormatException(
-                        "A column chunk ended before its declared row count.",
-                        byteOffset: _pageOffset,
-                        rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                        columnOrdinal: _column.Ordinal,
-                        pageOrdinal: _pageOrdinal);
-                if (_pageOrdinal >= _file.Options.MaximumPagesPerColumnChunk)
-                    throw new ParquetLimitExceededException(
-                        "A column chunk exceeds the configured page-count limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                        "A column chunk ended before its declared row count.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-                var parsed = await ReadPageHeaderAsync().ConfigureAwait(false);
+                if (_pageOrdinal >= _file.Options.MaximumPagesPerColumnChunk)
+                    throw new ParquetLimitExceededException("A column chunk exceeds the configured page-count limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+
+                var parsed = await ScanPageReader.ReadPageHeaderAsync(_file.Source, _file.Length, _file.Options, _pagePayloadCache, _cancellationToken, _pageOffset, _chunkEnd, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal).ConfigureAwait(false);
+                _cancellationToken.ThrowIfCancellationRequested();
                 var header = parsed.Header;
                 var payloadOffset = checked(_pageOffset + parsed.HeaderByteCount);
                 var nextPageOffset = checked(payloadOffset + header.CompressedSize);
                 if (nextPageOffset > _chunkEnd)
                     throw new ParquetFormatException(
-                        "A page payload exceeds its enclosing column chunk.",
-                        byteOffset: _pageOffset,
-                        rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                        columnOrdinal: _column.Ordinal,
-                        pageOrdinal: _pageOrdinal);
+                        "A page payload exceeds its enclosing column chunk.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                 PooledArrayOwner<byte>? compressedPayload = null;
                 PooledArrayOwner<byte>? decodedPayload = null;
                 try
                 {
                     ReadOnlyMemory<byte> compressedMemory;
-                    if (TryGetSourceMemory(payloadOffset, header.CompressedSize, out var sourceMemory))
+                    if (ScanPageReader.TryGetSourceMemory(_file.Source, _file.Length, payloadOffset, header.CompressedSize, out var sourceMemory))
                     {
                         compressedMemory = sourceMemory;
                     }
                     else
                     {
                         compressedPayload = _pagePayloadCache.Rent(header.CompressedSize);
-                        await ReadExactlyAsync(
-                            payloadOffset,
-                            new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length))
+                        await ScanPageReader.ReadExactlyAsync(_file.Source, _cancellationToken, payloadOffset, new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length), _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal)
                             .ConfigureAwait(false);
                         compressedMemory = compressedPayload.Memory;
                     }
-                    if (header.Crc is int expected && ComputeCrc32(compressedMemory.Span) != unchecked((uint)expected))
+                    _cancellationToken.ThrowIfCancellationRequested();
+                    if (header.Crc is int expected && ScanPageReader.ComputeCrc32(compressedMemory.Span, _cancellationToken) != unchecked((uint)expected))
                         throw new ParquetFormatException(
-                            "A page CRC does not match its serialized payload.",
-                            byteOffset: _pageOffset,
-                            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                            columnOrdinal: _column.Ordinal,
-                            pageOrdinal: _pageOrdinal);
-                    if (header.TypeCode is not 0 and not 2 and not 3 ||
-                        header.TypeCode == 0 && header.DataV1 is null ||
-                        header.TypeCode == 2 && header.Dictionary is null ||
-                        header.TypeCode == 3 && header.DataV2 is null)
-                        throw new ParquetUnsupportedFeatureException(
-                            "This scan path requires Data Page V1 or V2.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                            "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                    if (header.PageType is not ValidatedPageType.DataV1 and not ValidatedPageType.Dictionary and not ValidatedPageType.DataV2)
+                        throw new ParquetUnsupportedFeatureException("This scan path requires Data Page V1 or V2.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                     var codec = _plan.RowGroup.Columns[_column.Ordinal].CompressionCodec;
                     ReadOnlyMemory<byte> decodedMemory;
-                    if (header.DataV2 is not null)
+                    if (header.PageType == ValidatedPageType.DataV2)
                     {
-                        decodedPayload = DecodeV2Payload(header, compressedMemory.Span, codec);
-                        decodedMemory = decodedPayload.Memory;
+                        if (V2ValueSectionIsUncompressed(header, codec, out _))
+                        {
+                            if (header.CompressedSize != header.UncompressedSize)
+                                throw PageFormat("An uncompressed V2 value section has inconsistent sizes.");
+                            if (compressedPayload is null)
+                            {
+                                decodedMemory = compressedMemory;
+                            }
+                            else
+                            {
+                                decodedPayload = compressedPayload;
+                                compressedPayload = null;
+                                decodedMemory = decodedPayload.Memory;
+                            }
+                        }
+                        else
+                        {
+                            decodedPayload = DecodeCompressedV2Payload(header, compressedMemory.Span);
+                            decodedMemory = decodedPayload.Memory;
+                        }
                     }
                     else switch (codec)
                         {
                             case ParquetCompressionCodec.Uncompressed:
                                 if (header.UncompressedSize != header.CompressedSize)
                                     throw new ParquetFormatException(
-                                        "An uncompressed page declares different compressed and uncompressed sizes.",
-                                        byteOffset: _pageOffset,
-                                        rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                                        columnOrdinal: _column.Ordinal,
-                                        pageOrdinal: _pageOrdinal);
+                                        "An uncompressed page declares different compressed and uncompressed sizes.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                                 if (compressedPayload is null)
                                 {
                                     decodedMemory = compressedMemory;
@@ -481,12 +455,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                                 decodedMemory = decodedPayload.Memory;
                                 break;
                             default:
-                                throw new ParquetUnsupportedFeatureException(
-                                    "The page compression codec is unsupported.",
-                                    _pageOffset,
-                                    _plan.RowGroup.Ordinal,
-                                    _column.Ordinal,
-                                    _pageOrdinal);
+                                throw new ParquetUnsupportedFeatureException("The page compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         }
                     var physicalType = _column.SchemaElement.PhysicalType;
                     if (physicalType is not ParquetPhysicalType.Boolean and
@@ -497,33 +467,21 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         not ParquetPhysicalType.ByteArray and
                         not ParquetPhysicalType.FixedLengthByteArray ||
                         _column.SchemaElement.Repetition is not ParquetRepetition.Required and not ParquetRepetition.Optional)
-                        throw new ParquetUnsupportedFeatureException(
-                            "This scan path currently supports only required or optional fixed-width Core primitives.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetUnsupportedFeatureException("This scan path currently supports only required or optional flat Core 0.1 leaves.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-                    if (header.Dictionary is not null)
+
+                    if (header.PageType == ValidatedPageType.Dictionary)
                     {
                         if (_seenDataPage || HasDictionary)
                             throw PageFormat("A dictionary page is duplicated or appears after data pages.");
                         if (header.Dictionary.EncodingCode is not (int)ParquetEncoding.Plain and
                             not (int)ParquetEncoding.PlainDictionary)
-                            throw new ParquetUnsupportedFeatureException(
-                                "Dictionary values require the PLAIN or legacy PLAIN_DICTIONARY marker.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
+                            throw new ParquetUnsupportedFeatureException("Dictionary values require the PLAIN or legacy PLAIN_DICTIONARY marker.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         if (header.Dictionary.ValueCount > _file.Options.MaximumDictionaryEntries ||
                             header.UncompressedSize > _file.Options.MaximumDictionaryBytes)
-                            throw new ParquetLimitExceededException(
-                                "A dictionary exceeds the configured entry or byte limit.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
+                            throw new ParquetLimitExceededException("A dictionary exceeds the configured entry or byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         DecodeDictionaryPage(decodedMemory.Span, header.Dictionary.ValueCount, physicalType.Value);
                         _pageOffset = nextPageOffset;
                         _pageOrdinal++;
@@ -531,26 +489,26 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     }
 
                     _seenDataPage = true;
-                    var valueCount = header.DataV1?.ValueCount ??
-                        (header.DataV2 ?? throw new InvalidOperationException("A validated data page has no data header.")).ValueCount;
-                    var encodingCode = header.DataV1?.EncodingCode ??
-                        (header.DataV2 ?? throw new InvalidOperationException("A validated data page has no data header.")).EncodingCode;
+                    var valueCount = header.PageType switch
+                    {
+                        ValidatedPageType.DataV1 => header.DataV1.ValueCount,
+                        ValidatedPageType.DataV2 => header.DataV2.ValueCount,
+                        _ => throw new InvalidOperationException("A validated data page has no data header."),
+                    };
+                    var encodingCode = header.PageType switch
+                    {
+                        ValidatedPageType.DataV1 => header.DataV1.EncodingCode,
+                        ValidatedPageType.DataV2 => header.DataV2.EncodingCode,
+                        _ => throw new InvalidOperationException("A validated data page has no data header."),
+                    };
                     if (encodingCode is not (int)ParquetEncoding.Plain and
                         not (int)ParquetEncoding.PlainDictionary and
                         not (int)ParquetEncoding.RunLengthDictionary)
-                        throw new ParquetUnsupportedFeatureException(
-                            "The data-page value encoding is unsupported.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetUnsupportedFeatureException("The data-page value encoding is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                     if (valueCount > _file.Options.MaximumValuesPerPage)
-                        throw new ParquetLimitExceededException(
-                            "A data page exceeds the configured value-count limit.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetLimitExceededException("A data page exceeds the configured value-count limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                     var dictionaryEncoded = encodingCode is (int)ParquetEncoding.PlainDictionary or
                         (int)ParquetEncoding.RunLengthDictionary;
                     if (dictionaryEncoded && !HasDictionary)
@@ -570,18 +528,15 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     }
                     else if (_column.SchemaElement.Repetition == ParquetRepetition.Required)
                     {
-                        var valueOffset = header.DataV2 is null ? 0 : GetV2LevelByteCount(header.DataV2);
-                        if (header.DataV2 is not null &&
+                        var valueOffset = header.PageType == ValidatedPageType.DataV2 ? DefinitionLevelCodec.GetV2LevelByteCount(header.DataV2, CurrentPageLocation()) : 0;
+                        if (header.PageType == ValidatedPageType.DataV2 &&
                             (header.DataV2.NullCount != 0 || header.DataV2.RowCount != valueCount || valueOffset != 0))
                             throw PageFormat("A required flat V2 page has inconsistent row, null, or level fields.");
                         var expectedBytes = GetPlainByteCount(physicalType.Value, valueCount);
                         if (decodedMemory.Length - valueOffset != expectedBytes)
                             throw new ParquetFormatException(
-                                "A PLAIN fixed-width page payload length does not match its value count.",
-                                byteOffset: _pageOffset,
-                                rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                                columnOrdinal: _column.Ordinal,
-                                pageOrdinal: _pageOrdinal);
+                                "A PLAIN fixed-width page payload length does not match its value count.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         if (physicalType == ParquetPhysicalType.Boolean)
                         {
                             DecodeRequiredBooleanPage(decodedMemory.Span[valueOffset..], valueCount);
@@ -592,39 +547,39 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                             {
                                 if (decodedPayload is null)
                                 {
-                                    _pageBorrowedPayload = decodedMemory;
+                                    _pagePayloadLease.SetBorrowed(decodedMemory);
+                                    _pageValidity.SetAllValid();
                                 }
                                 else
                                 {
-                                    _pagePayload = decodedPayload;
+                                    _pagePayloadLease.SetOwned(decodedPayload);
                                     decodedPayload = null;
+                                    _pageValidity.SetAllValid();
                                 }
                             }
                             else
                             {
                                 var valuesOnly = PooledArrayOwner<byte>.Rent(expectedBytes, _memoryBudget);
                                 decodedMemory.Span[valueOffset..].CopyTo(valuesOnly.Memory.Span);
-                                _pagePayload = valuesOnly;
+                                _pagePayloadLease.SetOwned(valuesOnly);
+                                _pageValidity.SetAllValid();
                             }
                         }
                     }
                     else
                     {
-                        if (header.DataV1 is not null && header.DataV1.DefinitionEncodingCode != (int)ParquetEncoding.RunLength)
-                            throw new ParquetUnsupportedFeatureException(
-                                "Optional definition levels require RLE/bit-packed hybrid encoding.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
-                        if (header.DataV1 is not null)
+                        if (header.PageType == ValidatedPageType.DataV1 && header.DataV1.DefinitionEncodingCode != (int)ParquetEncoding.RunLength)
+                            throw new ParquetUnsupportedFeatureException("Optional definition levels require RLE/bit-packed hybrid encoding.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                        if (header.PageType == ValidatedPageType.DataV1)
                         {
                             DecodeOptionalPrimitivePageV1(decodedMemory.Span, valueCount, physicalType.Value);
                         }
                         else
                         {
-                            var v2 = header.DataV2 ??
+                            if (header.PageType != ValidatedPageType.DataV2)
                                 throw new InvalidOperationException("A validated V2 page has no V2 header.");
+                            var v2 = header.DataV2;
                             if (v2.RowCount != valueCount)
                                 throw PageFormat("A flat V2 page has different row and value counts.");
                             if (v2.RepetitionLevelsByteLength != 0)
@@ -641,11 +596,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     }
                     if (valueCount > _plan.RowGroup.RowCount - _rowsSeenInGroup)
                         throw new ParquetFormatException(
-                            "Data pages contain more rows than the row group declares.",
-                            byteOffset: _pageOffset,
-                            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                            columnOrdinal: _column.Ordinal,
-                            pageOrdinal: _pageOrdinal);
+                            "Data pages contain more rows than the row group declares.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                     _pageValueCount = valueCount;
                     _pageValueIndex = 0;
@@ -699,9 +651,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                             ParquetPhysicalType.FixedLengthByteArray => CreateFixedLengthByteArrayBatch(
                                 candidate, sourceIndex, count),
                             _ => throw new ParquetUnsupportedFeatureException(
-                                "The projected physical type is not available in the fixed-width scan path.",
-                                rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                                columnOrdinal: _column.Ordinal),
+                                "The projected physical type is not available in the Core 0.1 scan path.", ParquetErrorLocation.AtRowGroupColumn(_plan.RowGroup.Ordinal, _column.Ordinal)),
                         };
                         _pageValueIndex = checked(sourceIndex + emittedCount);
                         return true;
@@ -725,18 +675,18 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     _pageRowValuesOwner is PooledArrayOwner<T> pageOwner)
                 {
                     var lifetime = new BatchLifetime();
-                    var pageValidity = _pageValidity;
+                    var takenValidity = _pageValidity.Take();
                     var validity = new ParquetValidity(
                         lifetime,
                         count,
-                        pageValidity is null ? ReadOnlyMemory<byte>.Empty : pageValidity.Memory,
-                        pageValidity is null);
+                        takenValidity is null ? ReadOnlyMemory<byte>.Empty : takenValidity.Memory,
+                        takenValidity is null);
                     var values = new ParquetPrimitiveColumnBatch<T>(
                         lifetime,
                         _column,
                         pageOwner.Memory,
                         validity);
-                    IDisposable[] owners = pageValidity is null ? [pageOwner] : [pageOwner, pageValidity];
+                    IDisposable[] owners = takenValidity is null ? [pageOwner] : [pageOwner, takenValidity];
                     var transferredBatch = new DecodedColumnBatch(
                         checked(_plan.RowGroup.RowOffset + candidate),
                         _plan.RowGroup.Ordinal,
@@ -747,7 +697,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         owners);
                     _pageRowValuesOwner = null;
                     _pageRowValues = null;
-                    _pageValidity = null;
                     return transferredBatch;
                 }
 
@@ -771,10 +720,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     {
                         if (decoder is null || byteWidth <= 0)
                             throw new InvalidOperationException("The decoded page representation does not match its physical type.");
-                        var input = _pagePayload is null
-                            ? _pageBorrowedPayload.Span
-                            : _pagePayload.Memory.Span;
-                        if (input.IsEmpty)
+                        var input = _pagePayloadLease.Span;
+                        if (!_pagePayloadLease.HasPayload || input.IsEmpty)
                             throw new InvalidOperationException("A decoded fixed-width page has no payload.");
                         decoder(
                             input.Slice(checked(sourceIndex * byteWidth), checked(count * byteWidth)),
@@ -782,9 +729,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                             _cancellationToken);
                         if (sourceIndex == 0 && count == _pageValueCount)
                         {
-                            _pagePayload?.Dispose();
-                            _pagePayload = null;
-                            _pageBorrowedPayload = default;
+                            _pagePayloadLease.Dispose();
                         }
                         validityBits = ReadOnlyMemory<byte>.Empty;
                         allValid = true;
@@ -831,19 +776,58 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 if (low == 0)
                     throw new ParquetLimitExceededException(
                         "One binary value exceeds the configured batch payload limit.",
-                        rowGroupOrdinal: _plan.RowGroup.Ordinal,
-                        columnOrdinal: _column.Ordinal,
-                        pageOrdinal: _pageOrdinal - 1);
+                        ParquetErrorLocation.AtRowGroupColumnPage(_plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal - 1));
                 count = low;
                 var payloadLength = sourceOffsets[sourceIndex + count] - baseOffset;
 
-                PooledArrayOwner<int>? offsets = PooledArrayOwner<int>.Rent(checked(count + 1), _memoryBudget);
-                PooledArrayOwner<byte>? payload = payloadLength == 0
-                    ? null
-                    : PooledArrayOwner<byte>.Rent(payloadLength, _memoryBudget);
+                // A complete page transfers decoded storage into the batch without copying;
+                // partial selections use the copy path below.
+                if (sourceIndex == 0 && count == _pageValueCount && _pageBinaryOffsets is not null)
+                {
+                    var transferredLifetime = new BatchLifetime();
+                    var takenBinaryValidity = _pageValidity.Take();
+                    var transferredValidity = new ParquetValidity(
+                        transferredLifetime,
+                        count,
+                        takenBinaryValidity is null ? ReadOnlyMemory<byte>.Empty : takenBinaryValidity.Memory,
+                        takenBinaryValidity is null);
+                    var transferredValues = new ParquetBinaryColumnBatch(
+                        transferredLifetime,
+                        _column,
+                        count,
+                        _pageBinaryPayload?.Memory ?? ReadOnlyMemory<byte>.Empty,
+                        _pageBinaryOffsets.Memory,
+                        transferredValidity);
+                    var transferredOwnerCount = 1 + (_pageBinaryPayload is not null ? 1 : 0) + (takenBinaryValidity is not null ? 1 : 0);
+                    var transferredOwners = new IDisposable[transferredOwnerCount];
+                    transferredOwners[0] = _pageBinaryOffsets;
+                    var transferredOwnerIndex = 1;
+                    if (_pageBinaryPayload is not null)
+                        transferredOwners[transferredOwnerIndex++] = _pageBinaryPayload;
+                    if (takenBinaryValidity is not null)
+                        transferredOwners[transferredOwnerIndex++] = takenBinaryValidity;
+                    var transferredBatch = new DecodedColumnBatch(
+                        checked(_plan.RowGroup.RowOffset + candidate),
+                        _plan.RowGroup.Ordinal,
+                        candidate,
+                        count,
+                        transferredValues,
+                        transferredLifetime,
+                        transferredOwners);
+                    _pageBinaryOffsets = null;
+                    _pageBinaryPayload = null;
+                    return transferredBatch;
+                }
+
+                PooledArrayOwner<int>? offsets = null;
+                PooledArrayOwner<byte>? payload = null;
                 PooledArrayOwner<byte>? validityOwner = null;
                 try
                 {
+                    offsets = PooledArrayOwner<int>.Rent(checked(count + 1), _memoryBudget);
+                    payload = payloadLength == 0
+                        ? null
+                        : PooledArrayOwner<byte>.Rent(payloadLength, _memoryBudget);
                     for (var i = 0; i <= count; i++)
                         offsets.Memory.Span[i] = sourceOffsets[sourceIndex + i] - baseOffset;
                     if (payload is not null)
@@ -861,11 +845,14 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         payload?.Memory ?? ReadOnlyMemory<byte>.Empty,
                         offsets.Memory,
                         validity);
-                    var owners = new List<IDisposable>(3) { offsets };
+                    var ownerCount = 1 + (payload is not null ? 1 : 0) + (validityOwner is not null ? 1 : 0);
+                    var owners = new IDisposable[ownerCount];
+                    owners[0] = offsets;
+                    var ownerIndex = 1;
                     if (payload is not null)
-                        owners.Add(payload);
+                        owners[ownerIndex++] = payload;
                     if (validityOwner is not null)
-                        owners.Add(validityOwner);
+                        owners[ownerIndex++] = validityOwner;
                     var batch = new DecodedColumnBatch(
                         checked(_plan.RowGroup.RowOffset + candidate),
                         _plan.RowGroup.Ordinal,
@@ -873,7 +860,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         count,
                         values,
                         lifetime,
-                        owners.ToArray());
+                        owners);
                     offsets = null;
                     payload = null;
                     validityOwner = null;
@@ -889,6 +876,39 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
             DecodedColumnBatch CreateFixedLengthByteArrayBatch(long candidate, int sourceIndex, int count)
             {
+                // A complete page transfers decoded storage into the batch without copying;
+                // partial selections use the copy path below.
+                if (sourceIndex == 0 && count == _pageValueCount && _pageFixedPayload is not null)
+                {
+                    var transferredLifetime = new BatchLifetime();
+                    var takenFixedValidity = _pageValidity.Take();
+                    var transferredValidity = new ParquetValidity(
+                        transferredLifetime,
+                        count,
+                        takenFixedValidity is null ? ReadOnlyMemory<byte>.Empty : takenFixedValidity.Memory,
+                        takenFixedValidity is null);
+                    var transferredValues = new ParquetFixedLengthByteArrayColumnBatch(
+                        transferredLifetime,
+                        _column,
+                        count,
+                        _pageFixedWidth,
+                        _pageFixedPayload.Memory,
+                        transferredValidity);
+                    IDisposable[] transferredOwners = takenFixedValidity is null
+                        ? [_pageFixedPayload]
+                        : [_pageFixedPayload, takenFixedValidity];
+                    var transferredBatch = new DecodedColumnBatch(
+                        checked(_plan.RowGroup.RowOffset + candidate),
+                        _plan.RowGroup.Ordinal,
+                        candidate,
+                        count,
+                        transferredValues,
+                        transferredLifetime,
+                        transferredOwners);
+                    _pageFixedPayload = null;
+                    return transferredBatch;
+                }
+
                 var byteCount = checked(count * _pageFixedWidth);
                 PooledArrayOwner<byte>? payload = PooledArrayOwner<byte>.Rent(byteCount, _memoryBudget);
                 PooledArrayOwner<byte>? validityOwner = null;
@@ -941,42 +961,34 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     return null;
                 }
 
-                var owner = PooledArrayOwner<byte>.Rent(checked((count + 7) / 8), _memoryBudget);
-                var pageValidity = _pageValidity ??
-                    throw new InvalidOperationException("An optional decoded page has no validity buffer.");
-                owner.Memory.Span.Clear();
-                allValid = true;
-                for (var i = 0; i < count; i++)
+                // AllValid means the page was loaded with implicitly all-valid rows (for example the specialized optional INT32 path drops its bitmap).
+                if (_pageValidity.Kind == PageValidityKind.AllValid)
                 {
-                    var valid = (pageValidity.Memory.Span[(sourceIndex + i) >> 3] &
-                        (1 << ((sourceIndex + i) & 7))) != 0;
-                    if (valid)
-                        owner.Memory.Span[i >> 3] |= (byte)(1 << (i & 7));
-                    else
-                        allValid = false;
-                }
-                if (allValid)
-                {
-                    owner.Dispose();
                     bits = ReadOnlyMemory<byte>.Empty;
+                    allValid = true;
                     return null;
                 }
-                bits = owner.Memory;
-                return owner;
+
+                if (_pageValidity.Kind != PageValidityKind.Explicit)
+                    throw new InvalidOperationException("No page validity is loaded.");
+                return ValidityBitmap.CopySlice(
+                    _pageValidity.Bits,
+                    sourceIndex,
+                    count,
+                    _memoryBudget,
+                    _cancellationToken,
+                    out bits,
+                    out allValid);
             }
 
-            void DecodeBinaryPage(PageHeaderWire header, ReadOnlySpan<byte> payload, int rowCount)
+            void DecodeBinaryPage(ValidatedPageHeader header, ReadOnlySpan<byte> payload, int rowCount)
             {
-                using var levels = DecodePageDefinitionLevels(header, payload, rowCount, out var physicalOffset);
+                using var levels = DefinitionLevelCodec.DecodeSection(header, payload, rowCount, _column.SchemaElement.Repetition, _memoryBudget, _cancellationToken, CurrentPageLocation(), out var physicalOffset);
                 var levelSpan = levels is null ? ReadOnlySpan<int>.Empty : levels.Memory.Span;
                 var offsetBytes = checked((rowCount + 1L) * sizeof(int));
                 if (offsetBytes > _file.Options.MaximumScanPooledBytes)
-                    throw new ParquetLimitExceededException(
-                        "A BYTE_ARRAY page's offsets exceed the configured scan-memory limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                    throw new ParquetLimitExceededException("A BYTE_ARRAY page's offsets exceed the configured scan-memory limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 PooledArrayOwner<int>? offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
                 PooledArrayOwner<byte>? data = null;
                 PooledArrayOwner<byte>? validity = null;
@@ -987,6 +999,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     var aggregateLength = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (levels is not null && levelSpan[row] == 0)
                         {
                             offsets.Memory.Span[row + 1] = aggregateLength;
@@ -999,12 +1013,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         if (length < 0 || length > payload.Length - inputOffset)
                             throw PageFormat("A PLAIN BYTE_ARRAY length is invalid.");
                         if (length > _file.Options.MaximumBinaryValueBytes)
-                            throw new ParquetLimitExceededException(
-                                "A BYTE_ARRAY value exceeds the configured byte limit.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
+                            throw new ParquetLimitExceededException("A BYTE_ARRAY value exceeds the configured byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         aggregateLength += length;
                         inputOffset += length;
                         offsets.Memory.Span[row + 1] = aggregateLength;
@@ -1012,12 +1022,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     if (inputOffset != payload.Length)
                         throw PageFormat("A PLAIN BYTE_ARRAY page has trailing physical bytes.");
                     if (offsetBytes + aggregateLength > _file.Options.MaximumScanPooledBytes)
-                        throw new ParquetLimitExceededException(
-                            "A BYTE_ARRAY page exceeds the configured scan-memory limit.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetLimitExceededException("A BYTE_ARRAY page exceeds the configured scan-memory limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                     if (aggregateLength != 0)
                         data = PooledArrayOwner<byte>.Rent(aggregateLength, _memoryBudget);
@@ -1025,6 +1031,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     var outputOffset = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (levels is not null && levelSpan[row] == 0)
                             continue;
                         var length = BinaryPrimitives.ReadInt32LittleEndian(payload[inputOffset..]);
@@ -1036,10 +1044,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         inputOffset += length;
                         outputOffset += length;
                     }
-                    validity = CreateValidity(levelSpan);
+                    validity = DefinitionLevelCodec.CreateBitmap(levelSpan, _memoryBudget, _cancellationToken);
                     _pageBinaryOffsets = offsets;
                     _pageBinaryPayload = data;
-                    _pageValidity = validity;
+                    _pageValidity.SetFromNullable(validity);
                     offsets = null;
                     data = null;
                     validity = null;
@@ -1052,26 +1060,22 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 }
             }
 
-            void DecodeFixedLengthByteArrayPage(PageHeaderWire header, ReadOnlySpan<byte> payload, int rowCount)
+            void DecodeFixedLengthByteArrayPage(ValidatedPageHeader header, ReadOnlySpan<byte> payload, int rowCount)
             {
                 var width = _column.SchemaElement.TypeLength ?? 0;
                 if (width <= 0)
                     throw PageFormat("A FIXED_LEN_BYTE_ARRAY column has an invalid width.");
-                using var levels = DecodePageDefinitionLevels(header, payload, rowCount, out var physicalOffset);
+                using var levels = DefinitionLevelCodec.DecodeSection(header, payload, rowCount, _column.SchemaElement.Repetition, _memoryBudget, _cancellationToken, CurrentPageLocation(), out var physicalOffset);
                 var levelSpan = levels is null ? ReadOnlySpan<int>.Empty : levels.Memory.Span;
-                var physicalCount = levels is null ? rowCount : rowCount - CountLevel(levelSpan, 0);
+                var physicalCount = levels is null ? rowCount : rowCount - DefinitionLevelCodec.CountLevel(levelSpan, 0);
                 var physicalBytesAvailable = payload.Length - physicalOffset;
                 if (physicalCount > physicalBytesAvailable / width || physicalCount * width != physicalBytesAvailable)
                     throw PageFormat("A PLAIN FIXED_LEN_BYTE_ARRAY payload length is inconsistent.");
                 var physicalByteCount = physicalCount * width;
                 var rowByteCount = checked((long)rowCount * width);
                 if (rowByteCount > int.MaxValue || rowByteCount > _file.Options.MaximumScanPooledBytes)
-                    throw new ParquetLimitExceededException(
-                        "A FIXED_LEN_BYTE_ARRAY page exceeds the configured scan-memory limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                    throw new ParquetLimitExceededException("A FIXED_LEN_BYTE_ARRAY page exceeds the configured scan-memory limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                 PooledArrayOwner<byte>? values = PooledArrayOwner<byte>.Rent((int)rowByteCount, _memoryBudget);
                 PooledArrayOwner<byte>? validity = null;
@@ -1081,16 +1085,18 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     var physicalIndex = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (levels is not null && levelSpan[row] == 0)
                             continue;
                         payload.Slice(physicalOffset + physicalIndex * width, width)
                             .CopyTo(values.Memory.Span.Slice(row * width, width));
                         physicalIndex++;
                     }
-                    validity = CreateValidity(levelSpan);
+                    validity = DefinitionLevelCodec.CreateBitmap(levelSpan, _memoryBudget, _cancellationToken);
                     _pageFixedPayload = values;
                     _pageFixedWidth = width;
-                    _pageValidity = validity;
+                    _pageValidity.SetFromNullable(validity);
                     values = null;
                     validity = null;
                 }
@@ -1099,100 +1105,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     values?.Dispose();
                     validity?.Dispose();
                 }
-            }
-
-            PooledArrayOwner<int>? DecodePageDefinitionLevels(
-            PageHeaderWire header,
-            ReadOnlySpan<byte> payload,
-            int rowCount,
-            out int physicalOffset)
-            {
-                if (_column.SchemaElement.Repetition == ParquetRepetition.Required)
-                {
-                    physicalOffset = header.DataV2 is null ? 0 : GetV2LevelByteCount(header.DataV2);
-                    if (header.DataV2 is not null &&
-                        (header.DataV2.RowCount != rowCount || header.DataV2.NullCount != 0 || physicalOffset != 0))
-                        throw PageFormat("A required flat V2 page has inconsistent level fields.");
-                    return null;
-                }
-
-                int levelOffset;
-                int levelByteCount;
-                int? expectedNullCount;
-                if (header.DataV1 is not null)
-                {
-                    if (header.DataV1.DefinitionEncodingCode != (int)ParquetEncoding.RunLength || payload.Length < sizeof(int))
-                        throw new ParquetUnsupportedFeatureException(
-                            "Optional definition levels require V1 RLE/bit-packed hybrid encoding.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
-                    levelByteCount = BinaryPrimitives.ReadInt32LittleEndian(payload);
-                    if (levelByteCount < 0 || levelByteCount > payload.Length - sizeof(int))
-                        throw PageFormat("An optional V1 page has an invalid definition-level length.");
-                    levelOffset = sizeof(int);
-                    physicalOffset = checked(levelOffset + levelByteCount);
-                    expectedNullCount = null;
-                }
-                else
-                {
-                    var v2 = header.DataV2 ??
-                        throw new InvalidOperationException("A validated V2 page has no V2 header.");
-                    if (v2.RowCount != rowCount || v2.RepetitionLevelsByteLength != 0)
-                        throw PageFormat("A flat optional V2 page has inconsistent row or repetition fields.");
-                    levelOffset = 0;
-                    levelByteCount = v2.DefinitionLevelsByteLength;
-                    physicalOffset = levelByteCount;
-                    expectedNullCount = v2.NullCount;
-                }
-
-                PooledArrayOwner<int>? levels = PooledArrayOwner<int>.Rent(rowCount, _memoryBudget);
-                try
-                {
-                    var input = payload.Slice(levelOffset, levelByteCount);
-                    var consumed = RleBitPackedHybridDecoder.Decode(
-                        input,
-                        1,
-                        levels.Memory.Span,
-                        _cancellationToken);
-                    if (consumed != input.Length)
-                        throw PageFormat("An optional page has trailing definition-level bytes.");
-                    if (expectedNullCount is int nullCount && CountLevel(levels.Memory.Span, 0) != nullCount)
-                        throw PageFormat("A V2 null count does not match its definition levels.");
-                    var result = levels;
-                    levels = null;
-                    return result;
-                }
-                finally
-                {
-                    levels?.Dispose();
-                }
-            }
-
-            PooledArrayOwner<byte>? CreateValidity(ReadOnlySpan<int> levels)
-            {
-                if (levels.IsEmpty)
-                    return null;
-                var validity = PooledArrayOwner<byte>.Rent(checked((levels.Length + 7) / 8), _memoryBudget);
-                validity.Memory.Span.Clear();
-                for (var row = 0; row < levels.Length; row++)
-                {
-                    if (levels[row] != 0)
-                        validity.Memory.Span[row >> 3] |= (byte)(1 << (row & 7));
-                }
-                return validity;
-            }
-
-            static int CountLevel(ReadOnlySpan<int> levels, int expected)
-            {
-                var count = 0;
-                foreach (var level in levels)
-                {
-                    if (level == expected)
-                        count++;
-                }
-                return count;
             }
 
             void DecodeOptionalPrimitivePageV1(ReadOnlySpan<byte> payload, int rowCount, ParquetPhysicalType physicalType)
@@ -1229,21 +1141,33 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
                 if (physicalType == ParquetPhysicalType.Int32)
                 {
-                    PooledArrayOwner<int>? rowValues = _file.RentColumnValues<int>(_column, rowCount);
-                    PooledArrayOwner<byte>? validity = PooledArrayOwner<byte>.Rent(
-                        checked((rowCount + 7) / 8),
-                        _memoryBudget);
+                    PooledArrayOwner<int>? rowValues = null;
+                    PooledArrayOwner<byte>? validity = null;
                     try
                     {
+                        rowValues = _file.RentColumnValues<int>(_column, rowCount);
+                        validity = PooledArrayOwner<byte>.Rent(
+                            checked((rowCount + 7) / 8),
+                            _memoryBudget);
                         var int32LevelInput = payload.Slice(levelOffset, levelByteCount);
-                        var int32Consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                            int32LevelInput,
-                            rowCount,
-                            validity.Memory.Span,
-                            _cancellationToken,
-                            out var validCount);
+                        int int32Consumed;
+                        int validCount;
+                        try
+                        {
+                            int32Consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
+                                int32LevelInput,
+                                rowCount,
+                                validity.Memory.Span,
+                                _cancellationToken,
+                                out validCount);
+                        }
+                        catch (ParquetFormatException exception) when (exception.ByteOffset is null)
+                        {
+                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                        }
                         if (int32Consumed != int32LevelInput.Length)
-                            throw PageFormat("An optional V1 page has trailing definition-level bytes.");
+                            throw PageFormat("An optional page has trailing definition-level bytes.");
                         if (expectedNullCount is int int32NullCount && rowCount - validCount != int32NullCount)
                             throw PageFormat("A V2 page null count does not match its definition levels.");
 
@@ -1289,11 +1213,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         {
                             validity.Dispose();
                             validity = null;
-                            _pageValidity = null;
+                            _pageValidity.SetAllValid();
                         }
                         else
                         {
-                            _pageValidity = validity;
+                            _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
                     }
@@ -1307,19 +1231,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
                 using var levels = PooledArrayOwner<int>.Rent(rowCount, _memoryBudget);
                 var levelInput = payload.Slice(levelOffset, levelByteCount);
-                var consumed = RleBitPackedHybridDecoder.Decode(
-                    levelInput,
-                    1,
-                    levels.Memory.Span,
-                    _cancellationToken);
-                if (consumed != levelInput.Length)
-                    throw PageFormat("An optional V1 page has trailing definition-level bytes.");
-
-                var physicalCount = 0;
-                foreach (var level in levels.Memory.Span)
-                    physicalCount += level;
-                if (expectedNullCount is int nullCount && rowCount - physicalCount != nullCount)
-                    throw PageFormat("A V2 page null count does not match its definition levels.");
+                var physicalCount = DefinitionLevelCodec.DecodeValidated(levelInput, levels.Memory.Span, expectedNullCount, _cancellationToken, CurrentPageLocation());
                 var physicalByteCount = GetPlainByteCount(physicalType, physicalCount);
                 if (physicalByteCount != payload.Length - physicalOffset)
                     throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1340,52 +1252,50 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         DecodeOptionalValues<double>(physicalPayload, levels.Memory.Span, physicalCount, PlainDecoder.DecodeDouble);
                         break;
                     default:
-                        throw new ParquetUnsupportedFeatureException(
-                            "The optional physical type is unsupported.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetUnsupportedFeatureException("The optional physical type is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 }
             }
 
-            PooledArrayOwner<byte> DecodeV2Payload(
-            PageHeaderWire header,
-            ReadOnlySpan<byte> serializedPayload,
-            ParquetCompressionCodec? codec)
+            // Validates the V2 level section and reports whether the value section is
+            // stored uncompressed, in which case the serialized payload is reused
+            // without copying. Snappy value sections still need output storage.
+            bool V2ValueSectionIsUncompressed(
+            ValidatedPageHeader header,
+            ParquetCompressionCodec? codec,
+            out int levelByteCount)
             {
-                var v2 = header.DataV2 ??
+                _cancellationToken.ThrowIfCancellationRequested();
+                if (header.PageType != ValidatedPageType.DataV2)
                     throw new InvalidOperationException("A validated V2 page has no V2 header.");
-                var levelByteCount = GetV2LevelByteCount(v2);
+                var v2 = header.DataV2;
+                levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(v2, CurrentPageLocation());
                 if (levelByteCount > header.CompressedSize || levelByteCount > header.UncompressedSize)
                     throw PageFormat("A V2 level section exceeds its page payload.");
+                if (!v2.IsCompressed || codec == ParquetCompressionCodec.Uncompressed)
+                    return true;
+                if (codec == ParquetCompressionCodec.Snappy)
+                    return false;
+                throw new ParquetUnsupportedFeatureException("The V2 value-section compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
+            }
+
+            PooledArrayOwner<byte> DecodeCompressedV2Payload(
+            ValidatedPageHeader header,
+            ReadOnlySpan<byte> serializedPayload)
+            {
+                _cancellationToken.ThrowIfCancellationRequested();
+                if (header.PageType != ValidatedPageType.DataV2)
+                    throw new InvalidOperationException("A validated V2 page has no V2 header.");
+                var levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(header.DataV2, CurrentPageLocation());
                 PooledArrayOwner<byte>? decoded = PooledArrayOwner<byte>.Rent(header.UncompressedSize, _memoryBudget);
                 try
                 {
                     serializedPayload[..levelByteCount].CopyTo(decoded.Memory.Span);
-                    var serializedData = serializedPayload[levelByteCount..];
-                    var decodedData = decoded.Memory.Span[levelByteCount..];
-                    if (!v2.IsCompressed || codec == ParquetCompressionCodec.Uncompressed)
-                    {
-                        if (serializedData.Length != decodedData.Length)
-                            throw PageFormat("An uncompressed V2 value section has inconsistent sizes.");
-                        serializedData.CopyTo(decodedData);
-                    }
-                    else if (codec == ParquetCompressionCodec.Snappy)
-                    {
-                        SnappyBlockDecoder.Decompress(serializedData, decodedData, _cancellationToken);
-                    }
-                    else
-                    {
-                        throw new ParquetUnsupportedFeatureException(
-                            "The V2 value-section compression codec is unsupported.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
-                    }
-
+                    SnappyBlockDecoder.Decompress(
+                        serializedPayload[levelByteCount..],
+                        decoded.Memory.Span[levelByteCount..],
+                        _cancellationToken);
                     var result = decoded;
                     decoded = null;
                     return result;
@@ -1393,18 +1303,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 finally
                 {
                     decoded?.Dispose();
-                }
-            }
-
-            int GetV2LevelByteCount(DataPageHeaderV2Wire v2)
-            {
-                try
-                {
-                    return checked(v2.RepetitionLevelsByteLength + v2.DefinitionLevelsByteLength);
-                }
-                catch (OverflowException)
-                {
-                    throw PageFormat("A V2 level-section length overflows.");
                 }
             }
 
@@ -1418,17 +1316,21 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 using var physicalValues = PooledArrayOwner<T>.Rent(physicalCount, _memoryBudget);
                 decoder(physicalPayload, physicalValues.Memory.Span, _cancellationToken);
 
-                PooledArrayOwner<T>? rowValues = _file.RentColumnValues<T>(_column, levels.Length);
-                PooledArrayOwner<byte>? validity = PooledArrayOwner<byte>.Rent(
-                    checked((levels.Length + 7) / 8),
-                    _memoryBudget);
+                PooledArrayOwner<T>? rowValues = null;
+                PooledArrayOwner<byte>? validity = null;
                 try
                 {
+                    rowValues = _file.RentColumnValues<T>(_column, levels.Length);
+                    validity = PooledArrayOwner<byte>.Rent(
+                        checked((levels.Length + 7) / 8),
+                        _memoryBudget);
                     rowValues.Memory.Span.Clear();
                     validity.Memory.Span.Clear();
                     var physicalIndex = 0;
                     for (var row = 0; row < levels.Length; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (levels[row] == 0)
                             continue;
                         rowValues.Memory.Span[row] = physicalValues.Memory.Span[physicalIndex++];
@@ -1438,7 +1340,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         throw PageFormat("Definition levels do not match the physical-value count.");
                     _pageRowValuesOwner = rowValues;
                     _pageRowValues = rowValues.Array;
-                    _pageValidity = validity;
+                    _pageValidity.SetExplicit(validity);
                     rowValues = null;
                     validity = null;
                 }
@@ -1484,26 +1386,15 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         SetDictionary<double>(payload, valueCount, PlainDecoder.DecodeDouble);
                         break;
                     default:
-                        throw new ParquetUnsupportedFeatureException(
-                            "The dictionary physical type is unsupported.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetUnsupportedFeatureException("The dictionary physical type is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 }
             }
 
             void SetBinaryDictionary(ReadOnlySpan<byte> payload, int valueCount)
             {
-                var retainedBytes = checked((valueCount + 1L) * sizeof(int)) + payload.Length;
-                if (retainedBytes > _file.Options.MaximumDictionaryBytes ||
-                    retainedBytes > _file.Options.MaximumScanPooledBytes)
-                    throw new ParquetLimitExceededException(
-                        "A decoded BYTE_ARRAY dictionary exceeds its configured memory limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                // Serialized bytes were checked against MaximumDictionaryBytes at the page header; decoded layout is checked after lengths are known below.
+                // Compact decoded layout is offsets plus payload bytes without length prefixes.
                 PooledArrayOwner<int>? offsets = PooledArrayOwner<int>.Rent(checked(valueCount + 1), _memoryBudget);
                 PooledArrayOwner<byte>? values = null;
                 try
@@ -1520,18 +1411,18 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         if (length < 0 || length > payload.Length - inputOffset)
                             throw PageFormat("A PLAIN BYTE_ARRAY dictionary length is invalid.");
                         if (length > _file.Options.MaximumBinaryValueBytes)
-                            throw new ParquetLimitExceededException(
-                                "A BYTE_ARRAY dictionary value exceeds the configured byte limit.",
-                                _pageOffset,
-                                _plan.RowGroup.Ordinal,
-                                _column.Ordinal,
-                                _pageOrdinal);
+                            throw new ParquetLimitExceededException("A BYTE_ARRAY dictionary value exceeds the configured byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                         aggregateLength += length;
                         inputOffset += length;
                         offsets.Memory.Span[index + 1] = aggregateLength;
                     }
                     if (inputOffset != payload.Length)
                         throw PageFormat("A PLAIN BYTE_ARRAY dictionary has trailing bytes.");
+                    var decodedBytes = checked((valueCount + 1L) * sizeof(int) + (long)aggregateLength);
+                    if (decodedBytes > _file.Options.MaximumDictionaryBytes)
+                        throw new ParquetLimitExceededException("A decoded BYTE_ARRAY dictionary exceeds its configured byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                     values = PooledArrayOwner<byte>.Rent(aggregateLength, _memoryBudget);
                     inputOffset = 0;
@@ -1573,6 +1464,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             void SetDictionary<T>(ReadOnlySpan<byte> payload, int valueCount, PlainDecode<T> decoder)
             where T : unmanaged
             {
+                long decodedBytes = typeof(T) == typeof(bool) ? valueCount : typeof(T) == typeof(int) || typeof(T) == typeof(float) ? checked((long)valueCount * sizeof(int)) : checked((long)valueCount * sizeof(long));
+                if (decodedBytes > _file.Options.MaximumDictionaryBytes)
+                    throw new ParquetLimitExceededException("A decoded dictionary exceeds its configured byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 PooledArrayOwner<T>? values = PooledArrayOwner<T>.Rent(valueCount, _memoryBudget);
                 try
                 {
@@ -1589,29 +1484,34 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             }
 
             void DecodeDictionaryDataPage(
-            PageHeaderWire header,
+            ValidatedPageHeader header,
             ReadOnlySpan<byte> payload,
             int rowCount,
             ParquetPhysicalType physicalType)
             {
-                using var levels = DecodePageDefinitionLevels(
-                    header,
-                    payload,
-                    rowCount,
-                    out var physicalOffset);
+                using var levels = DefinitionLevelCodec.DecodeSection(header, payload, rowCount, _column.SchemaElement.Repetition, _memoryBudget, _cancellationToken, CurrentPageLocation(), out var physicalOffset);
                 var levelSpan = levels is null ? ReadOnlySpan<int>.Empty : levels.Memory.Span;
-                var physicalCount = levels is null ? rowCount : rowCount - CountLevel(levelSpan, 0);
+                var physicalCount = levels is null ? rowCount : rowCount - DefinitionLevelCodec.CountLevel(levelSpan, 0);
 
                 if (physicalOffset >= payload.Length)
                     throw PageFormat("A dictionary data page is missing its index bit width.");
                 var bitWidth = payload[physicalOffset++];
                 using var indices = PooledArrayOwner<int>.Rent(physicalCount, _memoryBudget);
                 var encodedIndices = payload[physicalOffset..];
-                var indexConsumed = RleBitPackedHybridDecoder.Decode(
-                    encodedIndices,
-                    bitWidth,
-                    indices.Memory.Span,
-                    _cancellationToken);
+                int indexConsumed;
+                try
+                {
+                    indexConsumed = RleBitPackedHybridDecoder.Decode(
+                        encodedIndices,
+                        bitWidth,
+                        indices.Memory.Span,
+                        _cancellationToken);
+                }
+                catch (ParquetFormatException exception) when (exception.ByteOffset is null)
+                {
+                    throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                }
                 if (indexConsumed != encodedIndices.Length)
                     throw PageFormat("A dictionary data page has trailing index bytes.");
                 foreach (var index in indices.Memory.Span)
@@ -1644,12 +1544,8 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         ExpandFixedDictionary(indices.Memory.Span, levelSpan);
                         break;
                     default:
-                        throw new ParquetUnsupportedFeatureException(
-                            "The dictionary physical type is unsupported.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
+                        throw new ParquetUnsupportedFeatureException("The dictionary physical type is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 }
             }
 
@@ -1663,8 +1559,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 var dictionaryOffsets = _dictionaryBinaryOffsets.Memory.Span;
                 long aggregateLength = 0;
                 var physicalIndex = 0;
+                _cancellationToken.ThrowIfCancellationRequested();
                 for (var row = 0; row < rowCount; row++)
                 {
+                    if ((row & 1023) == 0)
+                        _cancellationToken.ThrowIfCancellationRequested();
                     if (optional && levels[row] == 0)
                         continue;
                     var dictionaryIndex = indices[physicalIndex++];
@@ -1674,23 +1573,23 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     throw PageFormat("Dictionary indices do not match the definition levels.");
                 var retainedBytes = aggregateLength + checked((rowCount + 1L) * sizeof(int));
                 if (aggregateLength > int.MaxValue || retainedBytes > _file.Options.MaximumScanPooledBytes)
-                    throw new ParquetLimitExceededException(
-                        "An expanded BYTE_ARRAY dictionary page exceeds the configured scan-memory limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                    throw new ParquetLimitExceededException("An expanded BYTE_ARRAY dictionary page exceeds the configured scan-memory limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-                PooledArrayOwner<int>? offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
-                PooledArrayOwner<byte>? payload = PooledArrayOwner<byte>.Rent((int)aggregateLength, _memoryBudget);
+
+                PooledArrayOwner<int>? offsets = null;
+                PooledArrayOwner<byte>? payload = null;
                 PooledArrayOwner<byte>? validity = null;
                 try
                 {
+                    offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
+                    payload = PooledArrayOwner<byte>.Rent((int)aggregateLength, _memoryBudget);
                     offsets.Memory.Span[0] = 0;
                     var outputOffset = 0;
                     physicalIndex = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (!optional || levels[row] != 0)
                         {
                             var dictionaryIndex = indices[physicalIndex++];
@@ -1702,10 +1601,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         }
                         offsets.Memory.Span[row + 1] = outputOffset;
                     }
-                    validity = CreateValidity(levels);
+                    validity = DefinitionLevelCodec.CreateBitmap(levels, _memoryBudget, _cancellationToken);
                     _pageBinaryOffsets = offsets;
                     _pageBinaryPayload = payload;
-                    _pageValidity = validity;
+                    _pageValidity.SetFromNullable(validity);
                     offsets = null;
                     payload = null;
                     validity = null;
@@ -1727,21 +1626,20 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 var rowCount = optional ? levels.Length : indices.Length;
                 var byteCount = checked((long)rowCount * _dictionaryFixedWidth);
                 if (byteCount > int.MaxValue || byteCount > _file.Options.MaximumScanPooledBytes)
-                    throw new ParquetLimitExceededException(
-                        "An expanded FIXED_LEN_BYTE_ARRAY dictionary page exceeds the configured scan-memory limit.",
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                    throw new ParquetLimitExceededException("An expanded FIXED_LEN_BYTE_ARRAY dictionary page exceeds the configured scan-memory limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
 
                 PooledArrayOwner<byte>? payload = PooledArrayOwner<byte>.Rent((int)byteCount, _memoryBudget);
                 PooledArrayOwner<byte>? validity = null;
                 try
                 {
                     payload.Memory.Span.Clear();
+                    _cancellationToken.ThrowIfCancellationRequested();
                     var physicalIndex = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (optional && levels[row] == 0)
                             continue;
                         var dictionaryIndex = indices[physicalIndex++];
@@ -1751,10 +1649,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     }
                     if (physicalIndex != indices.Length)
                         throw PageFormat("Dictionary indices do not match the definition levels.");
-                    validity = CreateValidity(levels);
+                    validity = DefinitionLevelCodec.CreateBitmap(levels, _memoryBudget, _cancellationToken);
                     _pageFixedPayload = payload;
                     _pageFixedWidth = _dictionaryFixedWidth;
-                    _pageValidity = validity;
+                    _pageValidity.SetFromNullable(validity);
                     payload = null;
                     validity = null;
                 }
@@ -1773,18 +1671,23 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
                 var optional = _column.SchemaElement.Repetition == ParquetRepetition.Optional;
                 var rowCount = optional ? levels.Length : indices.Length;
-                PooledArrayOwner<T>? rowValues = _file.RentColumnValues<T>(_column, rowCount);
-                PooledArrayOwner<byte>? validity = optional
-                    ? PooledArrayOwner<byte>.Rent(checked((rowCount + 7) / 8), _memoryBudget)
-                    : null;
+                PooledArrayOwner<T>? rowValues = null;
+                PooledArrayOwner<byte>? validity = null;
                 try
                 {
+                    rowValues = _file.RentColumnValues<T>(_column, rowCount);
+                    validity = optional
+                        ? PooledArrayOwner<byte>.Rent(checked((rowCount + 7) / 8), _memoryBudget)
+                        : null;
                     rowValues.Memory.Span.Clear();
                     if (validity is not null)
                         validity.Memory.Span.Clear();
+                    _cancellationToken.ThrowIfCancellationRequested();
                     var physicalIndex = 0;
                     for (var row = 0; row < rowCount; row++)
                     {
+                        if ((row & 1023) == 0)
+                            _cancellationToken.ThrowIfCancellationRequested();
                         if (optional && levels[row] == 0)
                             continue;
                         rowValues.Memory.Span[row] = dictionary[indices[physicalIndex++]];
@@ -1796,7 +1699,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         throw PageFormat("Dictionary indices do not match the definition levels.");
                     _pageRowValuesOwner = rowValues;
                     _pageRowValues = rowValues.Array;
-                    _pageValidity = validity;
+                    _pageValidity.SetFromNullable(validity);
                     rowValues = null;
                     validity = null;
                 }
@@ -1816,6 +1719,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     _pageRowValuesOwner = values;
                     _pageRowValues = values.Array;
                     values = null;
+                    _pageValidity.SetAllValid();
                 }
                 finally
                 {
@@ -1832,189 +1736,70 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         ParquetPhysicalType.Boolean => checked((valueCount + 7) / 8),
                         ParquetPhysicalType.Int32 or ParquetPhysicalType.Float => checked(valueCount * 4),
                         ParquetPhysicalType.Int64 or ParquetPhysicalType.Double => checked(valueCount * 8),
-                        _ => throw new ParquetUnsupportedFeatureException(
-                            "The PLAIN physical type is unsupported by this scan path.",
-                            _pageOffset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal),
+                        _ => throw new ParquetUnsupportedFeatureException("The PLAIN physical type is unsupported by this scan path.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal)),
                     };
                 }
                 catch (OverflowException exception)
                 {
                     throw new ParquetFormatException(
-                        "A PLAIN fixed-width byte count overflows.",
-                        exception,
-                        _pageOffset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
+                        "A PLAIN fixed-width byte count overflows.", exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
                 }
             }
 
             ParquetFormatException PageFormat(string message) => new(
             message,
-            byteOffset: _pageOffset,
-            rowGroupOrdinal: _plan.RowGroup.Ordinal,
-            columnOrdinal: _column.Ordinal,
-            pageOrdinal: _pageOrdinal);
+            ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-            ValueTask<ParsedPageHeader> ReadPageHeaderAsync()
-            {
-                var remaining = _chunkEnd - _pageOffset;
-                var maximum = checked((int)Math.Min(remaining, _file.Options.MaximumPageHeaderBytes));
-                if (maximum <= 0)
-                    throw new ParquetFormatException("A page header has no bytes available.", byteOffset: _pageOffset);
-                return ReadAtLength(Math.Min(256, maximum));
+            ParquetErrorLocation CurrentPageLocation() => ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal);
 
-                ValueTask<ParsedPageHeader> ReadAtLength(int length)
-                {
-                    var owner = _pagePayloadCache.Rent(length);
-                    ValueTask reading;
-                    try
-                    {
-                        reading = ReadExactlyAsync(
-                            _pageOffset,
-                            new ArraySegment<byte>(owner.Array, 0, owner.Memory.Length));
-                    }
-                    catch
-                    {
-                        owner.Dispose();
-                        throw;
-                    }
-                    if (!reading.IsCompletedSuccessfully)
-                        return AwaitReadAsync(reading, owner, length);
-
-                    var parsedSuccessfully = PageHeaderParser.TryParse(
-                        owner.Memory.Span,
-                        _pageOffset,
-                        _file.Options,
-                        out var parsed);
-                    owner.Dispose();
-                    if (parsedSuccessfully)
-                        return ValueTask.FromResult(parsed);
-                    if (length == maximum)
-                        throw HeaderLimit();
-                    return ReadAtLength(Math.Min(maximum, checked(length * 2)));
-                }
-
-                async ValueTask<ParsedPageHeader> AwaitReadAsync(
-                    ValueTask reading,
-                    PooledArrayOwner<byte> owner,
-                    int length)
-                {
-                    try
-                    {
-                        await reading.ConfigureAwait(false);
-                        if (PageHeaderParser.TryParse(
-                            owner.Memory.Span,
-                            _pageOffset,
-                            _file.Options,
-                            out var parsed))
-                            return parsed;
-                    }
-                    finally
-                    {
-                        owner.Dispose();
-                    }
-                    if (length == maximum)
-                        throw HeaderLimit();
-                    return await ReadAtLength(Math.Min(maximum, checked(length * 2))).ConfigureAwait(false);
-                }
-
-                ParquetLimitExceededException HeaderLimit() => new(
-                    "A page header exceeds the configured byte limit or its enclosing chunk.",
-                    _pageOffset,
-                    _plan.RowGroup.Ordinal,
-                    _column.Ordinal,
-                    _pageOrdinal);
-            }
-
-            ValueTask ReadExactlyAsync(long offset, ArraySegment<byte> destination)
-            {
-                ValueTask read;
-                try
-                {
-                    read = _file.Source.ReadExactlyAsync(offset, destination, _cancellationToken);
-                }
-                catch (EndOfStreamException exception)
-                {
-                    throw new ParquetFormatException(
-                        "The immutable input ended during a page read.",
-                        exception,
-                        offset,
-                        _plan.RowGroup.Ordinal,
-                        _column.Ordinal,
-                        _pageOrdinal);
-                }
-                if (read.IsCompletedSuccessfully)
-                    return ValueTask.CompletedTask;
-                return AwaitReadAsync(read);
-
-                async ValueTask AwaitReadAsync(ValueTask pendingRead)
-                {
-                    try
-                    {
-                        await pendingRead.ConfigureAwait(false);
-                    }
-                    catch (EndOfStreamException exception)
-                    {
-                        throw new ParquetFormatException(
-                            "The immutable input ended during a page read.",
-                            exception,
-                            offset,
-                            _plan.RowGroup.Ordinal,
-                            _column.Ordinal,
-                            _pageOrdinal);
-                    }
-                }
-            }
         }
-
-        public ValueTask DisposeAsync()
+        public void Dispose()
         {
             if (!_disposed)
             {
                 _disposed = true;
                 Terminate();
             }
-            return ValueTask.CompletedTask;
         }
 
         private void DisposePage()
         {
-            _pagePayload?.Dispose();
-            _pagePayload = null;
-            _pageBorrowedPayload = default;
-            _pageRowValuesOwner?.Dispose();
+            Exception? failure = null;
+            try { _pagePayloadLease.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            try { _pageRowValuesOwner?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _pageRowValuesOwner = null;
             _pageRowValues = null;
-            _pageValidity?.Dispose();
-            _pageValidity = null;
-            _pageBinaryOffsets?.Dispose();
+            try { _pageValidity.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            try { _pageBinaryOffsets?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _pageBinaryOffsets = null;
-            _pageBinaryPayload?.Dispose();
+            try { _pageBinaryPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _pageBinaryPayload = null;
-            _pageFixedPayload?.Dispose();
+            try { _pageFixedPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _pageFixedPayload = null;
             _pageFixedWidth = 0;
             _pageValueCount = 0;
             _pageValueIndex = 0;
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
 
         private void DisposeDictionary()
         {
-            _dictionaryOwner?.Dispose();
+            Exception? failure = null;
+            try { _dictionaryOwner?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _dictionaryOwner = null;
             _dictionaryValues = null;
-            _dictionaryBinaryOffsets?.Dispose();
+            try { _dictionaryBinaryOffsets?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _dictionaryBinaryOffsets = null;
-            _dictionaryBinaryPayload?.Dispose();
+            try { _dictionaryBinaryPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _dictionaryBinaryPayload = null;
-            _dictionaryFixedPayload?.Dispose();
+            try { _dictionaryFixedPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             _dictionaryFixedPayload = null;
             _dictionaryFixedWidth = 0;
             _dictionaryCount = 0;
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
 
         private bool HasDictionary =>
@@ -2027,17 +1812,27 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             if (_terminated)
                 return;
             _terminated = true;
-            DisposePage();
-            DisposeDictionary();
+            Exception? failure = null;
+            try { DisposePage(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            try { DisposeDictionary(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            // Unregistration belongs to the single termination.
             if (_lifetimeOwnership == ScanLifetimeOwnership.Enumerator)
-                _file.UnregisterScan();
-            _linkedCancellation?.Dispose();
-            _userLinkedCancellation?.Dispose();
+            {
+                try { _file.UnregisterScan(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            }
+
+            try { _linkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
 
     }
 
     private readonly record struct ScanPlan(ParquetColumn Column, ScanRowGroup[] RowGroups);
+
+    // Narrowed cursor inputs: the shared scan services travel as one value together with the per-column plan.
+    internal readonly record struct ScanCursorServices(ParquetFile File, ParquetScanOptions Options, ParquetScanMemoryBudget MemoryBudget, PooledArrayOwnerCache<byte> PagePayloadCache);
     internal enum ScanLifetimeOwnership { Enumerator, Coordinator }
     internal readonly record struct ScanRowGroup(ParquetRowGroup RowGroup, long StartInGroup, long Count);
 }

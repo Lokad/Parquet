@@ -30,6 +30,12 @@ internal sealed class PooledArrayOwner<T> : IDisposable
         ArgumentOutOfRangeException.ThrowIfNegative(length);
         var array = ParquetArrayPool.Rent<T>(Math.Max(length, 1));
         var retainedBytes = Buffer.ByteLength(array);
+        budget.NoteTransientAttempt(retainedBytes);
+        if (retainedBytes > budget.MaximumBytes)
+        {
+            ParquetArrayPool.Return(array);
+            throw new ParquetLimitExceededException("A scan exceeds its configured pooled-memory limit.");
+        }
         var reserved = false;
         try
         {
@@ -77,7 +83,14 @@ internal sealed class PooledArrayOwner<T> : IDisposable
     }
 }
 
-internal sealed class PooledArrayOwnerCache<T> : IDisposable
+/// <summary>Releases idle retained storage held by a file-owned array cache.</summary>
+internal interface IEvictableArrayCache
+{
+    /// <summary>Releases the idle retained array, if any, and reports whether one was released.</summary>
+    bool EvictIdle();
+}
+
+internal sealed class PooledArrayOwnerCache<T> : IDisposable, IEvictableArrayCache
 {
     private readonly ParquetScanMemoryBudget _budget;
     private readonly object _lock = new();
@@ -117,6 +130,12 @@ internal sealed class PooledArrayOwnerCache<T> : IDisposable
 
         var array = ParquetArrayPool.Rent<T>(minimumLength);
         var bytes = Buffer.ByteLength(array);
+        _budget.NoteTransientAttempt(bytes);
+        if (bytes > _budget.MaximumBytes)
+        {
+            ParquetArrayPool.Return(array);
+            throw new ParquetLimitExceededException("A scan exceeds its configured pooled-memory limit.");
+        }
         var reserved = false;
         try
         {
@@ -157,6 +176,28 @@ internal sealed class PooledArrayOwnerCache<T> : IDisposable
             PooledArrayOwner<T>.ReturnAndRelease(array, _budget, retainedBytes);
     }
 
+    // Releases the idle retained array, if any, without marking the cache
+    // disposed. Arrays checked out to live owners or yielded batches are never
+    // touched; only idle retained storage is released.
+    public bool EvictIdle()
+    {
+        T[]? array;
+        int retainedBytes;
+        lock (_lock)
+        {
+            array = _array;
+            retainedBytes = _retainedBytes;
+            _array = null;
+            _retainedBytes = 0;
+            if (array is null)
+                return false;
+        }
+        PooledArrayOwner<T>.ReturnAndRelease(array, _budget, retainedBytes);
+        return true;
+    }
+
+    // File-owned caches retain one array outside the shared pool; evicted or
+    // disposed arrays return to the shared pool cleared via ReturnAndRelease.
     internal void Return(T[] array, int retainedBytes)
     {
         T[]? released;

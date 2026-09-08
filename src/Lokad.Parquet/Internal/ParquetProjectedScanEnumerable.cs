@@ -33,7 +33,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
         }
 
         private readonly ParquetFile _file;
-        private readonly IAsyncEnumerator<DecodedColumnBatch>[] _enumerators;
+        private readonly ParquetScanEnumerable.ColumnCursor[] _enumerators;
         private readonly DecodedColumnBatch?[] _sourceBatches;
         private readonly int[] _sourceOffsets;
         private readonly ParquetScanMemoryBudget _memoryBudget;
@@ -59,15 +59,25 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 var ordinals = new int[options.Columns.Count];
                 if (ordinals.Length < 2)
                     throw new InvalidOperationException("The projected scan coordinator requires at least two columns.");
+                // Linear duplicate detection for wide projections; the nested loop keeps small projections allocation-free.
+                HashSet<int>? seen = ordinals.Length > 16 ? new HashSet<int>(ordinals.Length) : null;
                 for (var index = 0; index < ordinals.Length; index++)
                 {
                     var selected = options.Columns[index];
                     var ordinal = selected.Ordinal;
                     ordinals[index] = ordinal;
-                    for (var previous = 0; previous < index; previous++)
+                    if (seen is not null)
                     {
-                        if (ordinals[previous] == ordinal)
+                        if (!seen.Add(ordinal))
                             throw new ArgumentException("Duplicate projected columns are not permitted.", nameof(options));
+                    }
+                    else
+                    {
+                        for (var previous = 0; previous < index; previous++)
+                        {
+                            if (ordinals[previous] == ordinal)
+                                throw new ArgumentException("Duplicate projected columns are not permitted.", nameof(options));
+                        }
                     }
                     if ((uint)ordinal >= (uint)file.Metadata.Schema.Columns.Count)
                         throw new ArgumentOutOfRangeException(nameof(options), "A projected column ordinal is outside the schema.");
@@ -76,8 +86,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                         throw new ArgumentException("A projected column descriptor belongs to another file.", nameof(options));
                     if (!column.IsReadable)
                         throw new ParquetUnsupportedFeatureException(
-                            column.UnsupportedReason ?? "The projected column is unsupported.",
-                            columnOrdinal: ordinal);
+                            column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(ordinal));
                 }
                 return ordinals;
             }
@@ -86,10 +95,12 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _memoryBudget = memoryBudget;
             _pagePayloadCache = file.PagePayloadCache;
             var ordinals = ResolveProjection(file, options);
-            _enumerators = new IAsyncEnumerator<DecodedColumnBatch>[ordinals.Length];
+            ParquetScanEnumerable.ValidateTargetBatchRowCount(file, options);
+            _enumerators = new ParquetScanEnumerable.ColumnCursor[ordinals.Length];
             _sourceBatches = new DecodedColumnBatch?[ordinals.Length];
             _sourceOffsets = new int[ordinals.Length];
             var selectedRowGroups = ParquetScanEnumerable.BuildRowGroups(file, options);
+            file.EvictIdleColumnCaches(ordinals);
             try
             {
                 if (scanCancellation.CanBeCanceled && enumerationCancellation.CanBeCanceled)
@@ -116,14 +127,11 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 {
                     var column = file.Metadata.Schema.Columns[ordinals[index]];
                     _enumerators[index] = new ParquetScanEnumerable.ColumnCursor(
-                        file,
-                        options,
+                        new ParquetScanEnumerable.ScanCursorServices(file, options, memoryBudget, _pagePayloadCache),
                         column,
                         selectedRowGroups,
                         _cancellationToken,
                         CancellationToken.None,
-                        memoryBudget,
-                        _pagePayloadCache,
                         ParquetScanEnumerable.ScanLifetimeOwnership.Coordinator);
                 }
                 file.RegisterScan(OnFileDisposed);
@@ -131,13 +139,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             catch
             {
                 foreach (var enumerator in _enumerators)
-                {
-                    if (enumerator is null)
-                        continue;
-                    var disposal = enumerator.DisposeAsync();
-                    if (!disposal.IsCompletedSuccessfully)
-                        disposal.AsTask().GetAwaiter().GetResult();
-                }
+                    enumerator?.Dispose();
                 _linkedCancellation?.Dispose();
                 _userLinkedCancellation?.Dispose();
                 throw;
@@ -338,7 +340,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 sourceBatchDisposition = SourceBatchDisposition.Retained;
                 // Misaligned page boundaries require fresh aligned buffers owned solely by the projected batch.
                 var lifetime = new BatchLifetime();
-                var owners = new List<IDisposable>();
+                var owners = new List<IDisposable>(_sourceBatches.Length * 3);
                 var columns = new ParquetColumnBatch[_sourceBatches.Length];
                 try
                 {
@@ -414,6 +416,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             List<IDisposable> owners)
             where T : unmanaged
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var owner = PooledArrayOwner<T>.Rent(rowCount, _memoryBudget);
                 source.Values.Span.Slice(sourceOffset, rowCount).CopyTo(owner.Memory.Span);
                 owners.Add(owner);
@@ -428,13 +431,19 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             BatchLifetime lifetime,
             List<IDisposable> owners)
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var sourceOffsets = source.Offsets.Span;
                 var baseOffset = sourceOffsets[sourceOffset];
                 var payloadLength = sourceOffsets[sourceOffset + rowCount] - baseOffset;
                 var offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
                 owners.Add(offsets);
+                _cancellationToken.ThrowIfCancellationRequested();
                 for (var index = 0; index <= rowCount; index++)
+                {
+                    if ((index & 1023) == 0)
+                        _cancellationToken.ThrowIfCancellationRequested();
                     offsets.Memory.Span[index] = sourceOffsets[sourceOffset + index] - baseOffset;
+                }
 
                 ReadOnlyMemory<byte> payloadMemory = ReadOnlyMemory<byte>.Empty;
                 if (payloadLength != 0)
@@ -461,6 +470,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             BatchLifetime lifetime,
             List<IDisposable> owners)
             {
+                _cancellationToken.ThrowIfCancellationRequested();
                 var byteCount = checked(rowCount * source.TypeWidth);
                 var payload = PooledArrayOwner<byte>.Rent(byteCount, _memoryBudget);
                 owners.Add(payload);
@@ -484,23 +494,18 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             {
                 if (source.IsAllValid)
                     return new ParquetValidity(lifetime, rowCount, ReadOnlyMemory<byte>.Empty, true);
-                var bits = PooledArrayOwner<byte>.Rent(checked((rowCount + 7) / 8), _memoryBudget);
-                bits.Memory.Span.Clear();
-                var allValid = true;
-                for (var row = 0; row < rowCount; row++)
-                {
-                    if (source.IsValid(sourceOffset + row))
-                        bits.Memory.Span[row >> 3] |= (byte)(1 << (row & 7));
-                    else
-                        allValid = false;
-                }
-                if (allValid)
-                {
-                    bits.Dispose();
+                var sliced = ValidityBitmap.CopySlice(
+                    source.Bits,
+                    sourceOffset,
+                    rowCount,
+                    _memoryBudget,
+                    _cancellationToken,
+                    out var slicedBits,
+                    out _);
+                if (sliced is null)
                     return new ParquetValidity(lifetime, rowCount, ReadOnlyMemory<byte>.Empty, true);
-                }
-                owners.Add(bits);
-                return new ParquetValidity(lifetime, rowCount, bits.Memory, false);
+                owners.Add(sliced);
+                return new ParquetValidity(lifetime, rowCount, slicedBits, false);
             }
         }
 
@@ -515,28 +520,60 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
 
         private void TerminateAndUnregister()
         {
-            Terminate();
+            // Unregistration belongs to the scan that terminates first; a late disposal must not clear a newer scan.
+            if (!Terminate())
+            {
+                return;
+            }
+
             _file.UnregisterScan();
         }
 
-        private void Terminate()
+        private bool Terminate()
         {
             if (Interlocked.Exchange(ref _terminationStarted, 1) != 0)
-                return;
+            {
+                return false;
+            }
             _terminated = true;
+            Exception? failure = null;
             for (var index = 0; index < _sourceBatches.Length; index++)
             {
-                _sourceBatches[index]?.Dispose();
+                try
+                {
+                    _sourceBatches[index]?.Dispose();
+                }
+                catch (Exception exception) when (failure is null)
+                {
+                    failure = exception;
+                }
+                catch (Exception)
+                {
+                }
+
                 _sourceBatches[index] = null;
             }
             foreach (var enumerator in _enumerators)
             {
-                var disposal = enumerator.DisposeAsync();
-                if (!disposal.IsCompletedSuccessfully)
-                    disposal.AsTask().GetAwaiter().GetResult();
+                try
+                {
+                    enumerator.Dispose();
+                }
+                catch (Exception exception) when (failure is null)
+                {
+                    failure = exception;
+                }
+                catch (Exception)
+                {
+                }
             }
-            _linkedCancellation?.Dispose();
-            _userLinkedCancellation?.Dispose();
+
+            try { _linkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+
+            return true;
         }
 
     }

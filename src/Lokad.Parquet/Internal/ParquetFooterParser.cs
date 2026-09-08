@@ -6,23 +6,27 @@ internal static class ParquetFooterParser
         ReadOnlySpan<byte> footer,
         long footerOffset,
         long sourceLength,
-        ParquetReaderOptions options)
+        ParquetReaderOptions options,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var reader = new ThriftCompactReader(footer, footerOffset, options);
         try
         {
             var wire = ParseFileMetadata(ref reader, options);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!reader.IsAtEnd)
                 throw reader.Format("Trailing bytes follow the Parquet file metadata.");
-            return BuildMetadata(wire, sourceLength, footerOffset, options);
+            return BuildMetadata(wire, sourceLength, footerOffset, options, cancellationToken);
         }
         catch (ThriftTruncatedException exception)
         {
-            throw new ParquetFormatException("The Parquet footer contains truncated Thrift metadata.", byteOffset: exception.ByteOffset);
+            throw new ParquetFormatException("The Parquet footer contains truncated Thrift metadata.", ParquetErrorLocation.AtOffset(exception.ByteOffset));
         }
 
         static FileMetadataWire ParseFileMetadata(ref ThriftCompactReader reader, ParquetReaderOptions options)
         {
+            reader.RequireDepth(1);
             var result = new FileMetadataWire();
             short previous = 0;
             ulong seen = 0;
@@ -54,7 +58,7 @@ internal static class ParquetFooterParser
                         break;
                     case 5:
                         Mark(ref seen, field.Id, ref reader);
-                        result.CustomMetadata = ParseKeyValueList(ref reader, field, options);
+                        result.CustomMetadata = ParseKeyValueList(ref reader, field, options, 1);
                         break;
                     case 6:
                         Mark(ref seen, field.Id, ref reader);
@@ -93,6 +97,7 @@ internal static class ParquetFooterParser
         CompactField field,
         ParquetReaderOptions options)
         {
+            reader.RequireDepth(1);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Struct)
@@ -100,7 +105,7 @@ internal static class ParquetFooterParser
             if (list.Count == 0)
                 throw reader.Format("The Parquet schema is empty.");
             if (list.Count > options.MaximumSchemaElements)
-                throw new ParquetLimitExceededException("The schema exceeds the configured element limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("The schema exceeds the configured element limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
 
             var result = new SchemaElementWire[list.Count];
             for (var i = 0; i < result.Length; i++)
@@ -110,6 +115,7 @@ internal static class ParquetFooterParser
 
         static SchemaElementWire ParseSchemaElement(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(2);
             var result = new SchemaElementWire();
             short previous = 0;
             ulong seen = 0;
@@ -183,6 +189,7 @@ internal static class ParquetFooterParser
 
         static ParquetLogicalAnnotation ParseLogicalAnnotation(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(3);
             short previous = 0;
             var field = reader.ReadField(ref previous);
             if (field.Type == CompactType.Stop)
@@ -210,7 +217,7 @@ internal static class ParquetFooterParser
                     reader.SkipValue(CompactType.Struct, 3, CompactBooleanEncoding.CollectionValue);
                     annotation = new ParquetLogicalAnnotation(
                         discriminator,
-                        Enum.IsDefined(typeof(ParquetLogicalTypeKind), (int)discriminator)
+                        Enum.IsDefined((ParquetLogicalTypeKind)discriminator)
                             ? (ParquetLogicalTypeKind)discriminator : null,
                         null,
                         null,
@@ -230,6 +237,7 @@ internal static class ParquetFooterParser
 
         static ParquetLogicalAnnotation ParseDecimalAnnotation(ref ThriftCompactReader reader, int discriminator)
         {
+            reader.RequireDepth(4);
             int? scale = null;
             int? precision = null;
             short previous = 0;
@@ -275,6 +283,7 @@ internal static class ParquetFooterParser
         int discriminator,
         ParquetLogicalTypeKind kind)
         {
+            reader.RequireDepth(4);
             bool? adjusted = null;
             int? unitDiscriminator = null;
             ParquetTimeUnit? unit = null;
@@ -319,6 +328,7 @@ internal static class ParquetFooterParser
 
         static ParsedTimeUnit ParseTimeUnit(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(5);
             short previous = 0;
             var field = reader.ReadField(ref previous);
             if (field.Type == CompactType.Stop || field.Type != CompactType.Struct)
@@ -339,6 +349,7 @@ internal static class ParquetFooterParser
 
         static ParquetLogicalAnnotation ParseIntegerAnnotation(ref ThriftCompactReader reader, int discriminator)
         {
+            reader.RequireDepth(4);
             int? bitWidth = null;
             bool? signed = null;
             short previous = 0;
@@ -383,12 +394,13 @@ internal static class ParquetFooterParser
         CompactField field,
         ParquetReaderOptions options)
         {
+            reader.RequireDepth(1);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Struct)
                 throw reader.Format("The row-group list has an unexpected element type.");
             if (list.Count > options.MaximumRowGroups)
-                throw new ParquetLimitExceededException("The file exceeds the configured row-group limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("The file exceeds the configured row-group limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
             var result = new RowGroupWire[list.Count];
             for (var i = 0; i < result.Length; i++)
                 result[i] = ParseRowGroup(ref reader, options);
@@ -397,6 +409,7 @@ internal static class ParquetFooterParser
 
         static RowGroupWire ParseRowGroup(ref ThriftCompactReader reader, ParquetReaderOptions options)
         {
+            reader.RequireDepth(2);
             var result = new RowGroupWire();
             short previous = 0;
             ulong seen = 0;
@@ -446,12 +459,13 @@ internal static class ParquetFooterParser
         CompactField field,
         ParquetReaderOptions options)
         {
+            reader.RequireDepth(2);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Struct)
                 throw reader.Format("The column-chunk list has an unexpected element type.");
             if (list.Count > options.MaximumLeafColumns)
-                throw new ParquetLimitExceededException("A row group exceeds the configured leaf-column limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("A row group exceeds the configured leaf-column limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
             var result = new ColumnChunkWire[list.Count];
             for (var i = 0; i < result.Length; i++)
                 result[i] = ParseColumnChunk(ref reader, options);
@@ -460,6 +474,7 @@ internal static class ParquetFooterParser
 
         static ColumnChunkWire ParseColumnChunk(ref ThriftCompactReader reader, ParquetReaderOptions options)
         {
+            reader.RequireDepth(3);
             var result = new ColumnChunkWire();
             short previous = 0;
             ulong seen = 0;
@@ -529,6 +544,7 @@ internal static class ParquetFooterParser
 
         static ColumnMetadataWire ParseColumnMetadata(ref ThriftCompactReader reader, ParquetReaderOptions options)
         {
+            reader.RequireDepth(4);
             var result = new ColumnMetadataWire();
             short previous = 0;
             ulong seen = 0;
@@ -574,7 +590,7 @@ internal static class ParquetFooterParser
                         break;
                     case 8:
                         Mark(ref seen, field.Id, ref reader);
-                        result.CustomMetadata = ParseKeyValueList(ref reader, field, options);
+                        result.CustomMetadata = ParseKeyValueList(ref reader, field, options, 4);
                         break;
                     case 9:
                         Mark(ref seen, field.Id, ref reader);
@@ -620,6 +636,7 @@ internal static class ParquetFooterParser
 
         static StatisticsWire ParseStatistics(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(5);
             var result = new StatisticsWire();
             short previous = 0;
             ulong seen = 0;
@@ -676,22 +693,25 @@ internal static class ParquetFooterParser
         static ParquetKeyValueMetadata[] ParseKeyValueList(
         ref ThriftCompactReader reader,
         CompactField field,
-        ParquetReaderOptions options)
+        ParquetReaderOptions options,
+        int depth)
         {
+            reader.RequireDepth(depth);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Struct)
                 throw reader.Format("A key/value metadata list has an unexpected element type.");
             if (list.Count > options.MaximumKeyValueMetadataEntries)
-                throw new ParquetLimitExceededException("Key/value metadata exceeds the configured entry limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("Key/value metadata exceeds the configured entry limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
             var result = new ParquetKeyValueMetadata[list.Count];
             for (var i = 0; i < result.Length; i++)
-                result[i] = ParseKeyValue(ref reader);
+                result[i] = ParseKeyValue(ref reader, depth + 1);
             return result;
         }
 
-        static ParquetKeyValueMetadata ParseKeyValue(ref ThriftCompactReader reader)
+        static ParquetKeyValueMetadata ParseKeyValue(ref ThriftCompactReader reader, int depth)
         {
+            reader.RequireDepth(depth);
             string? key = null;
             string? value = null;
             short previous = 0;
@@ -728,12 +748,13 @@ internal static class ParquetFooterParser
         CompactField field,
         ParquetReaderOptions options)
         {
+            reader.RequireDepth(1);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Struct)
                 throw reader.Format("The column-order list has an unexpected element type.");
             if (list.Count > options.MaximumLeafColumns)
-                throw new ParquetLimitExceededException("Column orders exceed the configured leaf-column limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("Column orders exceed the configured leaf-column limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
             var result = new ParquetColumnOrderKind[list.Count];
             for (var i = 0; i < result.Length; i++)
             {
@@ -758,6 +779,7 @@ internal static class ParquetFooterParser
 
         static int[] ParseInt32List(ref ThriftCompactReader reader, CompactField field, string description)
         {
+            reader.RequireDepth(4);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Int32)
@@ -770,6 +792,7 @@ internal static class ParquetFooterParser
 
         static string[] ParseStringList(ref ThriftCompactReader reader, CompactField field)
         {
+            reader.RequireDepth(4);
             reader.RequireType(field, CompactType.List);
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Binary)
@@ -787,11 +810,13 @@ internal static class ParquetFooterParser
         FileMetadataWire wire,
         long sourceLength,
         long footerOffset,
-        ParquetReaderOptions options)
+        ParquetReaderOptions options,
+        CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var version = wire.Version ?? throw new InvalidOperationException("Validated file metadata has no version.");
             if (version is not 1 and not 2)
-                throw new ParquetUnsupportedFeatureException("The file metadata version is unsupported.", footerOffset);
+                throw new ParquetUnsupportedFeatureException("The file metadata version is unsupported.", ParquetErrorLocation.AtOffset(footerOffset));
             var rowCount = RequireNonNegative(
                 wire.RowCount ?? throw new InvalidOperationException("Validated file metadata has no row count."),
                 "The file row count is negative.",
@@ -800,10 +825,11 @@ internal static class ParquetFooterParser
             var schema = BuildSchema(
                 wire.Schema ?? throw new InvalidOperationException("Validated file metadata has no schema."),
                 options,
-                footerOffset);
+                footerOffset,
+                cancellationToken);
             var columnOrders = wire.ColumnOrders ?? [];
             if (columnOrders.Length != 0 && columnOrders.Length != schema.Columns.Count)
-                throw new ParquetFormatException("The column-order count does not match the primitive-leaf count.", byteOffset: footerOffset);
+                throw new ParquetFormatException("The column-order count does not match the primitive-leaf count.", ParquetErrorLocation.AtOffset(footerOffset));
 
             var wireRowGroups = wire.RowGroups ??
                 throw new InvalidOperationException("Validated file metadata has no row-group list.");
@@ -811,6 +837,8 @@ internal static class ParquetFooterParser
             long globalRowOffset = 0;
             for (var rowGroupOrdinal = 0; rowGroupOrdinal < rowGroups.Length; rowGroupOrdinal++)
             {
+                if ((rowGroupOrdinal & 15) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
                 var rowGroup = wireRowGroups[rowGroupOrdinal];
                 var groupRows = RequireNonNegative(
                     rowGroup.RowCount ?? throw new InvalidOperationException("A validated row group has no row count."),
@@ -821,14 +849,14 @@ internal static class ParquetFooterParser
                     "A row-group byte total is negative.",
                     footerOffset);
                 if (rowGroup.TotalCompressedSize is < 0)
-                    throw new ParquetFormatException("A row-group compressed byte total is negative.", byteOffset: footerOffset);
+                    throw new ParquetFormatException("A row-group compressed byte total is negative.", ParquetErrorLocation.AtOffset(footerOffset));
                 if (rowGroup.FileOffset is < 0)
-                    throw new ParquetFormatException("A row-group file offset is negative.", byteOffset: footerOffset);
+                    throw new ParquetFormatException("A row-group file offset is negative.", ParquetErrorLocation.AtOffset(footerOffset));
 
                 var chunks = rowGroup.Columns ??
                     throw new InvalidOperationException("A validated row group has no column list.");
                 if (chunks.Length != schema.Columns.Count)
-                    throw new ParquetFormatException("A row-group column count does not match the schema.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal);
+                    throw new ParquetFormatException("A row-group column count does not match the schema.", ParquetErrorLocation.AtRowGroup(footerOffset, rowGroupOrdinal));
                 var publicChunks = new ParquetColumnChunk[chunks.Length];
                 for (var columnOrdinal = 0; columnOrdinal < chunks.Length; columnOrdinal++)
                 {
@@ -856,11 +884,11 @@ internal static class ParquetFooterParser
                 }
                 catch (OverflowException exception)
                 {
-                    throw new ParquetFormatException("The aggregate row count overflows 64-bit arithmetic.", exception, footerOffset);
+                    throw new ParquetFormatException("The aggregate row count overflows 64-bit arithmetic.", exception, ParquetErrorLocation.AtOffset(footerOffset));
                 }
             }
             if (globalRowOffset != rowCount)
-                throw new ParquetFormatException("The file row count does not equal the row-group row-count sum.", byteOffset: footerOffset);
+                throw new ParquetFormatException("The file row count does not equal the row-group row-count sum.", ParquetErrorLocation.AtOffset(footerOffset));
 
             return new ParquetFileMetadata(
                 version,
@@ -873,13 +901,14 @@ internal static class ParquetFooterParser
                 wire.HasEncryptionAlgorithm || wire.HasFooterSigningKeyMetadata);
         }
 
-        static ParquetSchema BuildSchema(SchemaElementWire[] wire, ParquetReaderOptions options, long footerOffset)
+        static ParquetSchema BuildSchema(SchemaElementWire[] wire, ParquetReaderOptions options, long footerOffset, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (wire.Length == 0)
-                throw new ParquetFormatException("The Parquet schema is empty.", byteOffset: footerOffset);
+                throw new ParquetFormatException("The Parquet schema is empty.", ParquetErrorLocation.AtOffset(footerOffset));
             var root = wire[0];
             if (root.TypeCode.HasValue || root.RepetitionCode is not (null or 0) || root.ChildCount is null or < 0)
-                throw new ParquetFormatException("The root schema element is malformed.", byteOffset: footerOffset);
+                throw new ParquetFormatException("The root schema element is malformed.", ParquetErrorLocation.AtOffset(footerOffset));
 
             var elements = new ParquetSchemaElement[wire.Length];
             var columnStorage = new ParquetColumn[wire.Length - 1];
@@ -893,19 +922,21 @@ internal static class ParquetFooterParser
 
             for (var i = 1; i < wire.Length; i++)
             {
+                if ((i & 63) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
                 while (stackCount > 0 && stack[stackCount - 1].RemainingChildren == 0)
                     stackCount--;
                 if (stackCount == 0)
-                    throw new ParquetFormatException("The flattened schema contains an orphan element.", byteOffset: footerOffset);
+                    throw new ParquetFormatException("The flattened schema contains an orphan element.", ParquetErrorLocation.AtOffset(footerOffset));
 
                 var parent = stack[stackCount - 1];
                 stack[stackCount - 1] = new SchemaFrame(parent.ElementOrdinal, parent.RemainingChildren - 1);
                 var current = wire[i];
                 if (current.RepetitionCode is null)
-                    throw new ParquetFormatException("A non-root schema element lacks repetition metadata.", byteOffset: footerOffset);
+                    throw new ParquetFormatException("A non-root schema element lacks repetition metadata.", ParquetErrorLocation.AtOffset(footerOffset));
                 var isLeaf = current.TypeCode.HasValue;
                 if (isLeaf == current.ChildCount.HasValue || current.ChildCount is < 0)
-                    throw new ParquetFormatException("A schema element does not describe exactly one leaf or group.", byteOffset: footerOffset);
+                    throw new ParquetFormatException("A schema element does not describe exactly one leaf or group.", ParquetErrorLocation.AtOffset(footerOffset));
 
                 var parentElement = elements[parent.ElementOrdinal];
                 var pathArray = new string[parentElement.Path.Count + 1];
@@ -925,15 +956,16 @@ internal static class ParquetFooterParser
                 if (isLeaf)
                 {
                     if (columnCount >= options.MaximumLeafColumns)
-                        throw new ParquetLimitExceededException("The schema exceeds the configured leaf-column limit.", footerOffset);
+                        throw new ParquetLimitExceededException("The schema exceeds the configured leaf-column limit.", ParquetErrorLocation.AtOffset(footerOffset));
                     var reason = GetUnsupportedReason(element);
                     columnStorage[columnCount] = new ParquetColumn(columnCount, element, reason is null, reason);
                     columnCount++;
                 }
                 else if (current.ChildCount is int childCount && childCount > 0)
                 {
+                    // Schema-tree depth deliberately shares MaximumThriftDepth to bound nesting without a separate option.
                     if (stackCount + 1 > options.MaximumThriftDepth)
-                        throw new ParquetLimitExceededException("The schema exceeds the configured nesting depth.", footerOffset);
+                        throw new ParquetLimitExceededException("The schema exceeds the configured nesting depth.", ParquetErrorLocation.AtOffset(footerOffset));
                     stack[stackCount++] = new SchemaFrame(i, childCount);
                 }
             }
@@ -941,7 +973,7 @@ internal static class ParquetFooterParser
             while (stackCount > 0 && stack[stackCount - 1].RemainingChildren == 0)
                 stackCount--;
             if (stackCount != 0)
-                throw new ParquetFormatException("The flattened schema ends before all declared children.", byteOffset: footerOffset);
+                throw new ParquetFormatException("The flattened schema ends before all declared children.", ParquetErrorLocation.AtOffset(footerOffset));
             if (columnCount != columnStorage.Length)
                 Array.Resize(ref columnStorage, columnCount);
             return new ParquetSchema(elements, columnStorage);
@@ -1067,7 +1099,7 @@ internal static class ParquetFooterParser
 
         static ParquetSemanticAnnotation? FromLegacy(int legacyCode, int? scale, int? precision)
         {
-            if (!Enum.IsDefined(typeof(ParquetConvertedType), legacyCode))
+            if (!Enum.IsDefined((ParquetConvertedType)legacyCode))
                 return null;
             var legacy = (ParquetConvertedType)legacyCode;
             var kind = legacy switch
@@ -1133,7 +1165,7 @@ internal static class ParquetFooterParser
 
         static bool IsPhysicallyCompatible(SchemaElementWire element, ParquetSemanticAnnotation annotation)
         {
-            var physical = element.TypeCode is int typeCode && Enum.IsDefined(typeof(ParquetPhysicalType), typeCode)
+            var physical = element.TypeCode is int typeCode && Enum.IsDefined((ParquetPhysicalType)typeCode)
                 ? (ParquetPhysicalType)typeCode : (ParquetPhysicalType?)null;
             return annotation.Kind switch
             {
@@ -1238,20 +1270,29 @@ internal static class ParquetFooterParser
             var encodingCodes = metadata.EncodingCodes ??
                 throw new InvalidOperationException("Validated column metadata has no encoding list.");
             if (metadata.DictionaryPageOffset is < 0 || metadata.IndexPageOffset is < 0 || metadata.BloomFilterOffset is < 0)
-                throw new ParquetFormatException("A column-chunk auxiliary offset is negative.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException("A column-chunk auxiliary offset is negative.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             ValidatePair(chunk.OffsetIndexOffset, chunk.OffsetIndexLength, "offset index", sourceLength, footerOffset, rowGroupOrdinal, columnOrdinal);
             ValidatePair(chunk.ColumnIndexOffset, chunk.ColumnIndexLength, "column index", sourceLength, footerOffset, rowGroupOrdinal, columnOrdinal);
             if (metadata.BloomFilterLength is < 0)
-                throw new ParquetFormatException("A bloom-filter length is negative.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException("A bloom-filter length is negative.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
+            if (metadata.BloomFilterLength.HasValue && !metadata.BloomFilterOffset.HasValue)
+                throw new ParquetFormatException("A bloom-filter length without an offset is invalid.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             if (metadata.BloomFilterOffset.HasValue && metadata.BloomFilterLength.HasValue)
                 ValidateRange(metadata.BloomFilterOffset.Value, metadata.BloomFilterLength.Value, sourceLength, footerOffset, "bloom filter", rowGroupOrdinal, columnOrdinal);
+            if (chunk.FilePath is null)
+            {
+                if (metadata.IndexPageOffset.HasValue)
+                    ValidateOffset(metadata.IndexPageOffset.Value, sourceLength, footerOffset, "index page", rowGroupOrdinal, columnOrdinal);
+                if (metadata.BloomFilterOffset.HasValue && !metadata.BloomFilterLength.HasValue)
+                    ValidateOffset(metadata.BloomFilterOffset.Value, sourceLength, footerOffset, "bloom filter", rowGroupOrdinal, columnOrdinal);
+            }
 
             if (!path.SequenceEqual(column.Path, StringComparer.Ordinal))
-                throw new ParquetFormatException("A column-chunk path does not match the schema leaf order.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException("A column-chunk path does not match the schema leaf order.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             if (metadata.TypeCode != column.SchemaElement.PhysicalTypeCode)
-                throw new ParquetFormatException("A column-chunk physical type does not match the schema.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException("A column-chunk physical type does not match the schema.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             if (column.IsReadable && valueCount != rowCount)
-                throw new ParquetFormatException("A flat column-chunk value count does not match its row group.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException("A flat column-chunk value count does not match its row group.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
 
             if (chunk.FilePath is null)
             {
@@ -1259,13 +1300,22 @@ internal static class ParquetFooterParser
                     ? Math.Min(metadata.DictionaryPageOffset.Value, dataOffset)
                     : dataOffset;
                 ValidateRange(firstPage, compressed, sourceLength, footerOffset, "column chunk", rowGroupOrdinal, columnOrdinal);
+                if (metadata.DictionaryPageOffset.HasValue)
+                {
+                    var dictionaryOffset = metadata.DictionaryPageOffset.Value;
+                    if (dictionaryOffset < firstPage || dictionaryOffset >= firstPage + compressed)
+                        throw new ParquetFormatException("A dictionary-page offset lies outside its column chunk.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
+                }
+
+                if (dataOffset < firstPage || dataOffset >= firstPage + compressed)
+                    throw new ParquetFormatException("A data-page offset lies outside its column chunk.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             }
 
             ParquetStatistics? statistics = null;
             if (metadata.Statistics is { } stats)
             {
                 if (stats.NullCount is < 0 || stats.DistinctCount is < 0 || stats.NanCount is < 0)
-                    throw new ParquetFormatException("Column statistics contain a negative count.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                    throw new ParquetFormatException("Column statistics contain a negative count.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
                 statistics = new ParquetStatistics(
                     stats.LegacyMinimum,
                     stats.LegacyMaximum,
@@ -1314,9 +1364,21 @@ internal static class ParquetFooterParser
         int columnOrdinal)
         {
             if (offset.HasValue != length.HasValue)
-                throw new ParquetFormatException($"The {description} offset and length are not both present.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException($"The {description} offset and length are not both present.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             if (offset is long actualOffset && length is int actualLength)
                 ValidateRange(actualOffset, actualLength, sourceLength, footerOffset, description, rowGroupOrdinal, columnOrdinal);
+        }
+
+        static void ValidateOffset(
+        long offset,
+        long sourceLength,
+        long footerOffset,
+        string description,
+        int rowGroupOrdinal,
+        int columnOrdinal)
+        {
+            if (offset < 0 || offset >= sourceLength || offset >= footerOffset)
+                throw new ParquetFormatException("The " + description + " offset lies outside the input.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
         }
 
         static void ValidateRange(
@@ -1329,15 +1391,15 @@ internal static class ParquetFooterParser
         int columnOrdinal)
         {
             if (offset < 0 || length < 0 || offset > sourceLength || length > sourceLength - offset)
-                throw new ParquetFormatException($"The {description} range lies outside the input.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException($"The {description} range lies outside the input.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
             if (offset + length > footerOffset)
-                throw new ParquetFormatException($"The {description} range overlaps the footer.", byteOffset: footerOffset, rowGroupOrdinal: rowGroupOrdinal, columnOrdinal: columnOrdinal);
+                throw new ParquetFormatException($"The {description} range overlaps the footer.", ParquetErrorLocation.AtChunk(footerOffset, rowGroupOrdinal, columnOrdinal));
         }
 
         static long RequireNonNegative(long value, string message, long offset)
         {
             if (value < 0)
-                throw new ParquetFormatException(message, byteOffset: offset);
+                throw new ParquetFormatException(message, ParquetErrorLocation.AtOffset(offset));
             return value;
         }
     }

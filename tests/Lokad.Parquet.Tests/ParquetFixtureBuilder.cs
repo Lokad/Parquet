@@ -68,6 +68,9 @@ internal sealed class ParquetFixtureOptions
     public FixtureCrcMode CrcMode { get; init; }
     public ParquetPageHeaderOverrides? PageHeaderOverrides { get; init; }
     public long? AuxiliaryOffset { get; init; }
+    public long? ChunkTotalCompressedSize { get; init; }
+    public bool OmitBloomLength { get; init; }
+    public bool BloomLengthWithoutOffset { get; init; }
     public int AuxiliaryLength { get; init; } = 1;
     public long? RowGroupTotalByteSize { get; init; }
     public Action<CompactTestWriter>? ExtraFileMetadataFields { get; init; }
@@ -83,6 +86,7 @@ internal sealed class ParquetPageHeaderOverrides
     public int? DefinitionEncodingCode { get; init; }
     public int? RepetitionEncodingCode { get; init; }
     public int? V1DefinitionLevelByteLength { get; init; }
+    public bool? V2IsCompressed { get; init; }
     public int? HeaderPaddingBytes { get; init; }
 }
 
@@ -202,7 +206,7 @@ internal static class ParquetFixtureBuilder
                         footer.Int32Field(ref metadata, 4, (int)options.CompressionCodec);
                         footer.Int64Field(ref metadata, 5, rowCount);
                         footer.Int64Field(ref metadata, 6, page.Length);
-                        footer.Int64Field(ref metadata, 7, page.Length);
+                        footer.Int64Field(ref metadata, 7, options.ChunkTotalCompressedSize ?? page.Length);
                         footer.Int64Field(ref metadata, 9, 4 + pages.DataPageOffset);
                         if (options.AuxiliaryOffset is long auxiliaryOffset)
                             footer.Int64Field(ref metadata, 10, auxiliaryOffset);
@@ -210,8 +214,10 @@ internal static class ParquetFixtureBuilder
                             footer.Int64Field(ref metadata, 11, 4 + dictionaryPageOffset);
                         if (options.AuxiliaryOffset is long bloomOffset)
                         {
-                            footer.Int64Field(ref metadata, 14, bloomOffset);
-                            footer.Int32Field(ref metadata, 15, options.AuxiliaryLength);
+                            if (!options.BloomLengthWithoutOffset)
+                                footer.Int64Field(ref metadata, 14, bloomOffset);
+                            if (!options.OmitBloomLength)
+                                footer.Int32Field(ref metadata, 15, options.AuxiliaryLength);
                         }
                         footer.Stop();
                     });
@@ -535,10 +541,12 @@ internal static class ParquetFixtureBuilder
             uncompressed = new byte[checked(levels.Length + encodedPhysical.Length)];
             levels.CopyTo(uncompressed, 0);
             encodedPhysical.CopyTo(uncompressed, levels.Length);
+            var v2IsCompressed = overrides?.V2IsCompressed ?? (codec != ParquetCompressionCodec.Uncompressed);
             payload = codec switch
             {
                 ParquetCompressionCodec.Uncompressed => uncompressed,
-                ParquetCompressionCodec.Snappy => Combine(levels, EncodeSnappyLiteral(encodedPhysical)),
+                ParquetCompressionCodec.Snappy when v2IsCompressed => Combine(levels, EncodeSnappyLiteral(encodedPhysical)),
+                ParquetCompressionCodec.Snappy => uncompressed,
                 _ => throw new ArgumentException("The generated fixture supports only uncompressed and Snappy pages.", nameof(codec)),
             };
         }
@@ -586,7 +594,7 @@ internal static class ParquetFixtureBuilder
                         (dictionaryValues is null ? 0 : (int)ParquetEncoding.RunLengthDictionary));
                 header.Int32Field(ref data, 5, levels.Length);
                 header.Int32Field(ref data, 6, 0);
-                header.BooleanField(ref data, 7, codec != ParquetCompressionCodec.Uncompressed);
+                header.BooleanField(ref data, 7, overrides?.V2IsCompressed ?? (codec != ParquetCompressionCodec.Uncompressed));
                 header.Stop();
             });
         }

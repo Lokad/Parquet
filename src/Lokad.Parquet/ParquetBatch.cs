@@ -44,8 +44,24 @@ internal sealed class DecodedColumnBatch : IDisposable
         if (_lifetime.IsDisposed)
             return;
         _lifetime.Dispose();
+        Exception? failure = null;
         foreach (var owner in _owners)
-            owner.Dispose();
+        {
+            try
+            {
+                owner.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }
 
@@ -262,7 +278,23 @@ public sealed class ParquetBatch : IDisposable
         if (_lifetime.IsDisposed)
             return;
         _lifetime.Dispose();
+        Exception? failure = null;
         foreach (var owner in _owners)
-            owner.Dispose();
+        {
+            try
+            {
+                owner.Dispose();
+            }
+            catch (Exception exception) when (failure is null)
+            {
+                failure = exception;
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        if (failure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

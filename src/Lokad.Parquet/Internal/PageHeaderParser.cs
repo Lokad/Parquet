@@ -1,43 +1,51 @@
 namespace Lokad.Parquet.Internal;
 
-internal sealed class PageHeaderWire
+// Validated page type. The parser guarantees the corresponding specific
+// header below is meaningful; specific headers for any other type, including
+// Unknown, must be ignored. Unknown preserves the raw TypeCode so the scan
+// path can report an unsupported page type rather than malformed input.
+internal enum ValidatedPageType
 {
-    public required int TypeCode { get; init; }
-    public required int UncompressedSize { get; init; }
-    public required int CompressedSize { get; init; }
-    public int? Crc { get; init; }
-    public DataPageHeaderWire? DataV1 { get; init; }
-    public DictionaryPageHeaderWire? Dictionary { get; init; }
-    public DataPageHeaderV2Wire? DataV2 { get; init; }
+    DataV1,
+    Dictionary,
+    DataV2,
+    Unknown,
 }
 
-internal sealed class DataPageHeaderWire
-{
-    public required int ValueCount { get; init; }
-    public required int EncodingCode { get; init; }
-    public required int DefinitionEncodingCode { get; init; }
-    public required int RepetitionEncodingCode { get; init; }
-}
+internal readonly record struct ValidatedDataPageV1(
+    int ValueCount,
+    int EncodingCode,
+    int DefinitionEncodingCode,
+    int RepetitionEncodingCode);
 
-internal sealed class DictionaryPageHeaderWire
-{
-    public required int ValueCount { get; init; }
-    public required int EncodingCode { get; init; }
-    public bool? IsSorted { get; init; }
-}
+internal readonly record struct ValidatedDictionaryPage(
+    int ValueCount,
+    int EncodingCode,
+    bool? IsSorted);
 
-internal sealed class DataPageHeaderV2Wire
-{
-    public required int ValueCount { get; init; }
-    public required int NullCount { get; init; }
-    public required int RowCount { get; init; }
-    public required int EncodingCode { get; init; }
-    public required int DefinitionLevelsByteLength { get; init; }
-    public required int RepetitionLevelsByteLength { get; init; }
-    public bool IsCompressed { get; init; } = true;
-}
+internal readonly record struct ValidatedDataPageV2(
+    int ValueCount,
+    int NullCount,
+    int RowCount,
+    int EncodingCode,
+    int DefinitionLevelsByteLength,
+    int RepetitionLevelsByteLength,
+    bool IsCompressed);
 
-internal readonly record struct ParsedPageHeader(PageHeaderWire Header, int HeaderByteCount);
+// Validated page header. Only the specific header selected by PageType is
+// meaningful; the others are default and must not be read. Crc absence means
+// no CRC was present, which is genuine absence.
+internal readonly record struct ValidatedPageHeader(
+    int TypeCode,
+    int UncompressedSize,
+    int CompressedSize,
+    int? Crc,
+    ValidatedPageType PageType,
+    ValidatedDataPageV1 DataV1,
+    ValidatedDictionaryPage Dictionary,
+    ValidatedDataPageV2 DataV2);
+
+internal readonly record struct ParsedPageHeader(ValidatedPageHeader Header, int HeaderByteCount);
 
 internal static class PageHeaderParser
 {
@@ -59,15 +67,19 @@ internal static class PageHeaderParser
             return false;
         }
 
-        static PageHeaderWire ParsePageHeader(ref ThriftCompactReader reader, ParquetReaderOptions options)
+        static ValidatedPageHeader ParsePageHeader(ref ThriftCompactReader reader, ParquetReaderOptions options)
         {
+            reader.RequireDepth(1);
             int? typeCode = null;
             int? uncompressedSize = null;
             int? compressedSize = null;
             int? crc = null;
-            DataPageHeaderWire? dataV1 = null;
-            DictionaryPageHeaderWire? dictionary = null;
-            DataPageHeaderV2Wire? dataV2 = null;
+            ValidatedDataPageV1 dataV1 = default;
+            var hasDataV1 = false;
+            ValidatedDictionaryPage dictionary = default;
+            var hasDictionary = false;
+            ValidatedDataPageV2 dataV2 = default;
+            var hasDataV2 = false;
             short previous = 0;
             ulong seen = 0;
             while (true)
@@ -97,6 +109,7 @@ internal static class PageHeaderParser
                     case 5:
                         reader.RequireType(field, CompactType.Struct);
                         dataV1 = ParseDataV1(ref reader);
+                        hasDataV1 = true;
                         break;
                     case 6:
                         reader.RequireType(field, CompactType.Struct);
@@ -105,10 +118,12 @@ internal static class PageHeaderParser
                     case 7:
                         reader.RequireType(field, CompactType.Struct);
                         dictionary = ParseDictionary(ref reader);
+                        hasDictionary = true;
                         break;
                     case 8:
                         reader.RequireType(field, CompactType.Struct);
                         dataV2 = ParseDataV2(ref reader);
+                        hasDataV2 = true;
                         break;
                     default:
                         reader.SkipField(field, 2);
@@ -121,30 +136,37 @@ internal static class PageHeaderParser
             if (uncompressedSize < 0 || compressedSize < 0)
                 throw reader.Format("A page header contains a negative payload size.");
             if (uncompressedSize > options.MaximumUncompressedPageBytes)
-                throw new ParquetLimitExceededException("A page exceeds the configured uncompressed-size limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("A page exceeds the configured uncompressed-size limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
             if (compressedSize > options.MaximumCompressedPageBytes)
-                throw new ParquetLimitExceededException("A page exceeds the configured compressed-size limit.", reader.AbsoluteOffset);
+                throw new ParquetLimitExceededException("A page exceeds the configured compressed-size limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
 
-            var matchingHeaders = (dataV1 is null ? 0 : 1) + (dictionary is null ? 0 : 1) + (dataV2 is null ? 0 : 1);
-            if (typeCode switch { 0 => dataV1 is null, 2 => dictionary is null, 3 => dataV2 is null, _ => false })
+            var matchingHeaders = (hasDataV1 ? 1 : 0) + (hasDictionary ? 1 : 0) + (hasDataV2 ? 1 : 0);
+            if (typeCode switch { 0 => !hasDataV1, 2 => !hasDictionary, 3 => !hasDataV2, _ => false })
                 throw reader.Format("The page-specific header does not match the page type.");
             if (matchingHeaders > 1)
                 throw reader.Format("A page header contains multiple page-specific headers.");
 
-            return new PageHeaderWire
+            var pageType = typeCode.Value switch
             {
-                TypeCode = typeCode.Value,
-                UncompressedSize = uncompressedSize.Value,
-                CompressedSize = compressedSize.Value,
-                Crc = crc,
-                DataV1 = dataV1,
-                Dictionary = dictionary,
-                DataV2 = dataV2,
+                0 => ValidatedPageType.DataV1,
+                2 => ValidatedPageType.Dictionary,
+                3 => ValidatedPageType.DataV2,
+                _ => ValidatedPageType.Unknown,
             };
+            return new ValidatedPageHeader(
+                typeCode.Value,
+                uncompressedSize.Value,
+                compressedSize.Value,
+                crc,
+                pageType,
+                dataV1,
+                dictionary,
+                dataV2);
         }
 
-        static DataPageHeaderWire ParseDataV1(ref ThriftCompactReader reader)
+        static ValidatedDataPageV1 ParseDataV1(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(2);
             int? valueCount = null;
             int? encoding = null;
             int? definition = null;
@@ -184,17 +206,16 @@ internal static class PageHeaderParser
                 throw reader.Format("A V1 data-page header is missing a required field.");
             if (valueCount < 0)
                 throw reader.Format("A V1 data-page value count is negative.");
-            return new DataPageHeaderWire
-            {
-                ValueCount = valueCount.Value,
-                EncodingCode = encoding.Value,
-                DefinitionEncodingCode = definition.Value,
-                RepetitionEncodingCode = repetition.Value,
-            };
+            return new ValidatedDataPageV1(
+                valueCount.Value,
+                encoding.Value,
+                definition.Value,
+                repetition.Value);
         }
 
-        static DictionaryPageHeaderWire ParseDictionary(ref ThriftCompactReader reader)
+        static ValidatedDictionaryPage ParseDictionary(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(2);
             int? valueCount = null;
             int? encoding = null;
             bool? sorted = null;
@@ -228,16 +249,15 @@ internal static class PageHeaderParser
                 throw reader.Format("A dictionary-page header is missing a required field.");
             if (valueCount < 0)
                 throw reader.Format("A dictionary-page value count is negative.");
-            return new DictionaryPageHeaderWire
-            {
-                ValueCount = valueCount.Value,
-                EncodingCode = encoding.Value,
-                IsSorted = sorted,
-            };
+            return new ValidatedDictionaryPage(
+                valueCount.Value,
+                encoding.Value,
+                sorted);
         }
 
-        static DataPageHeaderV2Wire ParseDataV2(ref ThriftCompactReader reader)
+        static ValidatedDataPageV2 ParseDataV2(ref ThriftCompactReader reader)
         {
+            reader.RequireDepth(2);
             int? valueCount = null;
             int? nullCount = null;
             int? rowCount = null;
@@ -292,16 +312,14 @@ internal static class PageHeaderParser
                 throw reader.Format("A V2 data-page header is missing a required field.");
             if (valueCount < 0 || nullCount < 0 || nullCount > valueCount || rowCount < 0 || definitionBytes < 0 || repetitionBytes < 0)
                 throw reader.Format("A V2 data-page header contains an invalid count or length.");
-            return new DataPageHeaderV2Wire
-            {
-                ValueCount = valueCount.Value,
-                NullCount = nullCount.Value,
-                RowCount = rowCount.Value,
-                EncodingCode = encoding.Value,
-                DefinitionLevelsByteLength = definitionBytes.Value,
-                RepetitionLevelsByteLength = repetitionBytes.Value,
-                IsCompressed = compressed,
-            };
+            return new ValidatedDataPageV2(
+                valueCount.Value,
+                nullCount.Value,
+                rowCount.Value,
+                encoding.Value,
+                definitionBytes.Value,
+                repetitionBytes.Value,
+                compressed);
         }
     }
 

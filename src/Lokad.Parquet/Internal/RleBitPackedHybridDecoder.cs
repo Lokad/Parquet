@@ -86,8 +86,16 @@ internal static class RleBitPackedHybridDecoder
                 var runByteCount = groupCount * bitWidth;
                 if (runByteCount > source.Length - sourceOffset)
                     throw new ParquetFormatException("A bit-packed run is truncated.");
+                var remaining = destination.Length - outputOffset;
+                if (runValueCount > remaining)
+                {
+                    // Only the final run may carry padding, and only the minimal groups covering the remainder.
+                    var requiredGroups = checked((remaining + 7) / 8);
+                    if (groupCount != requiredGroups || sourceOffset + runByteCount != source.Length)
+                        throw new ParquetFormatException("A bit-packed run exceeds the declared value count.");
+                }
 
-                var valuesToWrite = Math.Min(runValueCount, destination.Length - outputOffset);
+                var valuesToWrite = Math.Min(runValueCount, remaining);
                 DecodeBitPacked(
                     source.Slice(sourceOffset, runByteCount),
                     bitWidth,
@@ -147,7 +155,15 @@ internal static class RleBitPackedHybridDecoder
             var runValueCount = groupCount * 8;
             if (groupCount > source.Length - sourceOffset)
                 throw new ParquetFormatException("A bit-packed run is truncated.");
-            var valuesToWrite = Math.Min(runValueCount, valueCount - outputOffset);
+            var remainingBits = valueCount - outputOffset;
+            if (runValueCount > remainingBits)
+            {
+                var requiredGroups = checked((remainingBits + 7) / 8);
+                if (groupCount != requiredGroups || sourceOffset + groupCount != source.Length)
+                    throw new ParquetFormatException("A bit-packed run exceeds the declared value count.");
+            }
+
+            var valuesToWrite = Math.Min(runValueCount, remainingBits);
             if ((outputOffset & 7) == 0)
             {
                 var sourceBytes = source.Slice(sourceOffset, checked((valuesToWrite + 7) / 8));

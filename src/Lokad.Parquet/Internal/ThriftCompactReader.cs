@@ -137,7 +137,7 @@ internal ref struct ThriftCompactReader
     {
         var length = ReadLength();
         if (length > _maximumStringBytes - _stringBytes)
-            throw new ParquetLimitExceededException("Metadata strings exceed the configured byte limit.", AbsoluteOffset);
+            throw new ParquetLimitExceededException("Metadata strings exceed the configured byte limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
         _stringBytes += length;
         var bytes = ReadSpan(length);
         try
@@ -146,7 +146,7 @@ internal ref struct ThriftCompactReader
         }
         catch (DecoderFallbackException exception)
         {
-            throw new ParquetFormatException("Metadata contains malformed UTF-8.", exception, AbsoluteOffset - length);
+            throw new ParquetFormatException("Metadata contains malformed UTF-8.", exception, ParquetErrorLocation.AtOffset(AbsoluteOffset - length));
         }
     }
 
@@ -155,11 +155,23 @@ internal ref struct ThriftCompactReader
         var header = ReadRawByte();
         var count = header >> 4;
         if (count == 15)
+        {
             count = ReadContainerCount();
+        }
+        else if (count > _maximumContainerElements)
+        {
+            throw new ParquetLimitExceededException("A Thrift container exceeds the configured element limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
+        }
         var type = ParseType((byte)(header & 0x0F));
         if (type == CompactType.Stop)
             ThrowFormat("A collection element cannot use the STOP type.");
         return new CompactCollection(type, count);
+    }
+
+    public void RequireDepth(int depth)
+    {
+        if (depth > _maximumDepth)
+            throw new ParquetLimitExceededException("Thrift nesting exceeds the configured depth limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
     }
 
     public void RequireType(CompactField field, CompactType expected)
@@ -174,7 +186,7 @@ internal ref struct ThriftCompactReader
     public void SkipValue(CompactType type, int depth, CompactBooleanEncoding booleanEncoding)
     {
         if (depth > _maximumDepth)
-            throw new ParquetLimitExceededException("Thrift nesting exceeds the configured depth limit.", AbsoluteOffset);
+            throw new ParquetLimitExceededException("Thrift nesting exceeds the configured depth limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
 
         switch (type)
         {
@@ -245,13 +257,13 @@ internal ref struct ThriftCompactReader
         }
     }
 
-    public ParquetFormatException Format(string message) => new(message, byteOffset: AbsoluteOffset);
+    public ParquetFormatException Format(string message) => new(message, ParquetErrorLocation.AtOffset(AbsoluteOffset));
 
     private int ReadLength()
     {
         var length = ReadVarUInt32();
         if (length > int.MaxValue)
-            throw new ParquetLimitExceededException("A Thrift binary value exceeds the runtime buffer limit.", AbsoluteOffset);
+            throw new ParquetLimitExceededException("A Thrift binary value exceeds the runtime buffer limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
         return (int)length;
     }
 
@@ -259,7 +271,7 @@ internal ref struct ThriftCompactReader
     {
         var count = ReadVarUInt32();
         if (count > (uint)_maximumContainerElements)
-            throw new ParquetLimitExceededException("A Thrift container exceeds the configured element limit.", AbsoluteOffset);
+            throw new ParquetLimitExceededException("A Thrift container exceeds the configured element limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
         return (int)count;
     }
 

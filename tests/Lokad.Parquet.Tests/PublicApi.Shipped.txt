@@ -1,15 +1,15 @@
 # Reviewed public API for the current 0.1 preview.
-type Lokad.Parquet.IParquetRandomAccessSource
+type interface Lokad.Parquet.IParquetRandomAccessSource : System.IAsyncDisposable
   property System.Int64 Length { get; }
   method System.Threading.Tasks.ValueTask ReadExactlyAsync(System.Int64 offset, System.ArraySegment<System.Byte> destination, System.Threading.CancellationToken cancellationToken)
-type Lokad.Parquet.ParquetAnnotationStatus
+type enum Lokad.Parquet.ParquetAnnotationStatus
   enum None = 0
   enum ModernOnly = 1
   enum LegacyOnly = 2
   enum Consistent = 3
   enum Conflict = 4
   enum Invalid = 5
-type Lokad.Parquet.ParquetBatch
+type sealed class Lokad.Parquet.ParquetBatch : System.Object, System.IDisposable
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetColumnBatch> Columns { get; }
   property System.Boolean IsDisposed { get; }
   property System.Int32 RowCount { get; }
@@ -17,21 +17,21 @@ type Lokad.Parquet.ParquetBatch
   property System.Int64 RowOffset { get; }
   property System.Int64 RowOffsetInGroup { get; }
   method System.Void Dispose()
-type Lokad.Parquet.ParquetBinaryColumnBatch
+type sealed class Lokad.Parquet.ParquetBinaryColumnBatch : Lokad.Parquet.ParquetColumnBatch
   property System.ReadOnlyMemory<System.Int32> Offsets { get; }
   property System.ReadOnlyMemory<System.Byte> Payload { get; }
-type Lokad.Parquet.ParquetColumn
+type sealed class Lokad.Parquet.ParquetColumn : System.Object
   property System.Boolean IsReadable { get; }
   property System.String Name { get; }
   property System.Int32 Ordinal { get; }
   property System.Collections.Generic.IReadOnlyList<System.String> Path { get; }
   property Lokad.Parquet.ParquetSchemaElement SchemaElement { get; }
-  property System.String UnsupportedReason { get; }
-type Lokad.Parquet.ParquetColumnBatch
+  property System.String? UnsupportedReason { get; }
+type abstract class Lokad.Parquet.ParquetColumnBatch : System.Object
   property Lokad.Parquet.ParquetColumn Column { get; }
   property System.Int32 RowCount { get; }
   property Lokad.Parquet.ParquetValidity Validity { get; }
-type Lokad.Parquet.ParquetColumnChunk
+type sealed class Lokad.Parquet.ParquetColumnChunk : System.Object
   property System.Nullable<System.Int32> BloomFilterLength { get; }
   property System.Nullable<System.Int64> BloomFilterOffset { get; }
   property System.Nullable<System.Int32> ColumnIndexLength { get; }
@@ -43,7 +43,7 @@ type Lokad.Parquet.ParquetColumnChunk
   property System.Int64 DataPageOffset { get; }
   property System.Nullable<System.Int64> DictionaryPageOffset { get; }
   property System.Collections.ObjectModel.ReadOnlyCollection<System.Int32> EncodingCodes { get; }
-  property System.String ExternalFilePath { get; }
+  property System.String? ExternalFilePath { get; }
   property System.Int64 FileOffset { get; }
   property System.Boolean HasCryptoMetadata { get; }
   property System.Boolean HasEncryptedMetadata { get; }
@@ -53,17 +53,17 @@ type Lokad.Parquet.ParquetColumnChunk
   property System.Collections.Generic.IReadOnlyList<System.String> Path { get; }
   property System.Nullable<Lokad.Parquet.ParquetPhysicalType> PhysicalType { get; }
   property System.Int32 PhysicalTypeCode { get; }
-  property Lokad.Parquet.ParquetStatistics Statistics { get; }
+  property Lokad.Parquet.ParquetStatistics? Statistics { get; }
   property System.Int64 TotalCompressedSize { get; }
   property System.Int64 TotalUncompressedSize { get; }
   property System.Int64 ValueCount { get; }
-type Lokad.Parquet.ParquetColumnOrderKind
+type enum Lokad.Parquet.ParquetColumnOrderKind
   enum Absent = 0
   enum TypeDefined = 1
   enum Ieee754Total = 2
   enum Int96Timestamp = 3
   enum Unknown = 255
-type Lokad.Parquet.ParquetCompressionCodec
+type enum Lokad.Parquet.ParquetCompressionCodec
   enum Uncompressed = 0
   enum Snappy = 1
   enum Gzip = 2
@@ -72,7 +72,7 @@ type Lokad.Parquet.ParquetCompressionCodec
   enum Lz4 = 5
   enum Zstandard = 6
   enum Lz4Raw = 7
-type Lokad.Parquet.ParquetConvertedType
+type enum Lokad.Parquet.ParquetConvertedType
   enum Utf8 = 0
   enum Map = 1
   enum MapKeyValue = 2
@@ -95,7 +95,7 @@ type Lokad.Parquet.ParquetConvertedType
   enum Json = 19
   enum Bson = 20
   enum Interval = 21
-type Lokad.Parquet.ParquetEncoding
+type enum Lokad.Parquet.ParquetEncoding
   enum Plain = 0
   enum PlainDictionary = 2
   enum RunLength = 3
@@ -105,44 +105,44 @@ type Lokad.Parquet.ParquetEncoding
   enum DeltaByteArray = 7
   enum RunLengthDictionary = 8
   enum ByteStreamSplit = 9
-type Lokad.Parquet.ParquetException
+type abstract class Lokad.Parquet.ParquetException : System.Exception, System.Runtime.Serialization.ISerializable
   property System.Nullable<System.Int64> ByteOffset { get; }
   property System.Nullable<System.Int32> ColumnOrdinal { get; }
   property System.Nullable<System.Int32> PageOrdinal { get; }
   property System.Nullable<System.Int32> RowGroupOrdinal { get; }
-type Lokad.Parquet.ParquetFile
+type sealed class Lokad.Parquet.ParquetFile : System.Object, System.IAsyncDisposable
   property System.Int64 Length { get; }
   property Lokad.Parquet.ParquetFileMetadata Metadata { get; }
   property Lokad.Parquet.ParquetReaderOptions Options { get; }
   method System.Threading.Tasks.ValueTask DisposeAsync()
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(Lokad.Parquet.IParquetRandomAccessSource source)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(Lokad.Parquet.IParquetRandomAccessSource source, Lokad.Parquet.ParquetSourceOwnership ownership, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.IO.Stream stream)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.IO.Stream stream, Lokad.Parquet.ParquetSourceOwnership ownership, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.ReadOnlyMemory<System.Byte> content)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.ReadOnlyMemory<System.Byte> content, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.String path)
-  method System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.String path, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(Lokad.Parquet.IParquetRandomAccessSource source)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(Lokad.Parquet.IParquetRandomAccessSource source, Lokad.Parquet.ParquetSourceOwnership ownership, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.IO.Stream stream)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.IO.Stream stream, Lokad.Parquet.ParquetSourceOwnership ownership, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.ReadOnlyMemory<System.Byte> content)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.ReadOnlyMemory<System.Byte> content, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.String path)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetFile> OpenAsync(System.String path, Lokad.Parquet.ParquetReaderOptions options, System.Threading.CancellationToken cancellationToken)
   method System.Collections.Generic.IAsyncEnumerable<Lokad.Parquet.ParquetBatch> ScanAsync(Lokad.Parquet.ParquetScanOptions options)
   method System.Collections.Generic.IAsyncEnumerable<Lokad.Parquet.ParquetBatch> ScanAsync(Lokad.Parquet.ParquetScanOptions options, System.Threading.CancellationToken cancellationToken)
-type Lokad.Parquet.ParquetFileMetadata
+type sealed class Lokad.Parquet.ParquetFileMetadata : System.Object
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetColumnOrderKind> ColumnOrders { get; }
-  property System.String CreatedBy { get; }
+  property System.String? CreatedBy { get; }
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetKeyValueMetadata> CustomMetadata { get; }
   property System.Boolean IsEncrypted { get; }
   property System.Int64 RowCount { get; }
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetRowGroup> RowGroups { get; }
   property Lokad.Parquet.ParquetSchema Schema { get; }
   property System.Int32 Version { get; }
-type Lokad.Parquet.ParquetFixedLengthByteArrayColumnBatch
+type sealed class Lokad.Parquet.ParquetFixedLengthByteArrayColumnBatch : Lokad.Parquet.ParquetColumnBatch
   property System.ReadOnlyMemory<System.Byte> Payload { get; }
   property System.Int32 TypeWidth { get; }
-type Lokad.Parquet.ParquetFormatException
-type Lokad.Parquet.ParquetKeyValueMetadata
+type sealed class Lokad.Parquet.ParquetFormatException : Lokad.Parquet.ParquetException, System.Runtime.Serialization.ISerializable
+type sealed class Lokad.Parquet.ParquetKeyValueMetadata : System.Object
   property System.String Key { get; }
-  property System.String Value { get; }
-type Lokad.Parquet.ParquetLimitExceededException
-type Lokad.Parquet.ParquetLogicalAnnotation
+  property System.String? Value { get; }
+type sealed class Lokad.Parquet.ParquetLimitExceededException : Lokad.Parquet.ParquetException, System.Runtime.Serialization.ISerializable
+type sealed class Lokad.Parquet.ParquetLogicalAnnotation : System.Object
   property System.Int32 Discriminator { get; }
   property System.Nullable<System.Int32> IntegerBitWidth { get; }
   property System.Nullable<System.Boolean> IsAdjustedToUtc { get; }
@@ -152,7 +152,7 @@ type Lokad.Parquet.ParquetLogicalAnnotation
   property System.Nullable<System.Int32> Scale { get; }
   property System.Nullable<Lokad.Parquet.ParquetTimeUnit> TimeUnit { get; }
   property System.Nullable<System.Int32> TimeUnitDiscriminator { get; }
-type Lokad.Parquet.ParquetLogicalTypeKind
+type enum Lokad.Parquet.ParquetLogicalTypeKind
   enum None = 0
   enum String = 1
   enum Map = 2
@@ -172,7 +172,7 @@ type Lokad.Parquet.ParquetLogicalTypeKind
   enum Geometry = 17
   enum Geography = 18
   enum File = 19
-type Lokad.Parquet.ParquetPhysicalType
+type enum Lokad.Parquet.ParquetPhysicalType
   enum Boolean = 0
   enum Int32 = 1
   enum Int64 = 2
@@ -181,35 +181,35 @@ type Lokad.Parquet.ParquetPhysicalType
   enum Double = 5
   enum ByteArray = 6
   enum FixedLengthByteArray = 7
-type Lokad.Parquet.ParquetPrimitiveColumnBatch<T>
+type sealed class Lokad.Parquet.ParquetPrimitiveColumnBatch<T> : Lokad.Parquet.ParquetColumnBatch where T : unmanaged
   property System.ReadOnlyMemory<T> Values { get; }
-type Lokad.Parquet.ParquetReaderOptions
+type sealed class Lokad.Parquet.ParquetReaderOptions : System.Object
   ctor ()
-  property Lokad.Parquet.ParquetReaderOptions Default { get; }
-  property System.Int32 MaximumBinaryBatchBytes { get; set; }
-  property System.Int32 MaximumBinaryValueBytes { get; set; }
-  property System.Int32 MaximumCompressedPageBytes { get; set; }
-  property System.Int32 MaximumDictionaryBytes { get; set; }
-  property System.Int32 MaximumDictionaryEntries { get; set; }
-  property System.Int32 MaximumFooterBytes { get; set; }
-  property System.Int32 MaximumKeyValueMetadataEntries { get; set; }
-  property System.Int32 MaximumLeafColumns { get; set; }
-  property System.Int32 MaximumMetadataStringBytes { get; set; }
-  property System.Int32 MaximumPageHeaderBytes { get; set; }
-  property System.Int32 MaximumPagesPerColumnChunk { get; set; }
-  property System.Int32 MaximumRowGroups { get; set; }
-  property System.Int32 MaximumRowsPerBatch { get; set; }
-  property System.Int64 MaximumScanPooledBytes { get; set; }
-  property System.Int32 MaximumSchemaElements { get; set; }
-  property System.Int32 MaximumThriftContainerElements { get; set; }
-  property System.Int32 MaximumThriftDepth { get; set; }
-  property System.Int32 MaximumUncompressedPageBytes { get; set; }
-  property System.Int32 MaximumValuesPerPage { get; set; }
-type Lokad.Parquet.ParquetRepetition
+  property static Lokad.Parquet.ParquetReaderOptions Default { get; }
+  property System.Int32 MaximumBinaryBatchBytes { get; init; }
+  property System.Int32 MaximumBinaryValueBytes { get; init; }
+  property System.Int32 MaximumCompressedPageBytes { get; init; }
+  property System.Int32 MaximumDictionaryBytes { get; init; }
+  property System.Int32 MaximumDictionaryEntries { get; init; }
+  property System.Int32 MaximumFooterBytes { get; init; }
+  property System.Int32 MaximumKeyValueMetadataEntries { get; init; }
+  property System.Int32 MaximumLeafColumns { get; init; }
+  property System.Int32 MaximumMetadataStringBytes { get; init; }
+  property System.Int32 MaximumPageHeaderBytes { get; init; }
+  property System.Int32 MaximumPagesPerColumnChunk { get; init; }
+  property System.Int32 MaximumRowGroups { get; init; }
+  property System.Int32 MaximumRowsPerBatch { get; init; }
+  property System.Int64 MaximumScanPooledBytes { get; init; }
+  property System.Int32 MaximumSchemaElements { get; init; }
+  property System.Int32 MaximumThriftContainerElements { get; init; }
+  property System.Int32 MaximumThriftDepth { get; init; }
+  property System.Int32 MaximumUncompressedPageBytes { get; init; }
+  property System.Int32 MaximumValuesPerPage { get; init; }
+type enum Lokad.Parquet.ParquetRepetition
   enum Required = 0
   enum Optional = 1
   enum Repeated = 2
-type Lokad.Parquet.ParquetRowGroup
+type sealed class Lokad.Parquet.ParquetRowGroup : System.Object
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetColumnChunk> Columns { get; }
   property System.Nullable<System.Int64> FileOffset { get; }
   property System.Int32 Ordinal { get; }
@@ -217,7 +217,7 @@ type Lokad.Parquet.ParquetRowGroup
   property System.Int64 RowOffset { get; }
   property System.Int64 TotalByteSize { get; }
   property System.Nullable<System.Int64> TotalCompressedSize { get; }
-type Lokad.Parquet.ParquetRowRange
+type struct Lokad.Parquet.ParquetRowRange : System.IEquatable<Lokad.Parquet.ParquetRowRange>
   ctor (System.Int64 start, System.Int64 count)
   property System.Int64 Count { get; }
   property System.Int64 End { get; }
@@ -226,25 +226,25 @@ type Lokad.Parquet.ParquetRowRange
   method System.Boolean Equals(System.Object obj)
   method System.Int32 GetHashCode()
   method System.String ToString()
-type Lokad.Parquet.ParquetScanOptions
+type sealed class Lokad.Parquet.ParquetScanOptions : System.Object
   ctor (System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetColumn> columns)
-  ctor (System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetColumn> columns, System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetRowGroup> rowGroups, System.Nullable<Lokad.Parquet.ParquetRowRange> rowRange, System.Int32 targetBatchRowCount)
+  ctor (System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetColumn> columns, System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetRowGroup>? rowGroups, System.Nullable<Lokad.Parquet.ParquetRowRange> rowRange, System.Int32 targetBatchRowCount)
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetColumn> Columns { get; }
-  property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetRowGroup> RowGroups { get; }
+  property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetRowGroup>? RowGroups { get; }
   property System.Nullable<Lokad.Parquet.ParquetRowRange> RowRange { get; }
   property System.Int32 TargetBatchRowCount { get; }
-type Lokad.Parquet.ParquetSchema
+type sealed class Lokad.Parquet.ParquetSchema : System.Object
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetColumn> Columns { get; }
   property System.Collections.ObjectModel.ReadOnlyCollection<Lokad.Parquet.ParquetSchemaElement> Elements { get; }
   method Lokad.Parquet.ParquetColumn GetColumn(System.String name)
-type Lokad.Parquet.ParquetSchemaElement
+type sealed class Lokad.Parquet.ParquetSchemaElement : System.Object
   property Lokad.Parquet.ParquetAnnotationStatus AnnotationStatus { get; }
   property System.Nullable<System.Int32> ChildCount { get; }
   property System.Nullable<Lokad.Parquet.ParquetConvertedType> ConvertedType { get; }
   property System.Nullable<System.Int32> ConvertedTypeCode { get; }
   property System.Nullable<System.Int32> FieldId { get; }
   property System.Boolean IsLeaf { get; }
-  property Lokad.Parquet.ParquetLogicalAnnotation LogicalAnnotation { get; }
+  property Lokad.Parquet.ParquetLogicalAnnotation? LogicalAnnotation { get; }
   property System.Int32 MaximumDefinitionLevel { get; }
   property System.Int32 MaximumRepetitionLevel { get; }
   property System.String Name { get; }
@@ -257,9 +257,9 @@ type Lokad.Parquet.ParquetSchemaElement
   property System.Nullable<Lokad.Parquet.ParquetRepetition> Repetition { get; }
   property System.Nullable<System.Int32> RepetitionCode { get; }
   property System.Nullable<System.Int32> Scale { get; }
-  property Lokad.Parquet.ParquetSemanticAnnotation SemanticAnnotation { get; }
+  property Lokad.Parquet.ParquetSemanticAnnotation? SemanticAnnotation { get; }
   property System.Nullable<System.Int32> TypeLength { get; }
-type Lokad.Parquet.ParquetSemanticAnnotation
+type sealed class Lokad.Parquet.ParquetSemanticAnnotation : System.Object
   property System.Nullable<System.Int32> IntegerBitWidth { get; }
   property System.Nullable<System.Boolean> IsAdjustedToUtc { get; }
   property System.Nullable<System.Boolean> IsIntegerSigned { get; }
@@ -267,7 +267,7 @@ type Lokad.Parquet.ParquetSemanticAnnotation
   property System.Nullable<System.Int32> Precision { get; }
   property System.Nullable<System.Int32> Scale { get; }
   property System.Nullable<Lokad.Parquet.ParquetTimeUnit> TimeUnit { get; }
-type Lokad.Parquet.ParquetSemanticTypeKind
+type enum Lokad.Parquet.ParquetSemanticTypeKind
   enum String = 0
   enum Map = 1
   enum MapKeyValue = 2
@@ -284,10 +284,10 @@ type Lokad.Parquet.ParquetSemanticTypeKind
   enum Uuid = 13
   enum Float16 = 14
   enum Interval = 15
-type Lokad.Parquet.ParquetSourceOwnership
+type enum Lokad.Parquet.ParquetSourceOwnership
   enum Caller = 0
   enum ParquetFile = 1
-type Lokad.Parquet.ParquetStatistics
+type sealed class Lokad.Parquet.ParquetStatistics : System.Object
   property System.Nullable<System.Int64> DistinctCount { get; }
   property System.Nullable<System.Boolean> IsMaximumExact { get; }
   property System.Nullable<System.Boolean> IsMinimumExact { get; }
@@ -297,12 +297,12 @@ type Lokad.Parquet.ParquetStatistics
   property System.Nullable<System.ReadOnlyMemory<System.Byte>> Minimum { get; }
   property System.Nullable<System.Int64> NanCount { get; }
   property System.Nullable<System.Int64> NullCount { get; }
-type Lokad.Parquet.ParquetTimeUnit
+type enum Lokad.Parquet.ParquetTimeUnit
   enum Milliseconds = 1
   enum Microseconds = 2
   enum Nanoseconds = 3
-type Lokad.Parquet.ParquetUnsupportedFeatureException
-type Lokad.Parquet.ParquetValidity
+type sealed class Lokad.Parquet.ParquetUnsupportedFeatureException : Lokad.Parquet.ParquetException, System.Runtime.Serialization.ISerializable
+type sealed class Lokad.Parquet.ParquetValidity : System.Object
   property System.ReadOnlyMemory<System.Byte> Bits { get; }
   property System.Boolean IsAllValid { get; }
   property System.Int32 RowCount { get; }

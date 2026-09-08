@@ -158,14 +158,14 @@ public sealed class ParquetSchemaElement
     public int? PhysicalTypeCode { get; }
 
     /// <summary>Gets the known physical type, or null for a group or unknown value.</summary>
-    public ParquetPhysicalType? PhysicalType => PhysicalTypeCode is int code && Enum.IsDefined(typeof(ParquetPhysicalType), code)
+    public ParquetPhysicalType? PhysicalType => PhysicalTypeCode is int code && Enum.IsDefined((ParquetPhysicalType)code)
         ? (ParquetPhysicalType)code : null;
 
     /// <summary>Gets the raw repetition enum value, or null for the root.</summary>
     public int? RepetitionCode { get; }
 
     /// <summary>Gets the known repetition mode, or null when absent or unknown.</summary>
-    public ParquetRepetition? Repetition => RepetitionCode is int code && Enum.IsDefined(typeof(ParquetRepetition), code)
+    public ParquetRepetition? Repetition => RepetitionCode is int code && Enum.IsDefined((ParquetRepetition)code)
         ? (ParquetRepetition)code : null;
 
     /// <summary>Gets the declared type length.</summary>
@@ -178,7 +178,7 @@ public sealed class ParquetSchemaElement
     public int? ConvertedTypeCode { get; }
 
     /// <summary>Gets the known legacy converted type.</summary>
-    public ParquetConvertedType? ConvertedType => ConvertedTypeCode is int code && Enum.IsDefined(typeof(ParquetConvertedType), code)
+    public ParquetConvertedType? ConvertedType => ConvertedTypeCode is int code && Enum.IsDefined((ParquetConvertedType)code)
         ? (ParquetConvertedType)code : null;
 
     /// <summary>Gets the schema-element decimal scale.</summary>
@@ -235,7 +235,7 @@ public sealed class ParquetColumn
     /// <summary>Gets the complete schema path.</summary>
     public IReadOnlyList<string> Path => SchemaElement.Path;
 
-    /// <summary>Gets whether Core 0.1 can scan this leaf.</summary>
+    /// <summary>Gets whether Core 0.1 can scan this leaf based on schema eligibility. A readable leaf can still fail at scan time when a chunk selects an unsupported codec or encoding.</summary>
     public bool IsReadable { get; }
 
     /// <summary>Gets why this leaf is not readable, or null when readable.</summary>
@@ -409,12 +409,12 @@ public sealed class ParquetColumnChunk
     /// <summary>Gets the raw physical-type code.</summary>
     public int PhysicalTypeCode { get; }
     /// <summary>Gets the known physical type.</summary>
-    public ParquetPhysicalType? PhysicalType => Enum.IsDefined(typeof(ParquetPhysicalType), PhysicalTypeCode)
+    public ParquetPhysicalType? PhysicalType => Enum.IsDefined((ParquetPhysicalType)PhysicalTypeCode)
         ? (ParquetPhysicalType)PhysicalTypeCode : null;
     /// <summary>Gets the raw compression-codec code.</summary>
     public int CompressionCodecCode { get; }
     /// <summary>Gets the known compression codec.</summary>
-    public ParquetCompressionCodec? CompressionCodec => Enum.IsDefined(typeof(ParquetCompressionCodec), CompressionCodecCode)
+    public ParquetCompressionCodec? CompressionCodec => Enum.IsDefined((ParquetCompressionCodec)CompressionCodecCode)
         ? (ParquetCompressionCodec)CompressionCodecCode : null;
     /// <summary>Gets the advertised raw encoding codes.</summary>
     public ReadOnlyCollection<int> EncodingCodes { get; }

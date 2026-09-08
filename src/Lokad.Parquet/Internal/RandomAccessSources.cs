@@ -112,7 +112,8 @@ internal sealed class StreamRandomAccessSource : IParquetRandomAccessSource
 
         _stream = stream;
         _ownership = ownership;
-        if (stream is MemoryStream memoryStream && memoryStream.TryGetBuffer(out var memoryBuffer))
+        // Only the exact MemoryStream implementation has safe buffer/disposal shortcuts; subclasses may override behavior.
+        if (stream.GetType() == typeof(MemoryStream) && stream is MemoryStream memoryStream && memoryStream.TryGetBuffer(out var memoryBuffer))
             _memoryBuffer = memoryBuffer;
         Length = stream.Length;
         if (Length < 0)
@@ -122,7 +123,7 @@ internal sealed class StreamRandomAccessSource : IParquetRandomAccessSource
     public long Length { get; }
 
     internal bool CanDisposeSynchronously =>
-        (_ownership == ParquetSourceOwnership.Caller || _stream is MemoryStream) && !_disposed;
+        (_ownership == ParquetSourceOwnership.Caller || _stream.GetType() == typeof(MemoryStream)) && !_disposed;
 
     internal ArraySegment<byte>? MemoryBuffer
     {
@@ -148,7 +149,7 @@ internal sealed class StreamRandomAccessSource : IParquetRandomAccessSource
             return ValueTask.CompletedTask;
         }
 
-        if (_stream is MemoryStream)
+        if (_stream.GetType() == typeof(MemoryStream))
         {
             ReadMemoryStream();
             return ValueTask.CompletedTask;

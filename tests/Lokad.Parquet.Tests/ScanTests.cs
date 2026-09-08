@@ -992,6 +992,22 @@ public sealed class ScanTests
     }
 
     [Fact]
+    public async Task RejectsRleEncodedBooleanValues()
+    {
+        // SPEC 6.2 narrows booleans to PLAIN-only in Core 0.1: an RLE-encoded
+        // boolean page must be rejected, never misdecoded as bit-packed values.
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.Boolean,
+            PhysicalValues = new bool[] { true, false, true },
+            PageHeaderOverrides = new() { ValueEncodingCode = (int)ParquetEncoding.RunLength },
+        });
+        await AssertScanFailureAsync<ParquetUnsupportedFeatureException>(
+            bytes,
+            ParquetReaderOptions.Default);
+    }
+
+    [Fact]
     public async Task ClassifiesNegativeSizesAndUnsupportedPageFeatures()
     {
         var negativeSize = ParquetFixtureBuilder.CreateInt32(new()
@@ -1054,10 +1070,174 @@ public sealed class ScanTests
         Assert.False(await enumerator.MoveNextAsync());
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ScansAllValidOptionalInt32WithSlicedBatches(bool useV2)
+    {
+        using var tracker = new PoolTracker();
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            Values = [1, 2, 3],
+            Repetition = ParquetRepetition.Optional,
+            PageVersion = useV2 ? FixturePageVersion.DataPageV2 : FixturePageVersion.DataPageV1,
+        });
+        await using (var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false)))
+        {
+            await using var enumerator = file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, 2)).GetAsyncEnumerator();
+            Assert.True(await enumerator.MoveNextAsync());
+            using (var first = enumerator.Current)
+            {
+                Assert.Equal(2, first.RowCount);
+                var column = Assert.IsType<ParquetPrimitiveColumnBatch<int>>(first.Columns[0]);
+                Assert.True(column.Validity.IsAllValid);
+                Assert.Equal([1, 2], column.Values.ToArray());
+            }
+            Assert.True(await enumerator.MoveNextAsync());
+            using (var second = enumerator.Current)
+            {
+                Assert.Equal(1, second.RowCount);
+                var column = Assert.IsType<ParquetPrimitiveColumnBatch<int>>(second.Columns[0]);
+                Assert.True(column.Validity.IsAllValid);
+                Assert.Equal([3], column.Values.ToArray());
+            }
+            Assert.False(await enumerator.MoveNextAsync());
+        }
+    }
+
+    [Fact]
+    public async Task ScansAllValidOptionalInt32WithFullPageTransferAndRowRange()
+    {
+        using var tracker = new PoolTracker();
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            Values = [1, 2, 3],
+            Repetition = ParquetRepetition.Optional,
+        });
+        await using (var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false)))
+        {
+            await using var full = file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, 3)).GetAsyncEnumerator();
+            Assert.True(await full.MoveNextAsync());
+            using (var batch = full.Current)
+            {
+                Assert.Equal(3, batch.RowCount);
+                Assert.True(Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Validity.IsAllValid);
+            }
+            Assert.False(await full.MoveNextAsync());
+        }
+        await using (var rangedFile = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false)))
+        {
+            var range = new ParquetRowRange(1, 2);
+            await using var ranged = rangedFile.ScanAsync(new([rangedFile.Metadata.Schema.Columns[0]], null, range, 2)).GetAsyncEnumerator();
+            Assert.True(await ranged.MoveNextAsync());
+            using (var batch = ranged.Current)
+            {
+                Assert.Equal([2, 3], Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Values.ToArray());
+                Assert.True(Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Validity.IsAllValid);
+            }
+            Assert.False(await ranged.MoveNextAsync());
+        }
+    }
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task RejectsInvalidTargetBatchSizeForSingleColumnScans(int target)
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1, 2, 3] });
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, target)).GetAsyncEnumerator());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task RejectsInvalidTargetBatchSizeForProjectedScans(int target)
+    {
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn { Name = "a", Pages = [[1, 2, 3]] },
+            new RequiredInt32FixtureColumn { Name = "b", Pages = [[4, 5, 6]] },
+        ]);
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        var columns = file.Metadata.Schema.Columns;
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanAsync(new([columns[0], columns[1]], null, null, target)).GetAsyncEnumerator());
+    }
+
+    [Fact]
+    public async Task RejectsTargetAboveReaderMaximumForBothScanWidths()
+    {
+        var singleBytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1, 2, 3] });
+        await using var singleFile = await ParquetFile.OpenAsync(
+            new MemoryStream(singleBytes, writable: false),
+            ParquetSourceOwnership.Caller,
+            new ParquetReaderOptions { MaximumRowsPerBatch = 1 },
+            CancellationToken.None);
+        Assert.Throws<ArgumentOutOfRangeException>(() => singleFile.ScanAsync(new([singleFile.Metadata.Schema.Columns[0]], null, null, 3)).GetAsyncEnumerator());
+
+        var multiBytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn { Name = "a", Pages = [[1, 2, 3]] },
+            new RequiredInt32FixtureColumn { Name = "b", Pages = [[4, 5, 6]] },
+        ]);
+        await using var multiFile = await ParquetFile.OpenAsync(
+            new MemoryStream(multiBytes, writable: false),
+            ParquetSourceOwnership.Caller,
+            new ParquetReaderOptions { MaximumRowsPerBatch = 1 },
+            CancellationToken.None);
+        Assert.Throws<ArgumentOutOfRangeException>(() => multiFile.ScanAsync(new([multiFile.Metadata.Schema.Columns[0], multiFile.Metadata.Schema.Columns[1]], null, null, 3)).GetAsyncEnumerator());
+    }
+
+    [Fact]
+    public async Task AcceptsTargetAtExactReaderMaximumForBothScanWidths()
+    {
+        // The over-limit check is strictly greater-than: a target equal to the
+        // configured maximum opens on both scan widths.
+        var singleBytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1, 2, 3] });
+        await using var singleFile = await ParquetFile.OpenAsync(
+            new MemoryStream(singleBytes, writable: false),
+            ParquetSourceOwnership.Caller,
+            new ParquetReaderOptions { MaximumRowsPerBatch = 3 },
+            CancellationToken.None);
+        await using var singleEnumerator = singleFile.ScanAsync(new([singleFile.Metadata.Schema.Columns[0]], null, null, 3)).GetAsyncEnumerator();
+        Assert.True(await singleEnumerator.MoveNextAsync());
+        Assert.Equal([1, 2, 3], Assert.IsType<ParquetPrimitiveColumnBatch<int>>(singleEnumerator.Current.Columns[0]).Values.ToArray());
+        singleEnumerator.Current.Dispose();
+        Assert.False(await singleEnumerator.MoveNextAsync());
+
+        var multiBytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn { Name = "a", Pages = [[1, 2, 3]] },
+            new RequiredInt32FixtureColumn { Name = "b", Pages = [[4, 5, 6]] },
+        ]);
+        await using var multiFile = await ParquetFile.OpenAsync(
+            new MemoryStream(multiBytes, writable: false),
+            ParquetSourceOwnership.Caller,
+            new ParquetReaderOptions { MaximumRowsPerBatch = 3 },
+            CancellationToken.None);
+        await using var multiEnumerator = multiFile.ScanAsync(new([multiFile.Metadata.Schema.Columns[0], multiFile.Metadata.Schema.Columns[1]], null, null, 3)).GetAsyncEnumerator();
+        Assert.True(await multiEnumerator.MoveNextAsync());
+        Assert.Equal([1, 2, 3], Assert.IsType<ParquetPrimitiveColumnBatch<int>>(multiEnumerator.Current.Columns[0]).Values.ToArray());
+        Assert.Equal([4, 5, 6], Assert.IsType<ParquetPrimitiveColumnBatch<int>>(multiEnumerator.Current.Columns[1]).Values.ToArray());
+        multiEnumerator.Current.Dispose();
+        Assert.False(await multiEnumerator.MoveNextAsync());
+    }
+
+    [Fact]
+    public async Task RejectsInvalidTargetBeforePayloadReadsForEmptySelection()
+    {
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn { Name = "a", Pages = [[1, 2, 3]] },
+            new RequiredInt32FixtureColumn { Name = "b", Pages = [[4, 5, 6]] },
+        ]);
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        var emptyRange = new ParquetRowRange(0, 0);
+        Assert.Throws<ArgumentOutOfRangeException>(() => file.ScanAsync(new([file.Metadata.Schema.Columns[0], file.Metadata.Schema.Columns[1]], null, emptyRange, 0)).GetAsyncEnumerator());
+    }
     private static async Task AssertScanFailureAsync<TException>(
-        byte[] bytes,
-        ParquetReaderOptions options)
-        where TException : Exception
+            byte[] bytes,
+            ParquetReaderOptions options)
+            where TException : Exception
     {
         await using var file = await ParquetFile.OpenAsync(
             new MemoryStream(bytes, writable: false),

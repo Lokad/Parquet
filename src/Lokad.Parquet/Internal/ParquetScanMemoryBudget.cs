@@ -5,10 +5,28 @@ internal sealed class ParquetScanMemoryBudget
     private readonly long _maximumBytes;
     private long _retainedBytes;
     private long _peakRetainedBytes;
+    private long _peakTransientBytes;
 
     public ParquetScanMemoryBudget(long maximumBytes) => _maximumBytes = maximumBytes;
 
+    public long MaximumBytes => _maximumBytes;
+
     public long PeakRetainedBytes => Interlocked.Read(ref _peakRetainedBytes);
+
+    public long PeakTransientBytes => Interlocked.Read(ref _peakTransientBytes);
+
+    // Records a shared-pool rent held transiently before its budget reservation,
+    // tracked separately from reserved bytes.
+    public void NoteTransientAttempt(long byteCount)
+    {
+        while (true)
+        {
+            var peak = Interlocked.Read(ref _peakTransientBytes);
+            if (byteCount <= peak ||
+                Interlocked.CompareExchange(ref _peakTransientBytes, byteCount, peak) == peak)
+                return;
+        }
+    }
 
     public void Reserve(long byteCount)
     {
