@@ -1,6 +1,6 @@
 # Lokad.Parquet
 
-`Lokad.Parquet` is an in-development, high-performance, read-only Parquet library for
+`Lokad.Parquet` is a high-performance, read-only Parquet library for
 `.NET 10`, designed for analytics workloads and a small dependency footprint.
 The shipped reader is restricted to memory-safe managed C#: it has no unsafe
 blocks, pinning, native interop, or APIs that bypass runtime memory safety.
@@ -54,7 +54,7 @@ transferred with `ParquetSourceOwnership.ParquetFile`.
 
 ## Repository layout
 
-- `src/Lokad.Parquet`: the dependency-free library and future NuGet package.
+- `src/Lokad.Parquet`: the dependency-free library, published as the `Lokad.Parquet` NuGet package.
 - `tests/Lokad.Parquet.Tests`: the xUnit test project.
 - `bench/Lokad.Parquet.Benchmarks`: the Release-only BenchmarkDotNet project.
 - `assets`: source artwork for the NuGet icon.

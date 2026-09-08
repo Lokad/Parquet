@@ -102,11 +102,17 @@ at the full-row target, then the second half of the columns at a 4,096-row
 target, sharing one pool-balanced case. Its table reports end-of-scan retained
 bytes (file-cache storage still held after the scans) separately from the
 zero-after-disposal check, and consumer UTF-8 bytes are measured across both
-passes. The retired composite-copy gate assumed zero copies; copies remain
+passes. Each pass records its own peak pooled bytes against its own decoded layout,
+counting file-cache storage carried into the pass, so each pass carries its own budget
+envelope. An uneven two-column multi-row-group case covers uneven batch partitioning
+with a fully known oracle. Source reads are measured on the stream path with exactly
+one read in flight; exact-MemoryStream and direct-memory borrows bypass reads and sit
+outside these figures. Each case also records warmed Lokad and competitor retention
+measured with the same yardstick. The retired composite-copy gate assumed zero copies; copies remain
 legitimate on slicing and binary paths, which the UTF-8 and multi-batch lanes
 exercise under truth and pool-balance checks. Cross-column page misalignment
 cannot come from the single-page baseline writer and is covered by the
-partitioning tests against synthetic uneven fixtures. The census table below
+partitioning tests against synthetic uneven fixtures. The census table above
 regenerates with fresh snapshots on the next qualification.
 
 ## What changed
@@ -131,9 +137,13 @@ vector path.
 - Both readers consume the same generated Parquet bytes and must produce the
   same truth-checked row, null, order, and checksum results before timing.
 - Numeric truth is canonical per column: each consumer accumulates one Mix chain
-  per column in row order and combines multi-column checksums commutatively
-  (XOR salted by column ordinal; a single column stands alone), so batch
-  partitioning cannot change the result.
+  per column in row order over non-null values, independent of batch
+  partitioning, plus a separate chain over null row ordinals, and folds the two
+  in a fixed order, so a null can never equal a value. Folded columns combine
+  in scan order; a single column stands alone. Swapped, duplicated, omitted, or
+  reordered columns therefore fail the truth comparison. `--verify-truth` runs
+  these scheme and consumer checks against the actual Core, Parity, and Census
+  consumers before any timing run.
 - The authoritative scan operations start from pre-opened readers and consume
   public batches. Materialization and decoder kernels are diagnostic only.
 - UTF-8 qualification uses the application-pipeline contract above. The
@@ -145,7 +155,7 @@ vector path.
 - Every qualifying process is restricted to one logical processor. Linux
   sessions run from a WSL-native ext4 workspace, never a Windows-mounted path
   such as `/mnt/c`, so host-filesystem mediation cannot distort the result. On
-  Linux the benchmark entry point refuses Windows-backed mounts outright, the
+  Linux the benchmark entry point rejects `/mnt/`-prefixed workspace paths outright, the
   CPU model is collected from `/proc/cpuinfo`, and `bench.ps1` records the CPU
   scaling governor instead of a Windows power scheme.
 
