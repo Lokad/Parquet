@@ -8,8 +8,8 @@ try {
         exit $LASTEXITCODE
     }
 
-    # The package project mirrors Lokad.Utf8Regex: a Release build creates the
-    # package through GeneratePackageOnBuild.
+    # Release-only packaging: a Release build creates the package through
+    # GeneratePackageOnBuild into artifacts/nuget.
     & dotnet build $project --configuration Release --tl:off --nologo -v minimal --no-restore
     exit $LASTEXITCODE
 }

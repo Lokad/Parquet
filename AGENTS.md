@@ -17,7 +17,7 @@ dotnet test Lokad.Parquet.slnx -c Release --tl:off --nologo -v minimal --no-buil
 dotnet format Lokad.Parquet.slnx --verify-no-changes --no-restore
 ```
 
-`./test.ps1` provides the same build-and-test loop.
+`./test.ps1` provides a Debug build-and-test loop for quick iteration (use `./test.ps1 -Configuration Release` for a Release loop); it does not run the formatter. The four commands above remain the complete Release qualification.
 
 Before considering a reader change complete, add positive and malformed-input
 coverage, verify cancellation and pool ownership where applicable, preserve
