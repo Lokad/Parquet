@@ -1,5 +1,7 @@
 namespace Lokad.Parquet.Tests;
 
+using System.Reflection;
+
 public sealed class BatchOwnershipAllocationTests
 {
     [Fact]
@@ -48,6 +50,7 @@ public sealed class BatchOwnershipAllocationTests
                 Assert.Equal(1, batch.RowCount);
                 Assert.Empty(column.Payload.ToArray());
                 Assert.Equal([0, 0], column.Offsets.ToArray());
+                Assert.Single(BatchOwners(batch));
             }
         }
 
@@ -67,13 +70,17 @@ public sealed class BatchOwnershipAllocationTests
         });
         await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
         var seen = new List<(byte[] Payload, bool[] Validity)>();
+        var batchIndex = 0;
         await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, 2)))
         {
             using (batch)
             {
                 var column = Assert.IsType<ParquetBinaryColumnBatch>(batch.Columns[0]);
                 seen.Add((column.Payload.ToArray(), Enumerable.Range(0, batch.RowCount).Select(column.Validity.IsValid).ToArray()));
+                Assert.Equal(batchIndex == 0 ? 3 : 2, BatchOwners(batch).Length);
             }
+
+            batchIndex++;
         }
 
         Assert.Equal(2, seen.Count);
@@ -146,5 +153,11 @@ public sealed class BatchOwnershipAllocationTests
         Assert.Equal(16, totalPayload);
         var perBatch = (double)allocated / batchCount;
         Assert.True(perBatch < 4096, $"Binary small-target scan allocated {allocated} bytes for {batchCount} batches ({perBatch:F1} B/batch).");
+    }
+
+    private static IDisposable[] BatchOwners(ParquetBatch batch)
+    {
+        object? owners = batch.GetType().GetField("_owners", BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(batch);
+        return Assert.IsAssignableFrom<IDisposable[]>(owners);
     }
 }

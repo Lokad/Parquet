@@ -45,7 +45,9 @@ public sealed class ParquetReaderOptions
     /// <summary>Gets the maximum number of dictionary entries.</summary>
     public int MaximumDictionaryEntries { get; init; } = 16_777_216;
 
-    /// <summary>Gets the maximum decoded dictionary bytes.</summary>
+    /// <summary>Gets the maximum dictionary page and decoded dictionary bytes.</summary>
+    /// <remarks>The serialized (uncompressed) dictionary page size is capped at this limit
+    /// before decoding, and the decoded layout is capped after entry lengths are known.</remarks>
     public int MaximumDictionaryBytes { get; init; } = 256 * 1024 * 1024;
 
     /// <summary>Gets the maximum logical values in one page.</summary>

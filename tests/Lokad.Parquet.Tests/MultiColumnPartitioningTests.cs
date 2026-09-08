@@ -1,27 +1,10 @@
 namespace Lokad.Parquet.Tests;
 
-// Guards the canonical multi-column truth contract: per-column value order
-// plus a commutative combination must not depend on how pages batch across
-// columns. The checksum below reimplements that contract independently
-// (per-column Mix chains combined commutatively); it shares no code with the
-// benchmark consumers it protects.
+// Guards batch-partition independence through decoded values: identical rows must
+// surface no matter how pages split across batches. Checksum combination itself
+// belongs to the benchmark project and is qualified there.
 public sealed class MultiColumnPartitioningTests
 {
-    private const long Seed = 1_469_598_103_934_665_603L;
-
-    private static long Mix(long checksum, int value) =>
-        unchecked((checksum * 1_099_511_628_211L) ^ value);
-
-    private static long CombineColumns(long[] columnChecksums)
-    {
-        if (columnChecksums.Length == 1)
-            return columnChecksums[0];
-        var combined = Seed;
-        for (var column = 0; column < columnChecksums.Length; column++)
-            combined ^= Mix(columnChecksums[column], column);
-        return combined;
-    }
-
     [Fact]
     public async Task EightBy65kElementWise()
     {
@@ -62,44 +45,44 @@ public sealed class MultiColumnPartitioningTests
     [InlineData(2048)]
     [InlineData(512)]
     [InlineData(7)]
-    public async Task CanonicalChecksumIsBatchPartitionIndependent(int target)
+    public async Task ValuesDoNotDependOnBatchPartitioning(int target)
     {
         const int cols = 8;
         const int rows = 2048;
         var bytes = BuildFixture(cols, rows);
         await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
-        var perColumn = new long[cols];
-        Array.Fill(perColumn, Seed);
+        var perColumn = new List<int>[cols];
+        for (var c = 0; c < cols; c++)
+            perColumn[c] = [];
         var totalRows = 0;
+        var batches = 0;
         await foreach (var batch in file.ScanAsync(new(file.Metadata.Schema.Columns, null, null, target)))
         {
             using (batch)
             {
+                batches++;
                 Assert.Equal(cols, batch.Columns.Count);
                 totalRows += batch.RowCount;
                 for (var c = 0; c < cols; c++)
                 {
                     var column = Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[c]);
-                    foreach (var value in column.Values.Span)
-                        perColumn[c] = Mix(perColumn[c], value);
+                    perColumn[c].AddRange(column.Values.ToArray());
                 }
             }
         }
-        Assert.Equal(rows, totalRows);
-        var combined = CombineColumns(perColumn);
-        Assert.Equal(ExpectedCombined(), combined);
 
-        long ExpectedCombined()
+        Assert.Equal(rows, totalRows);
+        if (target == 7)
         {
-            var expected = new long[cols];
-            for (var c = 0; c < cols; c++)
-            {
-                var checksum = Seed;
-                for (var r = 0; r < rows; r++)
-                    checksum = Mix(checksum, checked(c * 1000000 + r));
-                expected[c] = checksum;
-            }
-            return CombineColumns(expected);
+            Assert.True(batches > 1);
+        }
+
+        for (var c = 0; c < cols; c++)
+        {
+            var expected = new int[rows];
+            for (var r = 0; r < rows; r++)
+                expected[r] = checked(c * 1000000 + r);
+            Assert.Equal(expected, perColumn[c]);
         }
     }
 

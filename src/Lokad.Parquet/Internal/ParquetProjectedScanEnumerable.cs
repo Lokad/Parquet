@@ -21,8 +21,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _file,
             _options,
             _cancellationToken,
-            cancellationToken,
-            _file.ScanMemoryBudget);
+            cancellationToken);
 
     private sealed class Enumerator : IAsyncEnumerator<ParquetBatch>
     {
@@ -51,8 +50,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             ParquetFile file,
             ParquetScanOptions options,
             CancellationToken scanCancellation,
-            CancellationToken enumerationCancellation,
-            ParquetScanMemoryBudget memoryBudget)
+            CancellationToken enumerationCancellation)
         {
             static int[] ResolveProjection(ParquetFile file, ParquetScanOptions options)
             {
@@ -92,7 +90,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             }
 
             _file = file;
-            _memoryBudget = memoryBudget;
+            _memoryBudget = file.ScanMemoryBudget;
             _pagePayloadCache = file.PagePayloadCache;
             var ordinals = ResolveProjection(file, options);
             ParquetScanEnumerable.ValidateTargetBatchRowCount(file, options);
@@ -100,7 +98,6 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _sourceBatches = new DecodedColumnBatch?[ordinals.Length];
             _sourceOffsets = new int[ordinals.Length];
             var selectedRowGroups = ParquetScanEnumerable.BuildRowGroups(file, options);
-            file.EvictIdleColumnCaches(ordinals);
             try
             {
                 if (scanCancellation.CanBeCanceled && enumerationCancellation.CanBeCanceled)
@@ -127,7 +124,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 {
                     var column = file.Metadata.Schema.Columns[ordinals[index]];
                     _enumerators[index] = new ParquetScanEnumerable.ColumnCursor(
-                        new ParquetScanEnumerable.ScanCursorServices(file, options, memoryBudget, _pagePayloadCache),
+                        new ParquetScanEnumerable.ScanCursorServices(file, options),
                         column,
                         selectedRowGroups,
                         _cancellationToken,
@@ -138,10 +135,27 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             }
             catch
             {
+                // Best-effort rollback preserves the primary construction error.
                 foreach (var enumerator in _enumerators)
-                    enumerator?.Dispose();
-                _linkedCancellation?.Dispose();
-                _userLinkedCancellation?.Dispose();
+                {
+                    try { enumerator?.Dispose(); } catch (Exception) { }
+                }
+
+                try { _linkedCancellation?.Dispose(); } catch (Exception) { }
+                try { _userLinkedCancellation?.Dispose(); } catch (Exception) { }
+                throw;
+            }
+
+            // The single lane is acquired before idle caches are evicted, so a rejected
+            // overlapping request leaves no cache side effects behind.
+            try
+            {
+                file.EvictIdleColumnCaches(ordinals);
+            }
+            catch
+            {
+                // Best-effort termination preserves the primary eviction error.
+                try { TerminateAndUnregister(); } catch (Exception) { }
                 throw;
             }
 
@@ -252,11 +266,34 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                     _sourceBatches[index] = null;
                     _sourceOffsets[index] = 0;
                 }
+                var published = _current ??
+                    throw new InvalidOperationException("A projected batch was not created.");
+                // Pre-publication boundary: a token cancelled while copying must surface
+                // instead of yielding a batch. The built batch is released best-effort so
+                // the cancellation stays the primary error.
+                try
+                {
+                    _cancellationToken.ThrowIfCancellationRequested();
+                }
+                catch
+                {
+                    try { published.Dispose(); } catch (Exception) { }
+                    _current = null;
+                    throw;
+                }
                 return true;
+            }
+            catch (OperationCanceledException) when (_file.IsDisposed)
+            {
+                // Best-effort termination preserves the primary cancellation for
+                // conversion into a file-disposal error below.
+                try { TerminateAndUnregister(); } catch (Exception) { }
+                throw new ObjectDisposedException(nameof(ParquetFile));
             }
             catch
             {
-                TerminateAndUnregister();
+                // Best-effort termination preserves the primary scan error.
+                try { TerminateAndUnregister(); } catch (Exception) { }
                 throw;
             }
             finally
@@ -366,9 +403,13 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 }
                 catch
                 {
-                    lifetime.Dispose();
+                    // Best-effort rollback preserves the primary copy error.
+                    try { lifetime.Dispose(); } catch (Exception) { }
                     foreach (var owner in owners)
-                        owner.Dispose();
+                    {
+                        try { owner.Dispose(); } catch (Exception) { }
+                    }
+
                     throw;
                 }
 
@@ -518,15 +559,31 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             return ValueTask.CompletedTask;
         }
 
+        // Teardown exception policy. The terminating scan always releases its registration,
+        // even when its cleanup throws; a late disposal must not clear a newer scan. The first
+        // cleanup failure is preserved. Rollback while another error is already in flight is
+        // best-effort exhaustive and preserves that primary error instead of masking it.
         private void TerminateAndUnregister()
         {
             // Unregistration belongs to the scan that terminates first; a late disposal must not clear a newer scan.
-            if (!Terminate())
+            Exception? failure = null;
+            var terminates = true;
+            try
             {
-                return;
+                terminates = Terminate();
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
             }
 
-            _file.UnregisterScan();
+            if (terminates)
+            {
+                try { _file.UnregisterScan(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            }
+
+            if (failure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
 
         private bool Terminate()

@@ -1,10 +1,7 @@
 namespace Lokad.Parquet.Internal;
 
-// Owned-versus-borrowed payload lease. Transitions are None -> Owned/Borrowed
-// -> None (transferred or disposed). Kind distinguishes an empty borrowed
-// payload from no payload, replacing the previous empty-memory sentinel.
-// This struct holds no pooled ownership itself beyond the single owner it
-// leases; it never appears in public batch owner arrays.
+// Payload buffer states. Only None is empty: Borrowed covers an empty borrowed
+// slice too, so Kind alone tells whether a page buffer is loaded.
 internal enum PagePayloadKind
 {
     None,
@@ -12,6 +9,13 @@ internal enum PagePayloadKind
     Borrowed,
 }
 
+// Mutable lease over one decoded page buffer. Owned holds a pooled array owner
+// released by Dispose; Borrowed holds a slice of retained source memory and
+// releases nothing. SetOwned and SetBorrowed each require None; Dispose returns
+// a rented owner, if any, and resets to None for the next page. The cursor keeps
+// the single instance in a private field, mutates it in place, and never copies
+// it or passes it by value, so the rented buffer cannot escape through a struct
+// copy; decoders read through Span while batch storage stays separate.
 internal struct PagePayloadLease
 {
     private PooledArrayOwner<byte>? _owner;
@@ -86,11 +90,8 @@ internal struct PagePayloadLease
     }
 }
 
-// Explicit page-validity state. Transitions are None (no page loaded) ->
-// AllValid/Explicit (page loaded) -> None (transferred or disposed).
-// AllValid means implicitly all-valid with no bitmap; Explicit means the owner
-// holds the bitmap. This replaces the previous convention where a null bitmap
-// field meant required, optional all-valid with a dropped bitmap, and no page.
+// Page validity states. Only None means no page is loaded; AllValid carries
+// no bitmap at all.
 internal enum PageValidityKind
 {
     None,
@@ -98,6 +99,11 @@ internal enum PageValidityKind
     Explicit,
 }
 
+// Mutable validity holder for one page. AllValid records implicit all-validity
+// with no bitmap; Explicit owns the bitmap released by Dispose. The Set methods
+// each require None; Take hands the bitmap owner to the batch, if any, and resets
+// to None, while Dispose releases it in place. Like the payload lease, the cursor
+// keeps the single instance in a private field and never copies it.
 internal struct PageValidityState
 {
     private PooledArrayOwner<byte>? _owner;

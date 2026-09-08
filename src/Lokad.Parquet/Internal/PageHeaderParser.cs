@@ -53,9 +53,10 @@ internal static class PageHeaderParser
         ReadOnlySpan<byte> input,
         long offset,
         ParquetReaderOptions options,
+        CancellationToken cancellationToken,
         out ParsedPageHeader result)
     {
-        var reader = new ThriftCompactReader(input, offset, options);
+        var reader = new ThriftCompactReader(input, offset, options, cancellationToken);
         try
         {
             result = new ParsedPageHeader(ParsePageHeader(ref reader, options), reader.Position);
@@ -82,9 +83,12 @@ internal static class PageHeaderParser
             var hasDataV2 = false;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 Mark(ref seen, field.Id, ref reader);
@@ -113,7 +117,7 @@ internal static class PageHeaderParser
                         break;
                     case 6:
                         reader.RequireType(field, CompactType.Struct);
-                        reader.SkipValue(CompactType.Struct, 2, CompactBooleanEncoding.CollectionValue);
+                        reader.SkipValue(CompactType.Struct, 1, CompactBooleanEncoding.CollectionValue);
                         break;
                     case 7:
                         reader.RequireType(field, CompactType.Struct);
@@ -126,7 +130,7 @@ internal static class PageHeaderParser
                         hasDataV2 = true;
                         break;
                     default:
-                        reader.SkipField(field, 2);
+                        reader.SkipField(field, 1);
                         break;
                 }
             }
@@ -173,9 +177,12 @@ internal static class PageHeaderParser
             int? repetition = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 Mark(ref seen, field.Id, ref reader);
@@ -198,7 +205,7 @@ internal static class PageHeaderParser
                         repetition = reader.ReadInt32();
                         break;
                     default:
-                        reader.SkipField(field, 3);
+                        reader.SkipField(field, 2);
                         break;
                 }
             }
@@ -221,9 +228,12 @@ internal static class PageHeaderParser
             bool? sorted = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 Mark(ref seen, field.Id, ref reader);
@@ -241,7 +251,7 @@ internal static class PageHeaderParser
                         sorted = reader.ReadBoolean(field.Type);
                         break;
                     default:
-                        reader.SkipField(field, 3);
+                        reader.SkipField(field, 2);
                         break;
                 }
             }
@@ -267,9 +277,12 @@ internal static class PageHeaderParser
             var compressed = true;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 Mark(ref seen, field.Id, ref reader);
@@ -303,7 +316,7 @@ internal static class PageHeaderParser
                         compressed = reader.ReadBoolean(field.Type);
                         break;
                     default:
-                        reader.SkipField(field, 3);
+                        reader.SkipField(field, 2);
                         break;
                 }
             }

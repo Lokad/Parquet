@@ -10,7 +10,7 @@ internal static class ParquetFooterParser
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var reader = new ThriftCompactReader(footer, footerOffset, options);
+        var reader = new ThriftCompactReader(footer, footerOffset, options, cancellationToken);
         try
         {
             var wire = ParseFileMetadata(ref reader, options);
@@ -30,9 +30,12 @@ internal static class ParquetFooterParser
             var result = new FileMetadataWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
 
@@ -107,9 +110,13 @@ internal static class ParquetFooterParser
             if (list.Count > options.MaximumSchemaElements)
                 throw new ParquetLimitExceededException("The schema exceeds the configured element limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
 
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new SchemaElementWire[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = ParseSchemaElement(ref reader);
+            }
             return result;
         }
 
@@ -119,9 +126,12 @@ internal static class ParquetFooterParser
             var result = new SchemaElementWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -242,9 +252,12 @@ internal static class ParquetFooterParser
             int? precision = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -289,9 +302,12 @@ internal static class ParquetFooterParser
             ParquetTimeUnit? unit = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -354,9 +370,12 @@ internal static class ParquetFooterParser
             bool? signed = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -401,9 +420,13 @@ internal static class ParquetFooterParser
                 throw reader.Format("The row-group list has an unexpected element type.");
             if (list.Count > options.MaximumRowGroups)
                 throw new ParquetLimitExceededException("The file exceeds the configured row-group limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new RowGroupWire[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = ParseRowGroup(ref reader, options);
+            }
             return result;
         }
 
@@ -413,9 +436,12 @@ internal static class ParquetFooterParser
             var result = new RowGroupWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -466,9 +492,13 @@ internal static class ParquetFooterParser
                 throw reader.Format("The column-chunk list has an unexpected element type.");
             if (list.Count > options.MaximumLeafColumns)
                 throw new ParquetLimitExceededException("A row group exceeds the configured leaf-column limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new ColumnChunkWire[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = ParseColumnChunk(ref reader, options);
+            }
             return result;
         }
 
@@ -478,9 +508,12 @@ internal static class ParquetFooterParser
             var result = new ColumnChunkWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -548,9 +581,12 @@ internal static class ParquetFooterParser
             var result = new ColumnMetadataWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -640,9 +676,12 @@ internal static class ParquetFooterParser
             var result = new StatisticsWire();
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 Mark(ref seen, field.Id, ref reader);
@@ -703,9 +742,13 @@ internal static class ParquetFooterParser
                 throw reader.Format("A key/value metadata list has an unexpected element type.");
             if (list.Count > options.MaximumKeyValueMetadataEntries)
                 throw new ParquetLimitExceededException("Key/value metadata exceeds the configured entry limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new ParquetKeyValueMetadata[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = ParseKeyValue(ref reader, depth + 1);
+            }
             return result;
         }
 
@@ -716,9 +759,12 @@ internal static class ParquetFooterParser
             string? value = null;
             short previous = 0;
             ulong seen = 0;
+            var fieldCount = 0;
             while (true)
             {
                 var field = reader.ReadField(ref previous);
+                reader.ObserveCancellation(fieldCount);
+                fieldCount++;
                 if (field.Type == CompactType.Stop)
                     break;
                 switch (field.Id)
@@ -734,7 +780,7 @@ internal static class ParquetFooterParser
                         value = reader.ReadString();
                         break;
                     default:
-                        reader.SkipField(field, 5);
+                        reader.SkipField(field, depth);
                         break;
                 }
             }
@@ -755,14 +801,16 @@ internal static class ParquetFooterParser
                 throw reader.Format("The column-order list has an unexpected element type.");
             if (list.Count > options.MaximumLeafColumns)
                 throw new ParquetLimitExceededException("Column orders exceed the configured leaf-column limit.", ParquetErrorLocation.AtOffset(reader.AbsoluteOffset));
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new ParquetColumnOrderKind[list.Count];
             for (var i = 0; i < result.Length; i++)
             {
+                reader.ObserveCancellation(i);
                 short previous = 0;
                 var member = reader.ReadField(ref previous);
                 if (member.Type == CompactType.Stop || member.Type != CompactType.Struct)
                     throw reader.Format("A column-order union is empty or malformed.");
-                reader.SkipValue(CompactType.Struct, 3, CompactBooleanEncoding.CollectionValue);
+                reader.SkipValue(CompactType.Struct, 2, CompactBooleanEncoding.CollectionValue);
                 result[i] = member.Id switch
                 {
                     1 => ParquetColumnOrderKind.TypeDefined,
@@ -784,9 +832,13 @@ internal static class ParquetFooterParser
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Int32)
                 throw reader.Format($"The {description} list has an unexpected element type.");
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new int[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = reader.ReadInt32();
+            }
             return result;
         }
 
@@ -797,9 +849,13 @@ internal static class ParquetFooterParser
             var list = reader.ReadCollection();
             if (list.ElementType != CompactType.Binary)
                 throw reader.Format("A string list has an unexpected element type.");
+            reader.RequireCountFitsRemaining(list.Count);
             var result = new string[list.Count];
             for (var i = 0; i < result.Length; i++)
+            {
+                reader.ObserveCancellation(i);
                 result[i] = reader.ReadString();
+            }
             return result;
         }
 
@@ -860,6 +916,8 @@ internal static class ParquetFooterParser
                 var publicChunks = new ParquetColumnChunk[chunks.Length];
                 for (var columnOrdinal = 0; columnOrdinal < chunks.Length; columnOrdinal++)
                 {
+                    if ((columnOrdinal & 1023) == 0)
+                        cancellationToken.ThrowIfCancellationRequested();
                     publicChunks[columnOrdinal] = BuildColumnChunk(
                         chunks[columnOrdinal],
                         schema.Columns[columnOrdinal],

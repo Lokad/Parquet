@@ -661,6 +661,8 @@ public sealed class ParquetFile : IAsyncDisposable
 
         var footerOffset = source.Length - 8 - footerLength;
         var footer = ParquetArrayPool.Rent<byte>(Math.Max(footerLength, 1));
+        Exception? footerFailure = null;
+        ParquetFile? opened = null;
         try
         {
             var footerSegment = new ArraySegment<byte>(footer, 0, footerLength);
@@ -672,12 +674,16 @@ public sealed class ParquetFile : IAsyncDisposable
                 source.Length,
                 options,
                 cancellationToken);
-            return new ParquetFile(source, sourceOwnership, options, metadata);
+            opened = new ParquetFile(source, sourceOwnership, options, metadata);
         }
-        finally
+        catch (Exception exception)
         {
-            ParquetArrayPool.Return(footer);
+            footerFailure = exception;
         }
+        try { ParquetArrayPool.Return(footer); } catch (Exception exception) when (footerFailure is null) { footerFailure = exception; } catch (Exception) { }
+        if (footerFailure is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(footerFailure).Throw();
+        return opened ?? throw new InvalidOperationException("Footer handling did not produce a file.");
 
         void ValidateOptions()
         {

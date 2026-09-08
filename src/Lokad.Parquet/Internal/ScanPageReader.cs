@@ -2,12 +2,14 @@ namespace Lokad.Parquet.Internal;
 
 // Cohesive page I/O component with narrow inputs and explicit ownership.
 // It reads page headers with retry, performs exact source reads with
-// truncation translation, borrows retained immutable memory when available,
-// and computes page CRCs. It owns only its rented header buffers, which are
-// returned on both parse success and parse failure; decoded payload ownership
-// stays with the scan cursor. This extraction gives the scan state machine a
-// smaller independently understandable I/O scope without changing the public
-// API or the sequential single-scan contract.
+// truncation translation, lends borrowed slices of retained source memory for
+// payloads when available, and computes page CRCs. Page payloads may be
+// borrowed, but page headers are always rented into pooled buffers and filled
+// by the read, never borrowed. The reader owns only its rented header buffers,
+// which are returned on both parse success and parse failure; decoded payload
+// ownership stays with the scan cursor. This extraction gives the scan state
+// machine a smaller independently understandable I/O scope without changing the
+// public API or the sequential single-scan contract.
 internal static class ScanPageReader
 {
     internal static uint ComputeCrc32(ReadOnlySpan<byte> input, CancellationToken cancellationToken)
@@ -49,7 +51,6 @@ internal static class ScanPageReader
 
     internal static ValueTask<ParsedPageHeader> ReadPageHeaderAsync(
         IParquetRandomAccessSource source,
-        long sourceLength,
         ParquetReaderOptions options,
         PooledArrayOwnerCache<byte> headerCache,
         CancellationToken cancellationToken,
@@ -62,15 +63,13 @@ internal static class ScanPageReader
         var remaining = chunkEnd - pageOffset;
         var maximum = checked((int)Math.Min(remaining, options.MaximumPageHeaderBytes));
         if (maximum <= 0)
-            throw new ParquetFormatException("A page header has no bytes available.", ParquetErrorLocation.AtOffset(pageOffset));
+            throw new ParquetFormatException("A page header has no bytes available.", ParquetErrorLocation.AtPage(pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
         return ReadAtLength(
             source,
-            sourceLength,
             options,
             headerCache,
             cancellationToken,
             pageOffset,
-            chunkEnd,
             rowGroupOrdinal,
             columnOrdinal,
             pageOrdinal,
@@ -80,12 +79,10 @@ internal static class ScanPageReader
 
         static ValueTask<ParsedPageHeader> ReadAtLength(
             IParquetRandomAccessSource source,
-            long sourceLength,
             ParquetReaderOptions options,
             PooledArrayOwnerCache<byte> headerCache,
             CancellationToken cancellationToken,
             long pageOffset,
-            long chunkEnd,
             int rowGroupOrdinal,
             int columnOrdinal,
             int pageOrdinal,
@@ -116,12 +113,10 @@ internal static class ScanPageReader
                     reading,
                     owner,
                     source,
-                    sourceLength,
                     options,
                     headerCache,
                     cancellationToken,
                     pageOffset,
-                    chunkEnd,
                     rowGroupOrdinal,
                     columnOrdinal,
                     pageOrdinal,
@@ -139,7 +134,21 @@ internal static class ScanPageReader
                     owner.Memory.Span,
                     pageOffset,
                     options,
+                    cancellationToken,
                     out parsed);
+            }
+            catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
+            {
+                throw new ParquetFormatException(
+                    exception.Message,
+                    exception,
+                    ParquetErrorLocation.AtPage(exception.ByteOffset ?? pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
+            }
+            catch (ParquetLimitExceededException exception) when (exception.RowGroupOrdinal is null)
+            {
+                throw new ParquetLimitExceededException(
+                    exception.Message,
+                    ParquetErrorLocation.AtPage(exception.ByteOffset ?? pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
             }
             finally
             {
@@ -157,12 +166,10 @@ internal static class ScanPageReader
                     pageOrdinal);
             return ReadAtLength(
                 source,
-                sourceLength,
                 options,
                 headerCache,
                 cancellationToken,
                 pageOffset,
-                chunkEnd,
                 rowGroupOrdinal,
                 columnOrdinal,
                 pageOrdinal,
@@ -175,12 +182,10 @@ internal static class ScanPageReader
             ValueTask reading,
             PooledArrayOwner<byte> owner,
             IParquetRandomAccessSource source,
-            long sourceLength,
             ParquetReaderOptions options,
             PooledArrayOwnerCache<byte> headerCache,
             CancellationToken cancellationToken,
             long pageOffset,
-            long chunkEnd,
             int rowGroupOrdinal,
             int columnOrdinal,
             int pageOrdinal,
@@ -195,8 +200,22 @@ internal static class ScanPageReader
                     owner.Memory.Span,
                     pageOffset,
                     options,
+                    cancellationToken,
                     out var parsed))
                     return parsed;
+            }
+            catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
+            {
+                throw new ParquetFormatException(
+                    exception.Message,
+                    exception,
+                    ParquetErrorLocation.AtPage(exception.ByteOffset ?? pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
+            }
+            catch (ParquetLimitExceededException exception) when (exception.RowGroupOrdinal is null)
+            {
+                throw new ParquetLimitExceededException(
+                    exception.Message,
+                    ParquetErrorLocation.AtPage(exception.ByteOffset ?? pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
             }
             finally
             {
@@ -212,12 +231,10 @@ internal static class ScanPageReader
                     pageOrdinal);
             return await ReadAtLength(
                 source,
-                sourceLength,
                 options,
                 headerCache,
                 cancellationToken,
                 pageOffset,
-                chunkEnd,
                 rowGroupOrdinal,
                 columnOrdinal,
                 pageOrdinal,

@@ -15,17 +15,29 @@ internal sealed class ParquetScanMemoryBudget
 
     public long PeakTransientBytes => Interlocked.Read(ref _peakTransientBytes);
 
-    // Records a shared-pool rent held transiently before its budget reservation,
-    // tracked separately from reserved bytes.
+    // Records simultaneous live bytes: already retained storage plus the array held
+    // transiently before its budget reservation.
     public void NoteTransientAttempt(long byteCount)
     {
+        var simultaneous = Interlocked.Read(ref _retainedBytes) + byteCount;
         while (true)
         {
             var peak = Interlocked.Read(ref _peakTransientBytes);
-            if (byteCount <= peak ||
-                Interlocked.CompareExchange(ref _peakTransientBytes, byteCount, peak) == peak)
+            if (simultaneous <= peak ||
+                Interlocked.CompareExchange(ref _peakTransientBytes, simultaneous, peak) == peak)
                 return;
         }
+    }
+
+    // Rejects a rent whose smallest possible footprint already exceeds the remaining
+    // budget, before the shared pool is touched. Rounded bucket capacity is still
+    // enforced after the rent; this check can never reject a feasible rent because
+    // pooled capacity always covers the requested minimum.
+    public void ThrowIfMinimumExceedsRemaining(long minimumBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(minimumBytes);
+        if (minimumBytes > _maximumBytes - Interlocked.Read(ref _retainedBytes))
+            throw new ParquetLimitExceededException("A scan exceeds its configured pooled-memory limit.");
     }
 
     public void Reserve(long byteCount)

@@ -18,10 +18,10 @@ public sealed class ExceptionLocationTests
     }
 
     [Fact]
-    public async Task NegativePageSizeReportsHeaderOffset()
+    public async Task NegativePageSizeReportsPageLocation()
     {
-        // Page-header parse errors carry the header offset; the page identity
-        // comes from the header being parsed.
+        // Page-header parse errors keep the offending offset and gain the page
+        // identity from the boundary being parsed.
         var bytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1, 2, 3], PageHeaderOverrides = new() { CompressedSize = -1 } });
         await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
         var exception = await Assert.ThrowsAsync<ParquetFormatException>(async () =>
@@ -30,9 +30,109 @@ public sealed class ExceptionLocationTests
                 batch.Dispose();
         });
         Assert.NotNull(exception.ByteOffset);
-        Assert.Null(exception.RowGroupOrdinal);
-        Assert.Null(exception.ColumnOrdinal);
-        Assert.Null(exception.PageOrdinal);
+        Assert.Equal(0, exception.RowGroupOrdinal);
+        Assert.Equal(0, exception.ColumnOrdinal);
+        Assert.Equal(0, exception.PageOrdinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task MalformedSnappyBlockReportsPageLocation(int sourceKind)
+    {
+        // A Snappy block declaring more output than its destination fails inside the
+        // decoder without location; the page boundary annotates it on the immediate,
+        // delayed, and direct-memory source paths alike. Source kinds: direct, stream,
+        // and asynchronous custom source.
+        using var tracker = new PoolTracker();
+        byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            Values = [1, 2, 3],
+            CompressionCodec = ParquetCompressionCodec.Snappy,
+            PageHeaderOverrides = new() { UncompressedSize = 100 },
+        });
+        await using var file = await OpenByKindAsync(bytes, sourceKind);
+        var exception = await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+                batch.Dispose();
+        });
+        Assert.Equal(4L, exception.ByteOffset);
+        Assert.Equal(0, exception.RowGroupOrdinal);
+        Assert.Equal(0, exception.ColumnOrdinal);
+        Assert.Equal(0, exception.PageOrdinal);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task MalformedPageHeaderReportsPageLocation(int sourceKind)
+    {
+        // A negative declared page size fails inside header parsing with only an
+        // offset; the page boundary keeps that offset and adds the page identity.
+        using var tracker = new PoolTracker();
+        byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            Values = [1, 2, 3],
+            PageHeaderOverrides = new() { UncompressedSize = -1 },
+        });
+        await using var file = await OpenByKindAsync(bytes, sourceKind);
+        var exception = await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+                batch.Dispose();
+        });
+        Assert.NotNull(exception.ByteOffset);
+        Assert.Equal(0, exception.RowGroupOrdinal);
+        Assert.Equal(0, exception.ColumnOrdinal);
+        Assert.Equal(0, exception.PageOrdinal);
+    }
+
+    [Fact]
+    public async Task DictionarySerializedBytesRespectDictionaryLimit()
+    {
+        // Four 3-byte entries: 28 serialized bytes but 32 decoded bytes. A limit of 20
+        // fails the serialized page-bytes check at the header, before decoding starts.
+        using var tracker = new PoolTracker();
+        byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.ByteArray,
+            PhysicalValues = new byte[][] { [10], [20], [30], [40] },
+            DictionaryValues = new byte[][] { [1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12] },
+            DictionaryIndices = [0, 1, 2, 3],
+        });
+        await using var file = await ParquetFile.OpenAsync(bytes, new() { MaximumDictionaryBytes = 20 }, CancellationToken.None);
+        var exception = await Assert.ThrowsAsync<ParquetLimitExceededException>(async () =>
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+                batch.Dispose();
+        });
+        Assert.Equal("A dictionary exceeds the configured entry or byte limit.", exception.Message);
+        Assert.Equal(4L, exception.ByteOffset);
+        Assert.Equal(0, exception.RowGroupOrdinal);
+        Assert.Equal(0, exception.ColumnOrdinal);
+        Assert.Equal(0, exception.PageOrdinal);
+    }
+
+    private static ValueTask<ParquetFile> OpenByKindAsync(byte[] bytes, int sourceKind) => sourceKind switch
+    {
+        0 => ParquetFile.OpenAsync((ReadOnlyMemory<byte>)bytes),
+        1 => ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false)),
+        _ => ParquetFile.OpenAsync(new DelayedSource(bytes)),
+    };
+
+    private sealed class DelayedSource(byte[] bytes) : IParquetRandomAccessSource
+    {
+        public long Length => bytes.LongLength;
+        public async ValueTask ReadExactlyAsync(long offset, ArraySegment<byte> destination, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            bytes.AsMemory(checked((int)offset), destination.Count).CopyTo(destination.AsMemory());
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     [Fact]

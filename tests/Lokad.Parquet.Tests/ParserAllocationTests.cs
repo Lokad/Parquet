@@ -3,7 +3,7 @@ namespace Lokad.Parquet.Tests;
 public sealed class ParserAllocationTests
 {
     [Fact]
-    public async Task LargeSchemaOpenStaysBounded()
+    public async Task SixteenColumnSchemaOpenStaysBounded()
     {
         var columns = new RequiredInt32FixtureColumn[16];
         for (var i = 0; i < columns.Length; i++)
@@ -18,7 +18,7 @@ public sealed class ParserAllocationTests
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Equal(16, file.Metadata.Schema.Columns.Count);
-        Assert.True(allocated < 262144, $"Large-schema open allocated {allocated} bytes.");
+        Assert.True(allocated < 65536, $"Sixteen-column schema open allocated {allocated} bytes.");
     }
 
     [Fact]
@@ -32,26 +32,29 @@ public sealed class ParserAllocationTests
             new RequiredInt32FixtureColumn { Name = "value", Pages = pages },
         ]);
         await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        var values = new List<int>();
         await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, 1)))
-            batch.Dispose();
+        {
+            using (batch)
+                values.AddRange(Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Values.ToArray());
+        }
+
+        Assert.Equal(Enumerable.Range(1, 16), values);
 
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
         var before = GC.GetAllocatedBytesForCurrentThread();
-        var values = new List<int>();
         var batchCount = 0;
         await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, null, 1)))
         {
             batchCount++;
-            using (batch)
-                values.AddRange(Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Values.ToArray());
+            batch.Dispose();
         }
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(16, batchCount);
-        Assert.Equal(Enumerable.Range(1, 16), values);
-        var perPage = (double)allocated / batchCount;
-        Assert.True(perPage < 8192, $"Many-small-pages scan allocated {allocated} bytes for {batchCount} pages ({perPage:F1} B/page).");
+        var perBatch = (double)allocated / batchCount;
+        Assert.True(perBatch < 2048, $"Small-page scan allocated {allocated} bytes for {batchCount} batches ({perBatch:F1} B/batch).");
     }
 }

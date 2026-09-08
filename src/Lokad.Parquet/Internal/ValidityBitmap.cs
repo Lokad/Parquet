@@ -16,35 +16,48 @@ internal static class ValidityBitmap
     {
         ArgumentOutOfRangeException.ThrowIfNegative(sourceOffset);
         ArgumentOutOfRangeException.ThrowIfNegative(count);
-        var owner = PooledArrayOwner<byte>.Rent(checked((count + 7) / 8), budget);
-        owner.Memory.Span.Clear();
-        allValid = true;
-        var sourceSpan = sourceBits.Span;
-        for (var i = 0; i < count; i++)
+        cancellationToken.ThrowIfCancellationRequested();
+        PooledArrayOwner<byte>? owner = PooledArrayOwner<byte>.Rent(checked((count + 7) / 8), budget);
+        try
         {
-            if ((i & 1023) == 0)
+            var destination = owner.Memory.Span;
+            destination.Clear();
+            allValid = true;
+            var sourceSpan = sourceBits.Span;
+            for (var i = 0; i < count; i++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                if ((i & 1023) == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+
+                if ((sourceSpan[(sourceOffset + i) >> 3] & (1 << ((sourceOffset + i) & 7))) != 0)
+                {
+                    destination[i >> 3] |= (byte)(1 << (i & 7));
+                }
+                else
+                {
+                    allValid = false;
+                }
             }
 
-            if ((sourceSpan[(sourceOffset + i) >> 3] & (1 << ((sourceOffset + i) & 7))) != 0)
+            if (allValid)
             {
-                owner.Memory.Span[i >> 3] |= (byte)(1 << (i & 7));
+                owner.Dispose();
+                owner = null;
+                bits = ReadOnlyMemory<byte>.Empty;
+                return null;
             }
-            else
-            {
-                allValid = false;
-            }
+
+            bits = owner.Memory;
+            var result = owner;
+            owner = null;
+            return result;
         }
-
-        if (allValid)
+        catch
         {
-            owner.Dispose();
-            bits = ReadOnlyMemory<byte>.Empty;
-            return null;
+            owner?.Dispose();
+            throw;
         }
-
-        bits = owner.Memory;
-        return owner;
     }
 }

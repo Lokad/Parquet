@@ -21,6 +21,25 @@ internal sealed class PooledArrayOwner<T> : IDisposable
         Memory = array.AsMemory(0, length);
     }
 
+    internal static readonly int ElementByteSize;
+
+    static PooledArrayOwner()
+    {
+        // Safe managed element measurement without Unsafe or Marshal: one short-lived
+        // single-element array, computed once per element type. Shipped rents use
+        // primitive element types; any other layout falls back to one byte, which keeps
+        // the pre-rent check a sound lower bound while actual bucket capacity remains
+        // enforced after the rent.
+        try
+        {
+            ElementByteSize = Math.Max(Buffer.ByteLength(System.Array.CreateInstance(typeof(T), 1)), 1);
+        }
+        catch (ArgumentException)
+        {
+            ElementByteSize = 1;
+        }
+    }
+
     public Memory<T> Memory { get; }
 
     internal T[] Array => _array ?? throw new ObjectDisposedException(nameof(PooledArrayOwner<T>));
@@ -28,7 +47,9 @@ internal sealed class PooledArrayOwner<T> : IDisposable
     public static PooledArrayOwner<T> Rent(int length, ParquetScanMemoryBudget budget)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(length);
-        var array = ParquetArrayPool.Rent<T>(Math.Max(length, 1));
+        var minimumLength = Math.Max(length, 1);
+        budget.ThrowIfMinimumExceedsRemaining(checked((long)minimumLength * ElementByteSize));
+        var array = ParquetArrayPool.Rent<T>(minimumLength);
         var retainedBytes = Buffer.ByteLength(array);
         budget.NoteTransientAttempt(retainedBytes);
         if (retainedBytes > budget.MaximumBytes)
@@ -128,6 +149,7 @@ internal sealed class PooledArrayOwnerCache<T> : IDisposable, IEvictableArrayCac
         if (undersized is not null)
             PooledArrayOwner<T>.ReturnAndRelease(undersized, _budget, undersizedBytes);
 
+        _budget.ThrowIfMinimumExceedsRemaining(checked((long)minimumLength * PooledArrayOwner<T>.ElementByteSize));
         var array = ParquetArrayPool.Rent<T>(minimumLength);
         var bytes = Buffer.ByteLength(array);
         _budget.NoteTransientAttempt(bytes);

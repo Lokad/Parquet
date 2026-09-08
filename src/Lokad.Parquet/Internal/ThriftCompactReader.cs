@@ -41,13 +41,15 @@ internal ref struct ThriftCompactReader
     private readonly int _maximumContainerElements;
     private readonly int _maximumDepth;
     private readonly int _maximumStringBytes;
+    private readonly CancellationToken _cancellationToken;
     private int _stringBytes;
     private int _position;
 
-    public ThriftCompactReader(ReadOnlySpan<byte> input, long baseOffset, ParquetReaderOptions options)
+    public ThriftCompactReader(ReadOnlySpan<byte> input, long baseOffset, ParquetReaderOptions options, CancellationToken cancellationToken)
     {
         _input = input;
         _baseOffset = baseOffset;
+        _cancellationToken = cancellationToken;
         _maximumContainerElements = options.MaximumThriftContainerElements;
         _maximumDepth = options.MaximumThriftDepth;
         _maximumStringBytes = options.MaximumMetadataStringBytes;
@@ -57,6 +59,14 @@ internal ref struct ThriftCompactReader
 
     public int Position => _position;
     public bool IsAtEnd => _position == _input.Length;
+
+    // Observes cancellation for long wire loops at a bounded interval. Loop bodies
+    // call this with their element ordinal; the token belongs to the enclosing parse.
+    public void ObserveCancellation(int index)
+    {
+        if ((index & 1023) == 0)
+            _cancellationToken.ThrowIfCancellationRequested();
+    }
     public long AbsoluteOffset => checked(_baseOffset + _position);
 
     public void MarkKnownField(ref ulong seen, int fieldId, CompactStructContext context)
@@ -168,10 +178,26 @@ internal ref struct ThriftCompactReader
         return new CompactCollection(type, count);
     }
 
+    // Thrift depth model. A struct value nested through fields and containers inside
+    // a depth-D struct is itself at depth D + 1; the outermost struct is at depth 1.
+    // Containers and scalar members are transparent to known parsing: only struct
+    // entries assert, with their own depth, and list calls assert the enclosing depth.
+    // Skip entry points take the enclosing struct depth and add one per entered value,
+    // so skipped subtrees stay within one level of known subtrees under the single
+    // shared depth cap.
     public void RequireDepth(int depth)
     {
         if (depth > _maximumDepth)
             throw new ParquetLimitExceededException("Thrift nesting exceeds the configured depth limit.", ParquetErrorLocation.AtOffset(AbsoluteOffset));
+    }
+
+    // Requires that a declared element count can still be backed by the remaining
+    // input before the caller allocates a count-sized array. Every compact element
+    // occupies at least one byte, so a larger count is malformed or truncated.
+    public void RequireCountFitsRemaining(int count)
+    {
+        if (count > _input.Length - _position)
+            throw Format("A Thrift container declares more elements than the remaining input.");
     }
 
     public void RequireType(CompactField field, CompactType expected)
@@ -220,7 +246,10 @@ internal ref struct ThriftCompactReader
                 {
                     var collection = ReadCollection();
                     for (var i = 0; i < collection.Count; i++)
+                    {
+                        ObserveCancellation(i);
                         SkipValue(collection.ElementType, depth + 1, CompactBooleanEncoding.CollectionValue);
+                    }
                     return;
                 }
             case CompactType.Map:
@@ -235,6 +264,7 @@ internal ref struct ThriftCompactReader
                         ThrowFormat("A map element cannot use the STOP type.");
                     for (var i = 0; i < count; i++)
                     {
+                        ObserveCancellation(i);
                         SkipValue(keyType, depth + 1, CompactBooleanEncoding.CollectionValue);
                         SkipValue(valueType, depth + 1, CompactBooleanEncoding.CollectionValue);
                     }
@@ -243,11 +273,13 @@ internal ref struct ThriftCompactReader
             case CompactType.Struct:
                 {
                     short previous = 0;
+                    var skippedFields = 0;
                     while (true)
                     {
                         var field = ReadField(ref previous);
                         if (field.Type == CompactType.Stop)
                             return;
+                        ObserveCancellation(skippedFields++);
                         SkipField(field, depth + 1);
                     }
                 }

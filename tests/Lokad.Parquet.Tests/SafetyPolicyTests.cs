@@ -402,6 +402,14 @@ public sealed class SafetyPolicyTests
         // Negative controls: real code still matches after stripping.
         Assert.NotEmpty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("fixed (byte* p = buffer) { }")));
         Assert.NotEmpty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var h = GCHandle.Alloc(x);")));
+        // Known limit: interpolation holes are skipped as string content, so a token
+        // inside a hole stays invisible to this textual check. The IL assembly check
+        // above remains the authoritative memory-safety gate.
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var s = $\"{value!}\";")));
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var s = $@\"{value!}\";")));
+        Assert.Empty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var s = $$\"\"\"{value!}\"\"\";")));
+        // Holes do not swallow surrounding code: a token outside the literal matches.
+        Assert.NotEmpty(ForbiddenSourceTokens.Matches(StripCommentsAndStrings("var s = $\"{x}\";\nvar h = GCHandle.Alloc(x);")));
     }
 
     [Fact]
@@ -411,6 +419,13 @@ public sealed class SafetyPolicyTests
         Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("// retry! do not fail!\nvar x = 1;")));
         Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = \"a!b\";\nvar x = 1;")));
         Assert.NotEmpty(NullForgivingTokens.Matches(StripCommentsAndStrings("var x = value!;")));
+        // Known limit: a null-forgiving operator inside an interpolation hole is
+        // skipped as string content. The IL assembly check above stays the backstop.
+        Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = $\"{value!}\";")));
+        Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = $@\"{value!}\";")));
+        Assert.Empty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = $$\"\"\"{value!}\"\"\";")));
+        // Holes do not swallow surrounding code: an operator outside the literal matches.
+        Assert.NotEmpty(NullForgivingTokens.Matches(StripCommentsAndStrings("var s = $\"{x}\";\nvar y = value!;")));
     }
 
     [Fact]

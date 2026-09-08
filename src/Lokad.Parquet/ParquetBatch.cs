@@ -9,43 +9,14 @@ internal sealed class BatchLifetime
     public void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(IsDisposed, typeof(ParquetBatch));
 }
 
-internal sealed class DecodedColumnBatch : IDisposable
+// Shared owner-release policy for batch disposal: every owner is released and the
+// first failure is preserved for the caller to rethrow.
+internal static class BatchOwnerDisposal
 {
-    private readonly BatchLifetime _lifetime;
-    private readonly IDisposable[] _owners;
-
-    internal DecodedColumnBatch(
-        long rowOffset,
-        int rowGroupOrdinal,
-        long rowOffsetInGroup,
-        int rowCount,
-        ParquetColumnBatch column,
-        BatchLifetime lifetime,
-        IDisposable[] owners)
+    internal static void DisposeAll(IDisposable[] owners)
     {
-        RowOffset = rowOffset;
-        RowGroupOrdinal = rowGroupOrdinal;
-        RowOffsetInGroup = rowOffsetInGroup;
-        RowCount = rowCount;
-        Column = column;
-        _lifetime = lifetime;
-        _owners = owners;
-    }
-
-    internal long RowOffset { get; }
-    internal int RowGroupOrdinal { get; }
-    internal long RowOffsetInGroup { get; }
-    internal int RowCount { get; }
-    internal ParquetColumnBatch Column { get; }
-    internal bool IsDisposed => _lifetime.IsDisposed;
-
-    public void Dispose()
-    {
-        if (_lifetime.IsDisposed)
-            return;
-        _lifetime.Dispose();
         Exception? failure = null;
-        foreach (var owner in _owners)
+        foreach (var owner in owners)
         {
             try
             {
@@ -62,6 +33,48 @@ internal sealed class DecodedColumnBatch : IDisposable
 
         if (failure is not null)
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+}
+
+internal sealed class DecodedColumnBatch : IDisposable
+{
+    // The single-column scan publishes these pieces directly into its public batch,
+    // so both batches share one lifetime and one owner array instead of wrapping
+    // the decoded batch in a second set.
+    internal readonly BatchLifetime Lifetime;
+    internal readonly IDisposable[] Owners;
+
+    internal DecodedColumnBatch(
+        long rowOffset,
+        int rowGroupOrdinal,
+        long rowOffsetInGroup,
+        int rowCount,
+        ParquetColumnBatch column,
+        BatchLifetime lifetime,
+        IDisposable[] owners)
+    {
+        RowOffset = rowOffset;
+        RowGroupOrdinal = rowGroupOrdinal;
+        RowOffsetInGroup = rowOffsetInGroup;
+        RowCount = rowCount;
+        Column = column;
+        Lifetime = lifetime;
+        Owners = owners;
+    }
+
+    internal long RowOffset { get; }
+    internal int RowGroupOrdinal { get; }
+    internal long RowOffsetInGroup { get; }
+    internal int RowCount { get; }
+    internal ParquetColumnBatch Column { get; }
+    internal bool IsDisposed => Lifetime.IsDisposed;
+
+    public void Dispose()
+    {
+        if (Lifetime.IsDisposed)
+            return;
+        Lifetime.Dispose();
+        BatchOwnerDisposal.DisposeAll(Owners);
     }
 }
 
@@ -278,23 +291,6 @@ public sealed class ParquetBatch : IDisposable
         if (_lifetime.IsDisposed)
             return;
         _lifetime.Dispose();
-        Exception? failure = null;
-        foreach (var owner in _owners)
-        {
-            try
-            {
-                owner.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
-        }
-
-        if (failure is not null)
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        BatchOwnerDisposal.DisposeAll(_owners);
     }
 }

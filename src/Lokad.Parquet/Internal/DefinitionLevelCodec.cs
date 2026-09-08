@@ -6,45 +6,45 @@ namespace Lokad.Parquet.Internal;
 // It splits optional page payloads into validated levels plus a physical
 // section, builds LSB-first validity bitmaps, and measures V2 level sections.
 // Level storage is rented from the scan budget and returned by the caller on
-// both success and failure paths; this component retains no page state. Pure
-// level counting needs no budget or cancellation. Every malformed input is
+// both success and failure paths; this component retains no page state. Level
+// counting observes cancellation at bounded intervals. Every malformed input is
 // reported with the caller-supplied page location, preserving the scan error
 // taxonomy without capturing cursor state.
+
+// The checked outcome of splitting and validating an optional page section:
+// rented definition levels (null for required pages), the physical payload
+// offset, and the validated non-null value count.
+internal readonly record struct DecodedSection(PooledArrayOwner<int>? Levels, int PhysicalOffset, int ValidCount);
 internal static class DefinitionLevelCodec
 {
-    internal static PooledArrayOwner<int>? DecodeSection(
+    internal static DecodedSection DecodeSection(
         ValidatedPageHeader header,
         ReadOnlySpan<byte> payload,
         int rowCount,
         ParquetRepetition? repetition,
         ParquetScanMemoryBudget budget,
         CancellationToken cancellationToken,
-        ParquetErrorLocation location,
-        out int physicalOffset)
+        ParquetErrorLocation location)
     {
         if (repetition == ParquetRepetition.Required)
         {
-            physicalOffset = header.PageType == ValidatedPageType.DataV2 ? GetV2LevelByteCount(header.DataV2, location) : 0;
-            if (header.PageType == ValidatedPageType.DataV2 &&
-                (header.DataV2.RowCount != rowCount || header.DataV2.NullCount != 0 || physicalOffset != 0))
-                throw new ParquetFormatException("A required flat V2 page has inconsistent level fields.", location);
-            return null;
+            if (header.PageType == ValidatedPageType.DataV2)
+                ValidateRequiredV2(header.DataV2, rowCount, location);
+            return new DecodedSection(null, 0, rowCount);
         }
 
         int levelOffset;
         int levelByteCount;
         int? expectedNullCount;
+        int physicalOffset;
         if (header.PageType == ValidatedPageType.DataV1)
         {
             if (header.DataV1.DefinitionEncodingCode != (int)ParquetEncoding.RunLength)
                 throw new ParquetUnsupportedFeatureException("Optional definition levels require V1 RLE/bit-packed hybrid encoding.", location);
-            if (payload.Length < sizeof(int))
-                throw new ParquetFormatException("An optional V1 page is missing its definition-level length.", location);
-            levelByteCount = BinaryPrimitives.ReadInt32LittleEndian(payload);
-            if (levelByteCount < 0 || levelByteCount > payload.Length - sizeof(int))
-                throw new ParquetFormatException("An optional V1 page has an invalid definition-level length.", location);
-            levelOffset = sizeof(int);
-            physicalOffset = checked(levelOffset + levelByteCount);
+            var section = SplitOptionalV1Section(payload, location);
+            levelOffset = section.LevelOffset;
+            levelByteCount = section.LevelByteCount;
+            physicalOffset = section.PhysicalOffset;
             expectedNullCount = null;
         }
         else
@@ -64,15 +64,40 @@ internal static class DefinitionLevelCodec
         try
         {
             var input = payload.Slice(levelOffset, levelByteCount);
-            _ = DecodeValidated(input, levels.Memory.Span, expectedNullCount, cancellationToken, location);
+            var validCount = DecodeValidated(input, levels.Memory.Span, expectedNullCount, cancellationToken, location);
             var result = levels;
             levels = null;
-            return result;
+            return new DecodedSection(result, physicalOffset, validCount);
         }
-        finally
+        catch
         {
-            levels?.Dispose();
+            // Best-effort rollback preserves the primary page error.
+            try { levels?.Dispose(); } catch (Exception) { }
+            throw;
         }
+    }
+
+    // Splits an optional V1 page payload into its definition-level section and
+    // physical section, validating all boundaries. Shared by section decoding and
+    // the specialized primitive path so both enforce identical boundaries.
+    internal static (int LevelOffset, int LevelByteCount, int PhysicalOffset) SplitOptionalV1Section(ReadOnlySpan<byte> payload, ParquetErrorLocation location)
+    {
+        if (payload.Length < sizeof(int))
+            throw new ParquetFormatException("An optional V1 page is missing its definition-level length.", location);
+        var levelByteCount = BinaryPrimitives.ReadInt32LittleEndian(payload);
+        if (levelByteCount < 0 || levelByteCount > payload.Length - sizeof(int))
+            throw new ParquetFormatException("An optional V1 page has an invalid definition-level length.", location);
+        var levelOffset = sizeof(int);
+        return (levelOffset, levelByteCount, checked(levelOffset + levelByteCount));
+    }
+
+    // Validates a required flat V2 page against its row count: no nulls and no
+    // level bytes. Shared by section decoding and page loading so both enforce
+    // identical boundaries.
+    internal static void ValidateRequiredV2(ValidatedDataPageV2 v2, int rowCount, ParquetErrorLocation location)
+    {
+        if (v2.RowCount != rowCount || v2.NullCount != 0 || GetV2LevelByteCount(v2, location) != 0)
+            throw new ParquetFormatException("A required flat V2 page has inconsistent row, null, or level fields.", location);
     }
 
     internal static PooledArrayOwner<byte>? CreateBitmap(
@@ -83,16 +108,28 @@ internal static class DefinitionLevelCodec
         if (levels.IsEmpty)
             return null;
         cancellationToken.ThrowIfCancellationRequested();
-        var validity = PooledArrayOwner<byte>.Rent(checked((levels.Length + 7) / 8), budget);
-        validity.Memory.Span.Clear();
-        for (var row = 0; row < levels.Length; row++)
+        PooledArrayOwner<byte>? validity = PooledArrayOwner<byte>.Rent(checked((levels.Length + 7) / 8), budget);
+        try
         {
-            if ((row & 1023) == 0)
-                cancellationToken.ThrowIfCancellationRequested();
-            if (levels[row] != 0)
-                validity.Memory.Span[row >> 3] |= (byte)(1 << (row & 7));
+            var destination = validity.Memory.Span;
+            destination.Clear();
+            for (var row = 0; row < levels.Length; row++)
+            {
+                if ((row & 1023) == 0)
+                    cancellationToken.ThrowIfCancellationRequested();
+                if (levels[row] != 0)
+                    destination[row >> 3] |= (byte)(1 << (row & 7));
+            }
+
+            var result = validity;
+            validity = null;
+            return result;
         }
-        return validity;
+        catch
+        {
+            validity?.Dispose();
+            throw;
+        }
     }
 
     internal static int DecodeValidated(
@@ -117,21 +154,19 @@ internal static class DefinitionLevelCodec
         }
 
         if (consumed != levelInput.Length)
-            throw new ParquetFormatException("An optional page has trailing definition-level bytes.", location);
-        if (expectedNullCount is int nullCount && CountLevel(levelOutput, 0) != nullCount)
-            throw new ParquetFormatException("A V2 null count does not match its definition levels.", location);
-        return levelOutput.Length - CountLevel(levelOutput, 0);
-    }
-
-    internal static int CountLevel(ReadOnlySpan<int> levels, int expected)
-    {
-        var count = 0;
-        foreach (var level in levels)
+            throw new ParquetFormatException("An optional V1 page has trailing definition-level bytes.", location);
+        var decodedNullCount = 0;
+        for (var index = 0; index < levelOutput.Length; index++)
         {
-            if (level == expected)
-                count++;
+            if ((index & 1023) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            if (levelOutput[index] == 0)
+                decodedNullCount++;
         }
-        return count;
+
+        if (expectedNullCount is int nullCount && decodedNullCount != nullCount)
+            throw new ParquetFormatException("A V2 null count does not match its definition levels.", location);
+        return levelOutput.Length - decodedNullCount;
     }
 
     internal static int GetV2LevelByteCount(ValidatedDataPageV2 v2, ParquetErrorLocation location)

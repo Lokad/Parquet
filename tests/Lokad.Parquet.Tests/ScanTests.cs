@@ -186,6 +186,94 @@ public sealed class ScanTests
     }
 
     [Fact]
+    public async Task MalformedV1LevelLengthFailsIdenticallyOnBothDecodePaths()
+    {
+        // A lying V1 definition-level length must fail the shared splitter with the
+        // same class, message, and location through section decoding (binary) and
+        // the specialized primitive path (int64).
+        static async Task<ParquetFormatException> ScanMalformedV1Page(ParquetFixtureOptions options)
+        {
+            byte[] bytes = ParquetFixtureBuilder.CreateInt32(options);
+            await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+            return await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+            {
+                await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+                    batch.Dispose();
+            });
+        }
+
+        ParquetFormatException binaryFailure = await ScanMalformedV1Page(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.ByteArray,
+            PhysicalValues = new byte[][] { [1], [2], [3] },
+            Repetition = ParquetRepetition.Optional,
+            Validity = [true, true, true],
+            PageHeaderOverrides = new() { V1DefinitionLevelByteLength = 1_000_000 },
+        });
+        ParquetFormatException int64Failure = await ScanMalformedV1Page(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.Int64,
+            PhysicalValues = new long[] { 1, 2, 3 },
+            Repetition = ParquetRepetition.Optional,
+            Validity = [true, true, true],
+            PageHeaderOverrides = new() { V1DefinitionLevelByteLength = 1_000_000 },
+        });
+        Assert.Equal("An optional V1 page has an invalid definition-level length.", binaryFailure.Message);
+        Assert.Equal(4L, binaryFailure.ByteOffset);
+        Assert.Equal(0, binaryFailure.RowGroupOrdinal);
+        Assert.Equal(0, binaryFailure.ColumnOrdinal);
+        Assert.Equal(0, binaryFailure.PageOrdinal);
+        Assert.Equal(binaryFailure.Message, int64Failure.Message);
+        Assert.Equal(binaryFailure.ByteOffset, int64Failure.ByteOffset);
+        Assert.Equal(binaryFailure.RowGroupOrdinal, int64Failure.RowGroupOrdinal);
+        Assert.Equal(binaryFailure.ColumnOrdinal, int64Failure.ColumnOrdinal);
+        Assert.Equal(binaryFailure.PageOrdinal, int64Failure.PageOrdinal);
+    }
+
+    [Fact]
+    public async Task InconsistentRequiredV2RowCountFailsIdenticallyOnBothCheckSites()
+    {
+        // A V2 value count below its row count must fail the shared required-V2
+        // validation with the same class, message, and location through page
+        // loading (int64) and section decoding (binary).
+        static async Task<ParquetFormatException> ScanInconsistentRequiredV2(ParquetFixtureOptions options)
+        {
+            byte[] bytes = ParquetFixtureBuilder.CreateInt32(options);
+            await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+            return await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+            {
+                await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+                    batch.Dispose();
+            });
+        }
+
+        ParquetFormatException int64Failure = await ScanInconsistentRequiredV2(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.Int64,
+            PhysicalValues = new long[] { 1, 2, 3 },
+            PageVersion = FixturePageVersion.DataPageV2,
+            PageHeaderOverrides = new() { ValueCount = 2 },
+        });
+        ParquetFormatException binaryFailure = await ScanInconsistentRequiredV2(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.ByteArray,
+            PhysicalValues = new byte[][] { [1], [2], [3] },
+            PageVersion = FixturePageVersion.DataPageV2,
+            PageHeaderOverrides = new() { ValueCount = 2 },
+        });
+        Assert.Equal("A required flat V2 page has inconsistent row, null, or level fields.", int64Failure.Message);
+        Assert.Equal(4L, int64Failure.ByteOffset);
+        Assert.Equal(0, int64Failure.RowGroupOrdinal);
+        Assert.Equal(0, int64Failure.ColumnOrdinal);
+        Assert.Equal(0, int64Failure.PageOrdinal);
+        Assert.Equal(int64Failure.Message, binaryFailure.Message);
+        Assert.Equal(int64Failure.ByteOffset, binaryFailure.ByteOffset);
+        Assert.Equal(int64Failure.RowGroupOrdinal, binaryFailure.RowGroupOrdinal);
+        Assert.Equal(int64Failure.ColumnOrdinal, binaryFailure.ColumnOrdinal);
+        Assert.Equal(int64Failure.PageOrdinal, binaryFailure.PageOrdinal);
+    }
+
+    [Fact]
     public async Task ScansRequiredByteArraysWithExactOffsets()
     {
         var bytes = ParquetFixtureBuilder.CreateInt32(new()

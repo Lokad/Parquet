@@ -651,7 +651,7 @@ is rejected.
 | One uncompressed page payload | 256 MiB | 1 GiB |
 | Pages in one column chunk | 1,048,576 | 16,777,216 |
 | Dictionary entries | 16,777,216 | 134,217,728 |
-| Dictionary decoded bytes | 256 MiB | 1 GiB |
+| Dictionary page and decoded bytes | 256 MiB | 1 GiB |
 | Logical values in one page | 16,777,216 | 134,217,728 |
 | One binary value | 64 MiB | 1 GiB |
 | Rows in one output batch | 1,048,576 | 16,777,216 |
