@@ -141,6 +141,8 @@ internal sealed class ParityScanCase : IAsyncDisposable
     private readonly Utf8ScanSink? _parquetNetUtf8Sink;
     private readonly ParquetScanOptions _scanOptions;
     private readonly int _utf8PayloadBytes;
+    private readonly long[] _columnChecksums;
+    private readonly long[] _parquetNetColumnChecksums;
 
     private ParityScanCase(
         ScanFixture fixture,
@@ -159,6 +161,8 @@ internal sealed class ParityScanCase : IAsyncDisposable
             null,
             null,
             fixture.RowCount);
+        _columnChecksums = new long[fixture.ColumnCount];
+        _parquetNetColumnChecksums = new long[fixture.ColumnCount];
         _utf8PayloadBytes = fixture.Utf8PayloadBytes;
         FixtureLength = fixture.Bytes.Length;
         FixtureHash = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes));
@@ -249,12 +253,18 @@ internal sealed class ParityScanCase : IAsyncDisposable
     {
         var checksum = ScanChecksum.Seed;
         _lokadUtf8Sink?.Reset();
+        // Multi-column lanes accumulate one checksum per column so the result
+        // does not depend on how pages batch across columns.
+        var perColumn = _requiredDestinations.Length > 1 ? _columnChecksums : null;
+        if (perColumn is not null)
+            Array.Fill(perColumn, ScanChecksum.Seed, 0, _requiredDestinations.Length);
         await foreach (var batch in _lokadFile.ScanAsync(_scanOptions))
         {
             using (batch)
             {
-                foreach (var untypedColumn in batch.Columns)
+                for (var columnIndex = 0; columnIndex < batch.Columns.Count; columnIndex++)
                 {
+                    var untypedColumn = batch.Columns[columnIndex];
                     if (untypedColumn is ParquetBinaryColumnBatch strings)
                     {
                         if (!strings.Validity.IsAllValid || _lokadUtf8Sink is null)
@@ -269,7 +279,13 @@ internal sealed class ParityScanCase : IAsyncDisposable
                         var column = (ParquetPrimitiveColumnBatch<int>)untypedColumn;
                         var values = column.Values.Span;
                         var validity = column.Validity;
-                        if (validity.IsAllValid)
+                        if (perColumn is not null)
+                        {
+                            if (!validity.IsAllValid)
+                                throw new InvalidOperationException("A required multi-column parity value decoded as null.");
+                            perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], values);
+                        }
+                        else if (validity.IsAllValid)
                         {
                             checksum = ScanChecksum.ConsumeRequired(checksum, values);
                         }
@@ -289,7 +305,9 @@ internal sealed class ParityScanCase : IAsyncDisposable
             }
         }
         if (_lokadUtf8Sink is null)
-            return checksum;
+            return perColumn is null
+                ? checksum
+                : ScanChecksum.CombineColumns(perColumn.AsSpan(0, _requiredDestinations.Length));
         if (_stringDestination is null)
             throw new InvalidOperationException("The UTF-8 parity destination is unavailable.");
         return _lokadUtf8Sink.Complete(_stringDestination.Length, _utf8PayloadBytes);
@@ -318,6 +336,18 @@ internal sealed class ParityScanCase : IAsyncDisposable
             await rowGroup.ReadAsync<int>(_parquetNetFields[0], _nullableDestination);
             foreach (var value in _nullableDestination)
                 checksum = ScanChecksum.Mix(checksum, value ?? ScanChecksum.NullMarker);
+        }
+        else if (_requiredDestinations.Length > 1)
+        {
+            var perColumn = _parquetNetColumnChecksums;
+            Array.Fill(perColumn, ScanChecksum.Seed, 0, _requiredDestinations.Length);
+            for (var column = 0; column < _parquetNetFields.Length; column++)
+            {
+                var values = _requiredDestinations[column];
+                await rowGroup.ReadAsync<int>(_parquetNetFields[column], values);
+                perColumn[column] = ScanChecksum.ConsumeRequired(perColumn[column], values);
+            }
+            checksum = ScanChecksum.CombineColumns(perColumn.AsSpan(0, _requiredDestinations.Length));
         }
         else
         {

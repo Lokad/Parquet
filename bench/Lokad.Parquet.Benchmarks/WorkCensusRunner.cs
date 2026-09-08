@@ -93,86 +93,144 @@ internal static class WorkCensusRunner
             }));
             try
             {
-                var options = new ParquetScanOptions(
-                    file.Metadata.Schema.Columns,
-                    null,
-                    null,
-                    RowCount);
-                var checksum = ScanChecksum.Seed;
-                var utf8Sink = ScanWorkloadCatalog.IsString(workload)
-                    ? new Utf8ScanSink(RowCount, fixture.Utf8PayloadBytes)
-                    : null;
                 var publicBatchCount = 0;
                 var synchronousMoves = 0;
                 var totalMoves = 0;
-                var enumerator = file.ScanAsync(options).GetAsyncEnumerator();
-                try
-                {
-                    while (true)
-                    {
-                        var moving = enumerator.MoveNextAsync();
-                        totalMoves++;
-                        bool moved;
-                        if (moving.IsCompletedSuccessfully)
-                        {
-                            synchronousMoves++;
-                            moved = moving.Result;
-                        }
-                        else
-                        {
-                            moved = await moving.ConfigureAwait(false);
-                        }
-                        if (!moved)
-                            break;
+                var logicalOutputBytes = 0L;
+                var decodedBatches = 0;
+                var consumerUtf8Bytes = 0L;
 
-                        using var batch = enumerator.Current;
-                        publicBatchCount++;
-                        foreach (var untypedColumn in batch.Columns)
+                // Pass one scans the full projection at the full-row target. Pass two
+                // rotates to the second half of the columns at a small target, so
+                // multi-batch slicing and projection changes share one truth-checked,
+                // pool-balanced case. Cross-column page misalignment cannot come from
+                // the single-page baseline writer; it is covered by the partitioning
+                // tests against synthetic uneven fixtures.
+                var allColumns = file.Metadata.Schema.Columns;
+                var secondHalf = allColumns.Skip(allColumns.Count / 2).ToArray();
+                var passes = new (IReadOnlyList<ParquetColumn> Columns, int Target, long ExpectedChecksum, long LogicalBytes)[]
+                {
+                    (allColumns, RowCount, fixture.Checksum, LogicalOutputBytes(allColumns.Count)),
+                    (secondHalf, 4096, ExpectedChecksum(secondHalf), LogicalOutputBytes(secondHalf.Length)),
+                };
+                foreach (var pass in passes)
+                {
+                    decodedBatches = checked(decodedBatches + await RunPassAsync(pass.Columns, pass.Target, pass.ExpectedChecksum) * pass.Columns.Count);
+                    logicalOutputBytes += pass.LogicalBytes;
+                }
+                // Retained storage still held by file-owned caches after the scans,
+                // sampled separately from the zero-after-disposal check below.
+                var endOfScanRetainedBytes = pool.OutstandingBytes;
+                await file.DisposeAsync().ConfigureAwait(false);
+
+                async Task<int> RunPassAsync(IReadOnlyList<ParquetColumn> projection, int target, long expectedChecksum)
+                {
+                    var options = new ParquetScanOptions(projection, null, null, target);
+                    var checksum = ScanChecksum.Seed;
+                    // Multi-column lanes accumulate one checksum per column so the
+                    // result does not depend on how pages batch across columns.
+                    var perColumn = projection.Count > 1 ? new long[projection.Count] : null;
+                    if (perColumn is not null)
+                        Array.Fill(perColumn, ScanChecksum.Seed);
+                    var utf8Sink = ScanWorkloadCatalog.IsString(workload)
+                        ? new Utf8ScanSink(RowCount, fixture.Utf8PayloadBytes)
+                        : null;
+                    var passBatches = 0;
+                    var enumerator = file.ScanAsync(options).GetAsyncEnumerator();
+                    try
+                    {
+                        while (true)
                         {
-                            if (untypedColumn is ParquetBinaryColumnBatch strings)
+                            var moving = enumerator.MoveNextAsync();
+                            totalMoves++;
+                            bool moved;
+                            if (moving.IsCompletedSuccessfully)
                             {
-                                if (!strings.Validity.IsAllValid || utf8Sink is null)
-                                    throw new InvalidOperationException("The required UTF-8 census column is invalid.");
-                                var offsets = strings.Offsets.Span;
-                                for (var row = 0; row < strings.RowCount; row++)
-                                    utf8Sink.AppendUtf8(
-                                        strings.Payload.Span[offsets[row]..offsets[row + 1]]);
+                                synchronousMoves++;
+                                moved = moving.Result;
                             }
                             else
                             {
-                                var column = (ParquetPrimitiveColumnBatch<int>)untypedColumn;
-                                var values = column.Values.Span;
-                                if (column.Validity.IsAllValid)
+                                moved = await moving.ConfigureAwait(false);
+                            }
+                            if (!moved)
+                                break;
+
+                            using var batch = enumerator.Current;
+                            publicBatchCount++;
+                            passBatches++;
+                            for (var columnIndex = 0; columnIndex < batch.Columns.Count; columnIndex++)
+                            {
+                                var untypedColumn = batch.Columns[columnIndex];
+                                if (untypedColumn is ParquetBinaryColumnBatch strings)
                                 {
-                                    foreach (var value in values)
-                                        checksum = ScanChecksum.Mix(checksum, value);
+                                    if (!strings.Validity.IsAllValid || utf8Sink is null)
+                                        throw new InvalidOperationException("The required UTF-8 census column is invalid.");
+                                    var offsets = strings.Offsets.Span;
+                                    for (var row = 0; row < strings.RowCount; row++)
+                                        utf8Sink.AppendUtf8(
+                                            strings.Payload.Span[offsets[row]..offsets[row + 1]]);
                                 }
                                 else
                                 {
-                                    var bits = column.Validity.Bits.Span;
-                                    for (var row = 0; row < values.Length; row++)
+                                    var column = (ParquetPrimitiveColumnBatch<int>)untypedColumn;
+                                    var values = column.Values.Span;
+                                    if (perColumn is not null)
                                     {
-                                        var value = (bits[row >> 3] & (1 << (row & 7))) != 0
-                                            ? values[row]
-                                            : ScanChecksum.NullMarker;
-                                        checksum = ScanChecksum.Mix(checksum, value);
+                                        if (!column.Validity.IsAllValid)
+                                            throw new InvalidOperationException("A required multi-column census value decoded as null.");
+                                        perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], values);
+                                    }
+                                    else if (column.Validity.IsAllValid)
+                                    {
+                                        foreach (var value in values)
+                                            checksum = ScanChecksum.Mix(checksum, value);
+                                    }
+                                    else
+                                    {
+                                        var bits = column.Validity.Bits.Span;
+                                        for (var row = 0; row < values.Length; row++)
+                                        {
+                                            var value = (bits[row >> 3] & (1 << (row & 7))) != 0
+                                                ? values[row]
+                                                : ScanChecksum.NullMarker;
+                                            checksum = ScanChecksum.Mix(checksum, value);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    finally
+                    {
+                        await enumerator.DisposeAsync().ConfigureAwait(false);
+                    }
+
+                    if (utf8Sink is not null)
+                    {
+                        checksum = utf8Sink.Complete(RowCount, fixture.Utf8PayloadBytes);
+                        consumerUtf8Bytes += fixture.Utf8PayloadBytes;
+                    }
+                    else if (perColumn is not null)
+                    {
+                        checksum = ScanChecksum.CombineColumns(perColumn);
+                    }
+
+                    if (checksum != expectedChecksum)
+                        throw new InvalidOperationException($"The {workload} work-census truth check failed.");
+                    return passBatches;
                 }
-                finally
+
+                long ExpectedChecksum(IReadOnlyList<ParquetColumn> projection)
                 {
-                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                    if (projection.Count == allColumns.Count)
+                        return fixture.Checksum;
+                    return ScanChecksum.CombineColumns(projection.Select(column => fixture.ColumnChecksums[column.Ordinal]).ToArray());
                 }
 
-                if (utf8Sink is not null)
-                    checksum = utf8Sink.Complete(RowCount, fixture.Utf8PayloadBytes);
-
-                if (checksum != fixture.Checksum)
-                    throw new InvalidOperationException($"The {workload} work-census truth check failed.");
-                await file.DisposeAsync().ConfigureAwait(false);
+                long LogicalOutputBytes(int columnCount) => ScanWorkloadCatalog.IsString(workload)
+                    ? checked((long)fixture.Utf8PayloadBytes + ((long)RowCount + 1) * sizeof(int))
+                    : checked((long)RowCount * columnCount * sizeof(int));
                 if (pool.OutstandingBytes != 0 || pool.RentCount != pool.ReturnCount)
                     throw new InvalidOperationException($"The {workload} work-census pool accounting is unbalanced.");
 
@@ -187,7 +245,7 @@ internal static class WorkCensusRunner
                     stream.BytesRead,
                     stream.MaximumConcurrentReads,
                     publicBatchCount,
-                    checked(publicBatchCount * fixture.ColumnCount),
+                    decodedBatches,
                     totalMoves,
                     synchronousMoves,
                     pool.RentCount,
@@ -196,12 +254,10 @@ internal static class WorkCensusRunner
                     pool.RentedCapacityBytes,
                     pool.PeakBytes,
                     pool.ReturnedCapacityBytes,
-                    ScanWorkloadCatalog.IsString(workload)
-                        ? checked((long)fixture.Utf8PayloadBytes + ((long)RowCount + 1) * sizeof(int))
-                        : checked((long)RowCount * fixture.ColumnCount * sizeof(int)),
+                    logicalOutputBytes,
                     stream.BytesRead,
-                    0,
-                    fixture.Utf8PayloadBytes,
+                    endOfScanRetainedBytes,
+                    consumerUtf8Bytes,
                     pool.ReturnedCapacityBytes,
                     pool.OutstandingBytes);
             }
@@ -260,6 +316,10 @@ internal static class WorkCensusRunner
     }
 }
 
+/// <summary>Measured per-scan work for one benchmark workload.</summary>
+/// <param name="DecodedColumnBatches">Derived estimate of internal batches (public batches times projected columns); projected or realigned scans consume fewer, larger source batches.</param>
+/// <param name="EndOfScanRetainedPoolBytes">Pooled bytes still retained by file-owned caches after the scans, before file disposal.</param>
+/// <param name="RetainedPoolBytes">Pooled bytes outstanding after file disposal; always zero.</param>
 internal sealed record WorkCensusCase(
     string Name,
     string FixtureHash,
@@ -282,7 +342,7 @@ internal sealed record WorkCensusCase(
     long ReturnedPoolCapacityBytes,
     long LogicalOutputBytes,
     long SourceCopiedBytes,
-    long CompositeCopiedBytes,
+    long EndOfScanRetainedPoolBytes,
     long ConsumerUtf8CopiedBytes,
     long PooledBytesCleared,
     long RetainedPoolBytes);

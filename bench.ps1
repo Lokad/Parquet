@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Core", "Utf8", "Parity", "Paired", "Census", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
+    [ValidateSet("Core", "Utf8", "Parity", "Paired", "Census", "Catalog", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
     [string] $Suite = "Core",
     [string] $Filter = "",
     [string] $PairedCase = "",
@@ -7,8 +7,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$project = Join-Path $PSScriptRoot "bench\Lokad.Parquet.Benchmarks\Lokad.Parquet.Benchmarks.csproj"
-$benchmarkDll = Join-Path $PSScriptRoot "bench\Lokad.Parquet.Benchmarks\bin\Release\net10.0\Lokad.Parquet.Benchmarks.dll"
+$project = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj"
+$benchmarkDll = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/bin/Release/net10.0/Lokad.Parquet.Benchmarks.dll"
 
 Push-Location $PSScriptRoot
 try {
@@ -58,10 +58,36 @@ try {
         }
     }
     $env:LOKAD_PARQUET_SOURCE_REVISION = $sourceRevision
-    $lockPath = Join-Path $PSScriptRoot "bench\Lokad.Parquet.Benchmarks\packages.lock.json"
+    $lockPath = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/packages.lock.json"
     $env:LOKAD_PARQUET_PACKAGE_LOCK_HASH =
         (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $env:LOKAD_PARQUET_POWER_MODE = (& powercfg /getactivescheme) -join " "
+    # powercfg exists only on Windows; collect best-effort evidence per OS without failing.
+    $env:LOKAD_PARQUET_POWER_MODE = if ($IsWindows) {
+        (& powercfg /getactivescheme) -join " "
+    }
+    else {
+        $governor = Get-Content -LiteralPath "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" -ErrorAction SilentlyContinue
+        if ($governor) { "scaling_governor: $($governor -join " ")" } else { "power management unavailable" }
+    }
+    # Native-Linux qualification: source, build, and result paths must live on a
+    # native Linux filesystem, never a Windows-backed WSL mount. The runner
+    # enforces the same check at collection time; this entry-point check fails
+    # fast with concrete paths before restoring or building.
+    function Test-NativeLinuxPath([string] $Path, [string] $Role) {
+        $full = [IO.Path]::GetFullPath($Path).Replace("\", "/")
+        Write-Host "$Role path: $full"
+        if ($full.StartsWith("/mnt/", [StringComparison]::Ordinal)) {
+            throw "Benchmark $Role must run from a native Linux filesystem workspace, never a Windows-backed mount such as /mnt/c: $full"
+        }
+        return $full
+    }
+    if (-not $IsWindows) {
+        $nativeRepository = Test-NativeLinuxPath $PSScriptRoot 'Repository'
+        $nativeBuild = Test-NativeLinuxPath (Split-Path -Parent $benchmarkDll) 'Build output'
+        $nativeArtifacts = Test-NativeLinuxPath (Join-Path $PSScriptRoot 'artifacts/benchmarks') 'Artifacts output'
+        try { & df -T $nativeRepository $nativeBuild $nativeArtifacts 2>$null | Write-Host } catch { }
+        try { Get-Content -LiteralPath '/proc/version' -ErrorAction Stop | Write-Host } catch { }
+    }
     $env:LOKAD_PARQUET_BENCHMARK_MODE = if ($Suite -eq "ColdOpen") { "ColdOpen" } else { "Qualification" }
 
     if (-not $Filter) {
@@ -104,6 +130,11 @@ try {
 
     if ($Suite -eq "Census") {
         & dotnet $benchmarkDll --census
+        exit $LASTEXITCODE
+    }
+
+    if ($Suite -eq "Catalog") {
+        & dotnet $benchmarkDll --catalog
         exit $LASTEXITCODE
     }
 

@@ -41,6 +41,20 @@ internal static class ScanWorkloadCatalog
         _ => 1,
     };
 
+    // Single ownership for the reconciler's workload names and report labels.
+    internal static IReadOnlyDictionary<ScanWorkload, string> Labels { get; } = new Dictionary<ScanWorkload, string>
+    {
+        [ScanWorkload.RequiredInt32Plain] = "Required INT32, PLAIN",
+        [ScanWorkload.NullableInt32Plain] = "Nullable INT32, PLAIN",
+        [ScanWorkload.RequiredInt32Snappy] = "Required INT32, Snappy",
+        [ScanWorkload.RequiredStringPlain] = "Required UTF-8, PLAIN",
+        [ScanWorkload.RequiredStringSnappy] = "Required UTF-8, PLAIN + Snappy",
+        [ScanWorkload.RequiredStringDictionary] = "Required UTF-8, dictionary",
+        [ScanWorkload.RequiredStringDictionarySnappy] = "Required UTF-8, dictionary + Snappy",
+        [ScanWorkload.TwoRequiredInt32Plain] = "Two required INT32, PLAIN",
+        [ScanWorkload.EightRequiredInt32Plain] = "Eight required INT32, PLAIN",
+    };
+
     internal static bool IsString(ScanWorkload workload) => workload is
         ScanWorkload.RequiredStringPlain or
         ScanWorkload.RequiredStringSnappy or
@@ -100,6 +114,21 @@ internal static class ScanChecksum
             checksum = Mix(checksum, value);
         return checksum;
     }
+
+    // Canonical truth contract: every consumer accumulates one Mix chain per column
+    // in row order, then combines the per-column checksums commutatively, so batch
+    // partitioning cannot change the result. A single column has no cross-column
+    // order and stands alone. Only the per-value mapping and this combination are
+    // shared; the two reader consumers keep independent decode logic.
+    internal static long CombineColumns(ReadOnlySpan<long> columnChecksums)
+    {
+        if (columnChecksums.Length == 1)
+            return columnChecksums[0];
+        var combined = Seed;
+        for (var column = 0; column < columnChecksums.Length; column++)
+            combined ^= Mix(columnChecksums[column], column);
+        return combined;
+    }
 }
 
 internal sealed record ScanFixture(
@@ -108,7 +137,8 @@ internal sealed record ScanFixture(
     int ColumnCount,
     int Utf8PayloadBytes,
     byte[] Bytes,
-    long Checksum)
+    long Checksum,
+    long[] ColumnChecksums)
 {
     internal static async Task<ScanFixture> CreateAsync(ScanWorkload workload, int rowCount)
     {
@@ -129,6 +159,9 @@ internal sealed record ScanFixture(
         };
         using var stream = new MemoryStream();
         var checksum = ScanChecksum.Seed;
+        var perColumnChecksums = new long[columnCount];
+        for (var column = 0; column < columnCount; column++)
+            perColumnChecksums[column] = ScanChecksum.Seed;
 
         if (workload == ScanWorkload.NullableInt32Plain)
         {
@@ -139,6 +172,7 @@ internal sealed record ScanFixture(
                 values[row] = (row & 7) == 0 ? null : ScanChecksum.CreateInt32(row);
                 checksum = ScanChecksum.Mix(checksum, values[row] ?? ScanChecksum.NullMarker);
             }
+            perColumnChecksums[0] = checksum;
             await WriteAsync(
                 new BaselineParquetSchema(field),
                 async rowGroup => await rowGroup.WriteAsync<int>(field, values));
@@ -168,8 +202,9 @@ internal sealed record ScanFixture(
             var values = Enumerable.Range(0, columnCount)
                 .Select(column => CreateInt32Values(rowCount, checked(column * 17)))
                 .ToArray();
-            foreach (var column in values)
-                checksum = ScanChecksum.ConsumeRequired(checksum, column);
+            for (var column = 0; column < columnCount; column++)
+                perColumnChecksums[column] = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, values[column]);
+            checksum = ScanChecksum.CombineColumns(perColumnChecksums);
             await WriteAsync(
                 new BaselineParquetSchema(fields),
                 async rowGroup =>
@@ -197,7 +232,8 @@ internal sealed record ScanFixture(
             columnCount,
             ScanWorkloadCatalog.GetUtf8PayloadByteCount(workload, rowCount),
             bytes,
-            checksum);
+            checksum,
+            perColumnChecksums);
 
         async Task WriteAsync(
             BaselineParquetSchema schema,

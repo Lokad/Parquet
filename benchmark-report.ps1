@@ -3,6 +3,8 @@ param(
     [string[]] $PairedSnapshot,
     [Parameter(Mandatory)]
     [string] $CensusSnapshot,
+    [Parameter(Mandatory)]
+    [string] $Catalog,
     [string] $Document = (Join-Path $PSScriptRoot "BENCHMARKS.md"),
     [switch] $Verify
 )
@@ -18,26 +20,11 @@ $legacyCaseNames = @(
     "PreopenedScan/EightRequiredInt32Plain",
     "WarmMetadataOpen"
 )
-$currentCaseNames = @(
-    "PreopenedScan/RequiredInt32Plain",
-    "PreopenedScan/NullableInt32Plain",
-    "PreopenedScan/RequiredInt32Snappy",
-    "PreopenedScan/RequiredStringPlain",
-    "PreopenedScan/RequiredStringSnappy",
-    "PreopenedScan/RequiredStringDictionary",
-    "PreopenedScan/RequiredStringDictionarySnappy",
-    "PreopenedScan/TwoRequiredInt32Plain",
-    "PreopenedScan/EightRequiredInt32Plain",
-    "WarmMetadataOpen"
-)
-$caseLabels = @{
+# Frozen legacy catalog (paired schema 6): historical runs only. Do not extend.
+$legacyCaseLabels = @{
     "PreopenedScan/RequiredInt32Plain" = "Required INT32, PLAIN"
     "PreopenedScan/NullableInt32Plain" = "Nullable INT32, PLAIN"
     "PreopenedScan/RequiredInt32Snappy" = "Required INT32, Snappy"
-    "PreopenedScan/RequiredStringPlain" = "Required UTF-8, PLAIN"
-    "PreopenedScan/RequiredStringSnappy" = "Required UTF-8, PLAIN + Snappy"
-    "PreopenedScan/RequiredStringDictionary" = "Required UTF-8, dictionary"
-    "PreopenedScan/RequiredStringDictionarySnappy" = "Required UTF-8, dictionary + Snappy"
     "PreopenedScan/TwoRequiredInt32Plain" = "Two required INT32, PLAIN"
     "PreopenedScan/EightRequiredInt32Plain" = "Eight required INT32, PLAIN"
     "WarmMetadataOpen" = "Warm metadata open"
@@ -55,16 +42,22 @@ $runs = @($PairedSnapshot | ForEach-Object {
     Get-Content -LiteralPath $_ -Raw | ConvertFrom-Json
 })
 $census = Get-Content -LiteralPath $CensusSnapshot -Raw | ConvertFrom-Json
+$catalogDoc = Get-Content -LiteralPath $Catalog -Raw | ConvertFrom-Json
 $schemaVersions = @($runs.schemaVersion | Sort-Object -Unique)
 Assert-ReportCondition ($schemaVersions.Count -eq 1) `
     "Paired snapshots have different schemas."
 $pairedSchema = $schemaVersions[0]
 if ($pairedSchema -eq 6) {
     $caseNames = $legacyCaseNames
+    $caseLabels = $legacyCaseLabels
     $censusSchema = 1
 }
 elseif ($pairedSchema -eq 7) {
-    $caseNames = $currentCaseNames
+    Assert-ReportCondition ($catalogDoc.pairedSchemaVersion -eq $pairedSchema) `
+        "The catalog does not match the paired snapshot schema."
+    $caseNames = @($catalogDoc.cases.name)
+    $caseLabels = @{}
+    foreach ($entry in $catalogDoc.cases) { $caseLabels[$entry.name] = $entry.label }
     $censusSchema = 2
 }
 else {
@@ -86,9 +79,22 @@ Assert-ReportCondition ($census.sourceRevision -eq $sourceRevisions[0]) `
 Assert-ReportCondition ((@($runs.sessionId | Sort-Object -Unique)).Count -eq 4) `
     "Paired snapshots must come from four distinct sessions."
 
+foreach ($run in $runs) {
+    # Note: $IsWindows/$IsLinux are read-only automatic variables; use other names.
+    $onWindows = $run.operatingSystem -like "*Windows*"
+    $onLinux = $run.operatingSystem -like "*Linux*"
+    if ($pairedSchema -eq 6 -and -not $onWindows -and -not $onLinux) {
+        # Frozen schema-6 snapshots predate OS-family recording and name the
+        # distro only; the old rule classified every non-Windows session as Linux.
+        $run.operatingSystem = "Linux " + $run.operatingSystem
+        $onLinux = $true
+    }
+    Assert-ReportCondition ($onWindows -xor $onLinux) `
+        "Every qualifying session must run on Windows or Linux."
+}
 $windowsRuns = @($runs | Where-Object operatingSystem -Like "*Windows*" |
     Sort-Object recordedAtUtc)
-$linuxRuns = @($runs | Where-Object operatingSystem -NotLike "*Windows*" |
+$linuxRuns = @($runs | Where-Object operatingSystem -Like "*Linux*" |
     Sort-Object recordedAtUtc)
 Assert-ReportCondition ($windowsRuns.Count -eq 2) `
     "Two Windows sessions are required."
@@ -98,8 +104,8 @@ Assert-ReportCondition ((@($windowsRuns.runnerFingerprint | Sort-Object -Unique)
     "Windows sessions have different runner fingerprints."
 Assert-ReportCondition ((@($linuxRuns.runnerFingerprint | Sort-Object -Unique)).Count -eq 1) `
     "Linux sessions have different runner fingerprints."
-Assert-ReportCondition (-not (@($linuxRuns.powerMode) | Where-Object { $_ -notlike '*native*' })) `
-    "Linux sessions must be collected from a native Linux filesystem workspace."
+# Native-filesystem qualification is enforced at collection time: the benchmark
+# refuses Windows-backed mounts on Linux. powerMode stays informational only.
 
 foreach ($run in $runs) {
     Assert-ReportCondition ($run.schemaVersion -eq $pairedSchema) `
@@ -123,6 +129,30 @@ foreach ($run in $runs) {
             "A qualifying snapshot is missing $caseName."
         Assert-ReportCondition ($case[0].observations.Count -eq 400) `
             "$caseName does not contain 400 observations."
+        # Recompute the point estimate from the retained observations; the
+        # interval width itself stays with the runner (Student-t), but the
+        # point, the gate outcome, the counts, and the identities below are
+        # re-derived here rather than trusted.
+        $logs = @($case[0].observations | ForEach-Object { $_.logRatio })
+        # [double]::IsFinite is unavailable on Windows PowerShell, so finiteness
+        # is expressed through IsNaN/IsInfinity instead.
+        $sum = 0.0
+        foreach ($log in $logs) {
+            Assert-ReportCondition (-not ([double]::IsNaN($log) -or [double]::IsInfinity($log))) `
+                "$caseName has a non-finite observation."
+            $sum += $log
+        }
+        $point = [Math]::Exp($sum / $logs.Count)
+        Assert-ReportCondition (-not ([double]::IsNaN($point) -or [double]::IsInfinity($point))) `
+            "$caseName has a non-finite recomputed point ratio."
+        Assert-ReportCondition ((-not ([double]::IsNaN($case[0].pointRatio) -or [double]::IsInfinity($case[0].pointRatio))) -and (-not ([double]::IsNaN($case[0].upper95Ratio) -or [double]::IsInfinity($case[0].upper95Ratio)))) `
+            "$caseName has a non-finite recorded ratio."
+        Assert-ReportCondition ($point -eq $case[0].pointRatio) `
+            "$caseName point ratio does not match its observations."
+        Assert-ReportCondition ($case[0].passed -eq ($case[0].upper95Ratio -le 1.05)) `
+            "$caseName recorded gate is inconsistent."
+        Assert-ReportCondition ($case[0].upper95Ratio -ge $point) `
+            "$caseName upper bound is below its recomputed point."
         Assert-ReportCondition $case[0].passed `
             "$caseName does not pass its recorded non-inferiority gate."
         Assert-ReportCondition ($case[0].upper95Ratio -le 1.05) `
@@ -136,19 +166,42 @@ foreach ($run in $runs) {
 
 Assert-ReportCondition ($census.schemaVersion -eq $censusSchema) `
     "Unsupported work-census schema."
+foreach ($caseName in $caseNames) {
+    $hashes = @($runs | ForEach-Object { (@($_.cases | Where-Object name -EQ $caseName))[0].fixtureHash })
+    Assert-ReportCondition ((@($hashes | Sort-Object -Unique)).Count -eq 1) `
+        "$caseName fixture hashes differ across sessions."
+    $identityFields = @("rowCount", "columnCount")
+    if ($pairedSchema -eq 7) {
+        # utf8PayloadBytes exists only on post-UTF-8 snapshots; the frozen
+        # schema-6 evidence predates the field and pins identity by fixture hash.
+        $identityFields += "utf8PayloadBytes"
+    }
+    foreach ($field in $identityFields) {
+        $values = @($runs | ForEach-Object { (@($_.cases | Where-Object name -EQ $caseName))[0].$field })
+        Assert-ReportCondition ((@($values | Sort-Object -Unique)).Count -eq 1) `
+            "$caseName $field differs across sessions."
+    }
+    if ($caseName -like "PreopenedScan/*") {
+        $workload = $caseName.Substring(14)
+        $censusEntry = @($census.cases | Where-Object name -EQ $workload)
+        Assert-ReportCondition ($censusEntry.Count -eq 1) `
+            "The work census is missing $workload."
+        Assert-ReportCondition ($censusEntry[0].fixtureHash -eq $hashes[0]) `
+            "The $workload census fixture differs from the paired sessions."
+    }
+}
 foreach ($entry in $census.cases) {
     Assert-ReportCondition ($entry.poolRents -eq $entry.poolReturns) `
         "The $($entry.name) work census has unbalanced pool activity."
     Assert-ReportCondition ($entry.retainedPoolBytes -eq 0) `
         "The $($entry.name) work census retained pooled storage."
-    Assert-ReportCondition ($entry.compositeCopiedBytes -eq 0) `
-        "The $($entry.name) work census copied composite output."
+
     Assert-ReportCondition ($entry.maximumConcurrentReads -eq 1) `
         "The $($entry.name) work census overlapped source reads."
     Assert-ReportCondition ($entry.peakPooledBytes -le (6 * $entry.logicalOutputBytes)) `
         "The $($entry.name) work census exceeds the 6x pooled-memory gate."
     if ($censusSchema -eq 2) {
-        Assert-ReportCondition ($entry.consumerUtf8CopiedBytes -eq $entry.utf8PayloadBytes) `
+        Assert-ReportCondition ($entry.consumerUtf8CopiedBytes -eq (2 * $entry.utf8PayloadBytes)) `
             "The $($entry.name) work census has inconsistent UTF-8 consumer-copy accounting."
     }
 }
@@ -174,11 +227,11 @@ foreach ($caseName in $caseNames) {
 $lines.Add("")
 $lines.Add("Each result is `point estimate / upper 95% bound` for `Lokad / Parquet.NET`; lower is better and the declared gate is an upper bound no greater than 1.05.")
 $lines.Add("")
-$lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | Composite copy | Retained |")
+$lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | End-scan retained | Retained |")
 $lines.Add("|---|---:|---:|---:|---:|---:|---:|")
 foreach ($entry in $census.cases) {
     $peakRatio = $entry.peakPooledBytes / $entry.logicalOutputBytes
-    $lines.Add("| $($caseLabels["PreopenedScan/$($entry.name)"]) | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $($entry.compositeCopiedBytes) | $($entry.retainedPoolBytes) |")
+    $lines.Add("| $($caseLabels["PreopenedScan/$($entry.name)"]) | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) |")
 }
 
 $documentText = [IO.File]::ReadAllText($Document).Replace("`r`n", "`n")

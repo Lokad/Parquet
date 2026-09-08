@@ -5,6 +5,7 @@ using BenchmarkDotNet.Running;
 using System.Diagnostics;
 using Lokad.Parquet.Benchmarks;
 using Perfolizer.Horology;
+using System.Text.Json;
 
 #if DEBUG
 Console.Error.WriteLine("Lokad.Parquet benchmarks require a Release build.");
@@ -35,10 +36,32 @@ if (string.IsNullOrEmpty(repositoryRoot))
         throw new InvalidOperationException("The benchmark repository root could not be resolved.");
     Environment.SetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT", repositoryRoot);
 }
+
+BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
 if (args.Contains("--force-scalar", StringComparer.Ordinal))
     AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
 Console.WriteLine($"Processor affinity: {BindToOneLogicalProcessor()}");
 Console.WriteLine($"Source revision: {Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded"}");
+if (args.Contains("--catalog", StringComparer.Ordinal))
+{
+    var catalogCases = ScanWorkloadCatalog.ParityWorkloads
+        .Select(static workload => new { name = "PreopenedScan/" + workload.ToString(), label = ScanWorkloadCatalog.Labels[workload] })
+        .Append(new { name = "WarmMetadataOpen", label = "Warm metadata open" })
+        .ToArray();
+    var catalog = new { pairedSchemaVersion = PairedParityRunner.SnapshotSchemaVersion, cases = catalogCases };
+    Directory.CreateDirectory(Path.Combine("artifacts", "benchmarks"));
+    var catalogPath = Path.Combine("artifacts", "benchmarks", "parity-catalog.json");
+    await using (var catalogOutput = File.Create(catalogPath))
+    {
+        await JsonSerializer.SerializeAsync(catalogOutput, catalog, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true,
+        });
+    }
+    Console.WriteLine($"Parity catalog: {Path.GetFullPath(catalogPath)}");
+    return 0;
+}
 if (args.Contains("--paired", StringComparer.Ordinal))
     return await PairedParityRunner.RunAsync(args);
 if (args.Contains("--census", StringComparer.Ordinal))

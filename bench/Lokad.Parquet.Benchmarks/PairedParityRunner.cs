@@ -13,6 +13,7 @@ internal static class PairedParityRunner
 {
     private const int RowCount = 65_536;
     private const int SampleCount = 400;
+    internal const int SnapshotSchemaVersion = 7;
     private const int WarmupCount = 64;
     private const int MinimumStabilizationOperations = 16_384;
     private const int PreliminaryStabilizationBlockCount = 40;
@@ -63,16 +64,16 @@ internal static class PairedParityRunner
             throw new ArgumentException($"Unknown paired case '{selectedCase}'.", nameof(arguments));
 
         var snapshot = new PairedRunSnapshot(
-            SchemaVersion: 7,
+            SchemaVersion: SnapshotSchemaVersion,
             SessionId: Guid.NewGuid(),
             RecordedAtUtc: DateTimeOffset.UtcNow,
             SourceRevision: Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
             RunnerFingerprint: GetRunnerFingerprint(),
             PackageLockHash: Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
             Runtime: RuntimeInformation.FrameworkDescription,
-            OperatingSystem: RuntimeInformation.OSDescription,
+            OperatingSystem: OperatingSystem.IsLinux() && !RuntimeInformation.OSDescription.Contains("Linux", StringComparison.Ordinal) ? "Linux " + RuntimeInformation.OSDescription : RuntimeInformation.OSDescription,
             Architecture: RuntimeInformation.ProcessArchitecture.ToString(),
-            Processor: Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER") ?? "unrecorded",
+            Processor: GetProcessorName(),
             ProcessPriority: process.PriorityClass.ToString(),
             ProcessorAffinity: processorAffinity,
             PowerMode: Environment.GetEnvironmentVariable("LOKAD_PARQUET_POWER_MODE") ?? "unrecorded",
@@ -182,6 +183,34 @@ internal static class PairedParityRunner
         {
             var path = Assembly.GetExecutingAssembly().Location;
             return Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+        }
+
+        // PROCESSOR_IDENTIFIER exists only on Windows; collect the Linux CPU
+        // model directly so qualification evidence names concrete hardware.
+        static string GetProcessorName()
+        {
+            var identifier = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
+            if (!string.IsNullOrEmpty(identifier))
+                return identifier;
+            if (OperatingSystem.IsLinux())
+            {
+                try
+                {
+                    foreach (var line in File.ReadLines("/proc/cpuinfo"))
+                    {
+                        const string prefix = "model name\t: ";
+                        if (line.StartsWith(prefix, StringComparison.Ordinal))
+                            return line[prefix.Length..].Trim();
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+            return "unrecorded";
         }
     }
 

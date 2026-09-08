@@ -69,13 +69,13 @@ Generated from four ignored paired snapshots and one ignored work-census snapsho
 
 Each result is point estimate / upper 95% bound for Lokad / Parquet.NET; lower is better and the declared gate is an upper bound no greater than 1.05.
 
-| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | Composite copy | Retained |
+| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | End-scan retained | Retained |
 |---|---:|---:|---:|---:|---:|---:|
-| Required INT32, PLAIN | 2 / 262400 | 3 | 524288 B / 262144 B (2.000x) | 524544 | 0 | 0 |
-| Nullable INT32, PLAIN | 2 / 262404 | 4 | 794624 B / 262144 B (3.031x) | 794880 | 0 | 0 |
-| Required INT32, Snappy | 2 / 262415 | 4 | 1048576 B / 262144 B (4.000x) | 1048832 | 0 | 0 |
-| Two required INT32, PLAIN | 4 / 524800 | 4 | 786432 B / 524288 B (1.500x) | 786688 | 0 | 0 |
-| Eight required INT32, PLAIN | 16 / 2099200 | 10 | 2359296 B / 2097152 B (1.125x) | 2359552 | 0 | 0 |
+| Required INT32, PLAIN | 2 / 262400 | 3 | 524288 B / 262144 B (2.000x) | 524544 | unrecorded | 0 |
+| Nullable INT32, PLAIN | 2 / 262404 | 4 | 794624 B / 262144 B (3.031x) | 794880 | unrecorded | 0 |
+| Required INT32, Snappy | 2 / 262415 | 4 | 1048576 B / 262144 B (4.000x) | 1048832 | unrecorded | 0 |
+| Two required INT32, PLAIN | 4 / 524800 | 4 | 786432 B / 524288 B (1.500x) | 786688 | unrecorded | 0 |
+| Eight required INT32, PLAIN | 16 / 2099200 | 10 | 2359296 B / 2097152 B (1.125x) | 2359552 | unrecorded | 0 |
 <!-- END GENERATED PARITY REPORT -->
 
 ## Published throughput and allocation cross-check
@@ -97,6 +97,17 @@ All Lokad lanes report zero measured Gen0, Gen1, and Gen2 collections. Managed
 allocation is 0.022–0.025 B per decoded fixed-width cell, below the declared
 0.10 B/cell ceiling. The work census records peak pooled capacity separately
 because rented arrays are not managed allocations in BenchmarkDotNet's table.
+The work census runs two truth-checked passes per workload: the full projection
+at the full-row target, then the second half of the columns at a 4,096-row
+target, sharing one pool-balanced case. Its table reports end-of-scan retained
+bytes (file-cache storage still held after the scans) separately from the
+zero-after-disposal check, and consumer UTF-8 bytes are measured across both
+passes. The retired composite-copy gate assumed zero copies; copies remain
+legitimate on slicing and binary paths, which the UTF-8 and multi-batch lanes
+exercise under truth and pool-balance checks. Cross-column page misalignment
+cannot come from the single-page baseline writer and is covered by the
+partitioning tests against synthetic uneven fixtures. The census table below
+regenerates with fresh snapshots on the next qualification.
 
 ## What changed
 
@@ -119,6 +130,10 @@ vector path.
 
 - Both readers consume the same generated Parquet bytes and must produce the
   same truth-checked row, null, order, and checksum results before timing.
+- Numeric truth is canonical per column: each consumer accumulates one Mix chain
+  per column in row order and combines multi-column checksums commutatively
+  (XOR salted by column ordinal; a single column stands alone), so batch
+  partitioning cannot change the result.
 - The authoritative scan operations start from pre-opened readers and consume
   public batches. Materialization and decoder kernels are diagnostic only.
 - UTF-8 qualification uses the application-pipeline contract above. The
@@ -129,7 +144,10 @@ vector path.
 - Windows and Linux results remain separate; no cross-machine average is used.
 - Every qualifying process is restricted to one logical processor. Linux
   sessions run from a WSL-native ext4 workspace, never a Windows-mounted path
-  such as `/mnt/c`, so host-filesystem mediation cannot distort the result.
+  such as `/mnt/c`, so host-filesystem mediation cannot distort the result. On
+  Linux the benchmark entry point refuses Windows-backed mounts outright, the
+  CPU model is collected from `/proc/cpuinfo`, and `bench.ps1` records the CPU
+  scaling governor instead of a Windows power scheme.
 
 ## Scope difference
 
@@ -159,9 +177,16 @@ Windows-backed mount. Raw snapshots are intentionally ignored. Reconcile four
 chosen paired snapshots and one census into this file, or verify an existing
 reconciliation, without measuring:
 
+The reconciler takes the workload catalog exported by the benchmark binary, so
+the catalog lives in exactly one place. It recomputes each point estimate from
+the retained observations, re-derives the gate outcomes, and checks fixture and
+dimension identity across sessions and the census; only the interval width
+itself stays with the runner. Every session must report Windows or Linux.
+
 ```powershell
+.\bench.ps1 -Suite Catalog
 .\benchmark-report.ps1 -PairedSnapshot <four-paths> `
-    -CensusSnapshot <census-path>
+    -CensusSnapshot <census-path> -Catalog <catalog-path>
 .\benchmark-report.ps1 -PairedSnapshot <four-paths> `
-    -CensusSnapshot <census-path> -Verify
+    -CensusSnapshot <census-path> -Catalog <catalog-path> -Verify
 ```

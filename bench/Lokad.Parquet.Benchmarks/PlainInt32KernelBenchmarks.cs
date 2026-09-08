@@ -75,18 +75,21 @@ public class PlainInt32KernelBenchmarks
     public async Task<long> EightColumnScan()
     {
         var file = _scanFile ?? throw new InvalidOperationException("The scan benchmark is not initialized.");
-        var checksum = ScanChecksum.Seed;
-        await foreach (var batch in file.ScanAsync(new(file.Metadata.Schema.Columns)))
+        var columns = file.Metadata.Schema.Columns;
+        var perColumn = new long[columns.Count];
+        Array.Fill(perColumn, ScanChecksum.Seed);
+        await foreach (var batch in file.ScanAsync(new(columns)))
         {
             using (batch)
             {
-                foreach (var untypedColumn in batch.Columns)
+                for (var columnIndex = 0; columnIndex < batch.Columns.Count; columnIndex++)
                 {
-                    var column = (ParquetPrimitiveColumnBatch<int>)untypedColumn;
-                    checksum = ScanChecksum.ConsumeRequired(checksum, column.Values.Span);
+                    var column = (ParquetPrimitiveColumnBatch<int>)batch.Columns[columnIndex];
+                    perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], column.Values.Span);
                 }
             }
         }
+        var checksum = ScanChecksum.CombineColumns(perColumn);
         if (checksum != _scanChecksum)
             throw new InvalidOperationException("The PLAIN INT32 scan-mode benchmark failed its truth check.");
         return checksum;

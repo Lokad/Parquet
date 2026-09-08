@@ -9,6 +9,9 @@ public class CoreScanBenchmarks
 {
     private byte[] _fixture = [];
     private long _expectedChecksum;
+    private int _columnCount;
+    private long[] _lokadColumnChecksums = [];
+    private long[] _parquetNetColumnChecksums = [];
     private Utf8ScanSink? _lokadUtf8Sink;
     private Utf8ScanSink? _parquetNetUtf8Sink;
     private int _utf8PayloadBytes;
@@ -33,6 +36,9 @@ public class CoreScanBenchmarks
         var fixture = await ScanFixture.CreateAsync(Workload, RowCount);
         _fixture = fixture.Bytes;
         _expectedChecksum = fixture.Checksum;
+        _columnCount = fixture.ColumnCount;
+        _lokadColumnChecksums = new long[fixture.ColumnCount];
+        _parquetNetColumnChecksums = new long[fixture.ColumnCount];
         _utf8PayloadBytes = fixture.Utf8PayloadBytes;
         if (ScanWorkloadCatalog.IsString(Workload))
         {
@@ -68,20 +74,35 @@ public class CoreScanBenchmarks
         long checksum = ScanChecksum.Seed;
         var utf8Sink = _lokadUtf8Sink;
         utf8Sink?.Reset();
+        // Multi-column lanes accumulate one checksum per column so the result
+        // does not depend on how pages batch across columns.
+        var perColumn = _columnCount > 1 ? _lokadColumnChecksums : null;
+        if (perColumn is not null)
+            Array.Fill(perColumn, ScanChecksum.Seed, 0, _columnCount);
         await foreach (var batch in file.ScanAsync(
             new ParquetScanOptions(file.Metadata.Schema.Columns)))
         {
             using (batch)
             {
-                foreach (var column in batch.Columns)
+                for (var columnIndex = 0; columnIndex < batch.Columns.Count; columnIndex++)
                 {
+                    var column = batch.Columns[columnIndex];
                     switch (column)
                     {
                         case ParquetPrimitiveColumnBatch<int> integers:
-                            for (var row = 0; row < integers.RowCount; row++)
-                                checksum = ScanChecksum.Mix(
-                                    checksum,
-                                    integers.Validity.IsValid(row) ? integers.Values.Span[row] : ScanChecksum.NullMarker);
+                            if (perColumn is null)
+                            {
+                                for (var row = 0; row < integers.RowCount; row++)
+                                    checksum = ScanChecksum.Mix(
+                                        checksum,
+                                        integers.Validity.IsValid(row) ? integers.Values.Span[row] : ScanChecksum.NullMarker);
+                            }
+                            else
+                            {
+                                if (!integers.Validity.IsAllValid)
+                                    throw new InvalidOperationException("A required multi-column benchmark value decoded as null.");
+                                perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], integers.Values.Span);
+                            }
                             break;
                         case ParquetBinaryColumnBatch strings:
                             if (!strings.Validity.IsAllValid || utf8Sink is null)
@@ -99,9 +120,11 @@ public class CoreScanBenchmarks
                 }
             }
         }
-        return utf8Sink?.Complete(
-            RowCount,
-            _utf8PayloadBytes) ?? checksum;
+        if (utf8Sink is not null)
+            return utf8Sink.Complete(RowCount, _utf8PayloadBytes);
+        if (perColumn is not null)
+            return ScanChecksum.CombineColumns(perColumn.AsSpan(0, _columnCount));
+        return checksum;
     }
 
     private async Task<long> ReadParquetNetAsync()
@@ -111,6 +134,9 @@ public class CoreScanBenchmarks
         long checksum = ScanChecksum.Seed;
         var utf8Sink = _parquetNetUtf8Sink;
         utf8Sink?.Reset();
+        var perColumn = _columnCount > 1 ? _parquetNetColumnChecksums : null;
+        if (perColumn is not null)
+            Array.Fill(perColumn, ScanChecksum.Seed, 0, _columnCount);
         for (var groupOrdinal = 0; groupOrdinal < reader.RowGroupCount; groupOrdinal++)
         {
             using var rowGroup = reader.OpenRowGroupReader(groupOrdinal);
@@ -132,6 +158,17 @@ public class CoreScanBenchmarks
                     utf8Sink.AppendString(value);
                 }
             }
+            else if (perColumn is not null)
+            {
+                var columnIndex = 0;
+                foreach (var field in reader.Schema.DataFields)
+                {
+                    var values = new int[checked((int)rowGroup.RowCount)];
+                    await rowGroup.ReadAsync<int>(field, values);
+                    perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], values);
+                    columnIndex++;
+                }
+            }
             else
             {
                 foreach (var field in reader.Schema.DataFields)
@@ -142,9 +179,11 @@ public class CoreScanBenchmarks
                 }
             }
         }
-        return utf8Sink?.Complete(
-            RowCount,
-            _utf8PayloadBytes) ?? checksum;
+        if (utf8Sink is not null)
+            return utf8Sink.Complete(RowCount, _utf8PayloadBytes);
+        if (perColumn is not null)
+            return ScanChecksum.CombineColumns(perColumn.AsSpan(0, _columnCount));
+        return checksum;
     }
 
 }
