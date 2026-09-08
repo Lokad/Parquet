@@ -3,9 +3,10 @@ using System.Runtime.InteropServices;
 namespace Lokad.Parquet.Benchmarks;
 
 // Benchmark-only native-workspace qualification. This stays outside the
-// shipped reader. On Linux it rejects Windows-backed mounts for every path
-// that affects qualification (source checkout, build output, result output)
-// and logs concrete runtime/CPU/filesystem/path evidence. On Windows it logs
+// shipped reader. On Linux it rejects `/mnt/`-prefixed workspace paths for every
+// path that affects qualification (source checkout, build output, result output)
+// and logs concrete runtime/CPU/filesystem/path evidence. The check is a path
+// prefix only; it does not resolve symlinks or mount types. On Windows it logs
 // the same paths and preserves power-mode reporting via the
 // LOKAD_PARQUET_POWER_MODE environment value set by bench.ps1.
 internal static class BenchmarkEnvironment

@@ -142,7 +142,9 @@ internal sealed class ParityScanCase : IAsyncDisposable
     private readonly ParquetScanOptions _scanOptions;
     private readonly int _utf8PayloadBytes;
     private readonly long[] _columnChecksums;
+    private readonly long[] _columnNullChains;
     private readonly long[] _parquetNetColumnChecksums;
+    private readonly long[] _parquetNetColumnNullChains;
 
     private ParityScanCase(
         ScanFixture fixture,
@@ -161,8 +163,11 @@ internal sealed class ParityScanCase : IAsyncDisposable
             null,
             null,
             fixture.RowCount);
+        Fixture = fixture;
         _columnChecksums = new long[fixture.ColumnCount];
+        _columnNullChains = new long[fixture.ColumnCount];
         _parquetNetColumnChecksums = new long[fixture.ColumnCount];
+        _parquetNetColumnNullChains = new long[fixture.ColumnCount];
         _utf8PayloadBytes = fixture.Utf8PayloadBytes;
         FixtureLength = fixture.Bytes.Length;
         FixtureHash = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes));
@@ -195,6 +200,10 @@ internal sealed class ParityScanCase : IAsyncDisposable
 
     public string FixtureHash { get; }
 
+    internal ScanFixture Fixture { get; }
+
+    internal IReadOnlyList<ParquetColumn> SchemaColumns => _lokadFile.Metadata.Schema.Columns;
+
     public static async Task<ParityScanCase> CreateAsync(ScanWorkload workload, int rowCount)
     {
         var fixture = await ScanFixture.CreateAsync(workload, rowCount);
@@ -222,6 +231,8 @@ internal sealed class ParityScanCase : IAsyncDisposable
             parquetNetReader = null;
             try
             {
+                if (!ScanWorkloadCatalog.IsString(fixture.Workload))
+                    await fixture.AssertLokadScanAsync();
                 var lokadChecksum = await result.ReadLokadAsync();
                 var parquetNetChecksum = await result.ReadParquetNetAsync();
                 if (lokadChecksum != fixture.Checksum || parquetNetChecksum != fixture.Checksum)
@@ -249,16 +260,30 @@ internal sealed class ParityScanCase : IAsyncDisposable
         }
     }
 
-    public async Task<long> ReadLokadAsync()
+    public Task<long> ReadLokadAsync() => ReadLokadAsync(_scanOptions);
+
+    // Shared Parity consumer with an explicit projection so truth verification
+    // exercises the real pre-opened path with adversarial orderings.
+    public async Task<long> ReadLokadAsync(ParquetScanOptions scanOptions)
     {
-        var checksum = ScanChecksum.Seed;
         _lokadUtf8Sink?.Reset();
         // Multi-column lanes accumulate one checksum per column so the result
         // does not depend on how pages batch across columns.
-        var perColumn = _requiredDestinations.Length > 1 ? _columnChecksums : null;
-        if (perColumn is not null)
-            Array.Fill(perColumn, ScanChecksum.Seed, 0, _requiredDestinations.Length);
-        await foreach (var batch in _lokadFile.ScanAsync(_scanOptions))
+        var multi = scanOptions.Columns.Count > 1;
+        var valueChains = _columnChecksums;
+        var nullChains = _columnNullChains;
+        if (multi)
+        {
+            Array.Fill(valueChains, ScanChecksum.Seed, 0, scanOptions.Columns.Count);
+            Array.Fill(nullChains, ScanChecksum.Seed, 0, scanOptions.Columns.Count);
+        }
+        else
+        {
+            valueChains[0] = ScanChecksum.Seed;
+            nullChains[0] = ScanChecksum.Seed;
+        }
+        var consumed = 0;
+        await foreach (var batch in _lokadFile.ScanAsync(scanOptions))
         {
             using (batch)
             {
@@ -279,44 +304,49 @@ internal sealed class ParityScanCase : IAsyncDisposable
                         var column = (ParquetPrimitiveColumnBatch<int>)untypedColumn;
                         var values = column.Values.Span;
                         var validity = column.Validity;
-                        if (perColumn is not null)
+                        if (multi)
                         {
                             if (!validity.IsAllValid)
                                 throw new InvalidOperationException("A required multi-column parity value decoded as null.");
-                            perColumn[columnIndex] = ScanChecksum.ConsumeRequired(perColumn[columnIndex], values);
+                            valueChains[columnIndex] = ScanChecksum.ConsumeRequired(valueChains[columnIndex], values);
                         }
                         else if (validity.IsAllValid)
                         {
-                            checksum = ScanChecksum.ConsumeRequired(checksum, values);
+                            valueChains[0] = ScanChecksum.ConsumeRequired(valueChains[0], values);
                         }
                         else
                         {
                             var bits = validity.Bits.Span;
                             for (var row = 0; row < values.Length; row++)
                             {
-                                var value = (bits[row >> 3] & (1 << (row & 7))) != 0
-                                    ? values[row]
-                                    : ScanChecksum.NullMarker;
-                                checksum = ScanChecksum.Mix(checksum, value);
+                                if ((bits[row >> 3] & (1 << (row & 7))) != 0)
+                                    valueChains[0] = ScanChecksum.Mix(valueChains[0], values[row]);
+                                else
+                                    nullChains[0] = ScanChecksum.Mix(nullChains[0], consumed + row);
                             }
                         }
                     }
                 }
+                consumed += batch.RowCount;
             }
         }
         if (_lokadUtf8Sink is null)
-            return perColumn is null
-                ? checksum
-                : ScanChecksum.CombineColumns(perColumn.AsSpan(0, _requiredDestinations.Length));
+            return multi
+                ? ScanChecksum.CombineColumns(valueChains.AsSpan(0, scanOptions.Columns.Count), nullChains.AsSpan(0, scanOptions.Columns.Count))
+                : ScanChecksum.CombineColumn(valueChains[0], nullChains[0]);
         if (_stringDestination is null)
             throw new InvalidOperationException("The UTF-8 parity destination is unavailable.");
         return _lokadUtf8Sink.Complete(_stringDestination.Length, _utf8PayloadBytes);
     }
 
-    public async Task<long> ReadParquetNetAsync()
+    public Task<long> ReadParquetNetAsync() => ReadParquetNetAsync(null);
+
+    // Shared Parity baseline consumer with explicit ordinals so truth
+    // verification exercises the real destination-buffer path adversarially.
+    // A null ordinal list reads every field in schema order.
+    public async Task<long> ReadParquetNetAsync(IReadOnlyList<int>? ordinals)
     {
         using var rowGroup = _parquetNetReader.OpenRowGroupReader(0);
-        var checksum = ScanChecksum.Seed;
         if (_stringDestination is not null)
         {
             _parquetNetUtf8Sink?.Reset();
@@ -329,37 +359,57 @@ internal sealed class ParityScanCase : IAsyncDisposable
             }
             if (_parquetNetUtf8Sink is null)
                 throw new InvalidOperationException("The Parquet.NET UTF-8 parity sink is unavailable.");
-            checksum = _parquetNetUtf8Sink.Complete(_stringDestination.Length, _utf8PayloadBytes);
+            return _parquetNetUtf8Sink.Complete(_stringDestination.Length, _utf8PayloadBytes);
         }
-        else if (_nullableDestination is not null)
+        var resolved = ordinals ?? AllOrdinals(_parquetNetFields.Length);
+
+        static IReadOnlyList<int> AllOrdinals(int count)
         {
+            var all = new int[count];
+            for (var ordinal = 0; ordinal < all.Length; ordinal++)
+                all[ordinal] = ordinal;
+            return all;
+        }
+        var valueChains = _parquetNetColumnChecksums;
+        var nullChains = _parquetNetColumnNullChains;
+        if (_nullableDestination is not null)
+        {
+            // Single row group, like the previous baseline path: a multi-group
+            // fixture fails the truth comparison loudly instead of half-reading.
+            valueChains[0] = ScanChecksum.Seed;
+            nullChains[0] = ScanChecksum.Seed;
             await rowGroup.ReadAsync<int>(_parquetNetFields[0], _nullableDestination);
-            foreach (var value in _nullableDestination)
-                checksum = ScanChecksum.Mix(checksum, value ?? ScanChecksum.NullMarker);
-        }
-        else if (_requiredDestinations.Length > 1)
-        {
-            var perColumn = _parquetNetColumnChecksums;
-            Array.Fill(perColumn, ScanChecksum.Seed, 0, _requiredDestinations.Length);
-            for (var column = 0; column < _parquetNetFields.Length; column++)
+            for (var row = 0; row < _nullableDestination.Length; row++)
             {
-                var values = _requiredDestinations[column];
-                await rowGroup.ReadAsync<int>(_parquetNetFields[column], values);
-                perColumn[column] = ScanChecksum.ConsumeRequired(perColumn[column], values);
+                if (_nullableDestination[row] is int value)
+                    valueChains[0] = ScanChecksum.Mix(valueChains[0], value);
+                else
+                    nullChains[0] = ScanChecksum.Mix(nullChains[0], row);
             }
-            checksum = ScanChecksum.CombineColumns(perColumn.AsSpan(0, _requiredDestinations.Length));
+            return ScanChecksum.CombineColumn(valueChains[0], nullChains[0]);
+        }
+        var multi = resolved.Count > 1;
+        if (multi)
+        {
+            Array.Fill(valueChains, ScanChecksum.Seed, 0, resolved.Count);
+            Array.Fill(nullChains, ScanChecksum.Seed, 0, resolved.Count);
         }
         else
         {
-            for (var column = 0; column < _parquetNetFields.Length; column++)
-            {
-                var values = _requiredDestinations[column];
-                await rowGroup.ReadAsync<int>(_parquetNetFields[column], values);
-                checksum = ScanChecksum.ConsumeRequired(checksum, values);
-            }
+            valueChains[0] = ScanChecksum.Seed;
+            nullChains[0] = ScanChecksum.Seed;
         }
-        return checksum;
+        for (var columnIndex = 0; columnIndex < resolved.Count; columnIndex++)
+        {
+            var values = _requiredDestinations[resolved[columnIndex]];
+            await rowGroup.ReadAsync<int>(_parquetNetFields[resolved[columnIndex]], values);
+            valueChains[columnIndex] = ScanChecksum.ConsumeRequired(valueChains[columnIndex], values);
+        }
+        return multi
+            ? ScanChecksum.CombineColumns(valueChains.AsSpan(0, resolved.Count), nullChains.AsSpan(0, resolved.Count))
+            : ScanChecksum.CombineColumn(valueChains[0], nullChains[0]);
     }
+
 
     public async Task<long> MaterializeLokadAsync()
     {
@@ -388,8 +438,10 @@ internal sealed class ParityScanCase : IAsyncDisposable
         if (_nullableDestination is not null)
         {
             await rowGroup.ReadAsync<int>(_parquetNetFields[0], _nullableDestination);
-            sentinel = ScanChecksum.Mix(sentinel, _nullableDestination[0] ?? ScanChecksum.NullMarker);
-            sentinel = ScanChecksum.Mix(sentinel, _nullableDestination[^1] ?? ScanChecksum.NullMarker);
+            if (_nullableDestination[0] is int first)
+                sentinel = ScanChecksum.Mix(sentinel, first);
+            if (_nullableDestination[^1] is int last)
+                sentinel = ScanChecksum.Mix(sentinel, last);
         }
         else
         {

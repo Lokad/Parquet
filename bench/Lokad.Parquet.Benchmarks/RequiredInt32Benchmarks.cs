@@ -74,7 +74,7 @@ public class RequiredInt32Benchmarks
                 checksum = ScanChecksum.ConsumeRequired(checksum, values);
             }
         }
-        return checksum;
+        return ScanChecksum.CombineColumn(checksum, ScanChecksum.Seed);
     }
 
     private async Task<long> ReadParquetNetAsync()
@@ -90,7 +90,7 @@ public class RequiredInt32Benchmarks
             await rowGroup.ReadAsync<int>(field, values);
             checksum = ScanChecksum.ConsumeRequired(checksum, values);
         }
-        return checksum;
+        return ScanChecksum.CombineColumn(checksum, ScanChecksum.Seed);
     }
 }
 

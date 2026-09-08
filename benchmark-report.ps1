@@ -200,6 +200,12 @@ foreach ($entry in $census.cases) {
         "The $($entry.name) work census overlapped source reads."
     Assert-ReportCondition ($entry.peakPooledBytes -le (6 * $entry.logicalOutputBytes)) `
         "The $($entry.name) work census exceeds the 6x pooled-memory gate."
+    if ($null -ne $entry.passPeaks) {
+        foreach ($pass in $entry.passPeaks) {
+            Assert-ReportCondition ($pass.peakPooledBytes -le (6 * $pass.logicalOutputBytes)) `
+                "The $($entry.name) work census exceeds the 6x pooled-memory gate in one pass."
+        }
+    }
     if ($censusSchema -eq 2) {
         Assert-ReportCondition ($entry.consumerUtf8CopiedBytes -eq (2 * $entry.utf8PayloadBytes)) `
             "The $($entry.name) work census has inconsistent UTF-8 consumer-copy accounting."
@@ -231,7 +237,9 @@ $lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes clea
 $lines.Add("|---|---:|---:|---:|---:|---:|---:|")
 foreach ($entry in $census.cases) {
     $peakRatio = $entry.peakPooledBytes / $entry.logicalOutputBytes
-    $lines.Add("| $($caseLabels["PreopenedScan/$($entry.name)"]) | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) |")
+    $label = $caseLabels["PreopenedScan/$($entry.name)"]
+    if ($null -eq $label) { $label = $entry.name }
+    $lines.Add("| $label | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) |")
 }
 
 $documentText = [IO.File]::ReadAllText($Document).Replace("`r`n", "`n")

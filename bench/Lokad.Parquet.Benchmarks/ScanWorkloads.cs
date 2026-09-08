@@ -100,7 +100,6 @@ internal static class ScanWorkloadCatalog
 internal static class ScanChecksum
 {
     internal const long Seed = 1_469_598_103_934_665_603L;
-    internal const int NullMarker = unchecked((int)0xA5A5A5A5);
     internal const int ValueSeparator = 0x100;
 
     internal static int CreateInt32(int value) => unchecked((value * 1_000_003) ^ (value >> 3));
@@ -116,18 +115,39 @@ internal static class ScanChecksum
     }
 
     // Canonical truth contract: every consumer accumulates one Mix chain per column
-    // in row order, then combines the per-column checksums commutatively, so batch
-    // partitioning cannot change the result. A single column has no cross-column
-    // order and stands alone. Only the per-value mapping and this combination are
-    // shared; the two reader consumers keep independent decode logic.
-    internal static long CombineColumns(ReadOnlySpan<long> columnChecksums)
+    // in row order, independent of batch partitioning, over non-null values only.
+    // Null row ordinals accumulate in a separate chain, so a null can never equal
+    // any value; CombineColumn folds the two chains in a fixed order. Folded
+    // columns then combine in scan order, so swapped, duplicated, omitted, or
+    // reordered columns change the result. A single column stands alone without
+    // cross-column order. Only the per-value mapping and this combination are
+    // shared; the reader consumers keep independent decode logic.
+    internal static long CombineColumn(long valueChain, long nullChain) =>
+        Mix(Mix(valueChain, (int)nullChain), (int)(nullChain >> 32));
+
+    internal static long CombineColumns(ReadOnlySpan<long> columnHashes)
     {
-        if (columnChecksums.Length == 1)
-            return columnChecksums[0];
+        if (columnHashes.Length == 1)
+            return columnHashes[0];
         var combined = Seed;
-        for (var column = 0; column < columnChecksums.Length; column++)
-            combined ^= Mix(columnChecksums[column], column);
+        foreach (var columnHash in columnHashes)
+        {
+            combined = Mix(combined, (int)columnHash);
+            combined = Mix(combined, (int)(columnHash >> 32));
+        }
         return combined;
+    }
+
+    internal static long CombineColumns(ReadOnlySpan<long> valueChains, ReadOnlySpan<long> nullChains)
+    {
+        if (valueChains.Length != nullChains.Length)
+            throw new ArgumentException("Value and null chains must cover the same columns.", nameof(nullChains));
+        if (valueChains.Length == 1)
+            return CombineColumn(valueChains[0], nullChains[0]);
+        var folded = new long[valueChains.Length];
+        for (var column = 0; column < folded.Length; column++)
+            folded[column] = CombineColumn(valueChains[column], nullChains[column]);
+        return CombineColumns(folded);
     }
 }
 
@@ -138,7 +158,8 @@ internal sealed record ScanFixture(
     int Utf8PayloadBytes,
     byte[] Bytes,
     long Checksum,
-    long[] ColumnChecksums)
+    long[] ColumnChecksums,
+    int[] NullCounts)
 {
     internal static async Task<ScanFixture> CreateAsync(ScanWorkload workload, int rowCount)
     {
@@ -160,6 +181,7 @@ internal sealed record ScanFixture(
         using var stream = new MemoryStream();
         var checksum = ScanChecksum.Seed;
         var perColumnChecksums = new long[columnCount];
+        var nullCounts = new int[columnCount];
         for (var column = 0; column < columnCount; column++)
             perColumnChecksums[column] = ScanChecksum.Seed;
 
@@ -167,11 +189,20 @@ internal sealed record ScanFixture(
         {
             var field = new DataField<int?>("value");
             var values = new int?[rowCount];
+            var valueChain = ScanChecksum.Seed;
+            var nullChain = ScanChecksum.Seed;
             for (var row = 0; row < values.Length; row++)
             {
                 values[row] = (row & 7) == 0 ? null : ScanChecksum.CreateInt32(row);
-                checksum = ScanChecksum.Mix(checksum, values[row] ?? ScanChecksum.NullMarker);
+                if (values[row] is int value)
+                    valueChain = ScanChecksum.Mix(valueChain, value);
+                else
+                {
+                    nullChain = ScanChecksum.Mix(nullChain, row);
+                    nullCounts[0]++;
+                }
             }
+            checksum = ScanChecksum.CombineColumn(valueChain, nullChain);
             perColumnChecksums[0] = checksum;
             await WriteAsync(
                 new BaselineParquetSchema(field),
@@ -203,8 +234,12 @@ internal sealed record ScanFixture(
                 .Select(column => CreateInt32Values(rowCount, checked(column * 17)))
                 .ToArray();
             for (var column = 0; column < columnCount; column++)
-                perColumnChecksums[column] = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, values[column]);
-            checksum = ScanChecksum.CombineColumns(perColumnChecksums);
+                perColumnChecksums[column] = ScanChecksum.CombineColumn(
+                    ScanChecksum.ConsumeRequired(ScanChecksum.Seed, values[column]),
+                    ScanChecksum.Seed);
+            checksum = columnCount == 1
+                ? perColumnChecksums[0]
+                : ScanChecksum.CombineColumns(perColumnChecksums);
             await WriteAsync(
                 new BaselineParquetSchema(fields),
                 async rowGroup =>
@@ -233,7 +268,8 @@ internal sealed record ScanFixture(
             ScanWorkloadCatalog.GetUtf8PayloadByteCount(workload, rowCount),
             bytes,
             checksum,
-            perColumnChecksums);
+            perColumnChecksums,
+            nullCounts);
 
         async Task WriteAsync(
             BaselineParquetSchema schema,
@@ -251,6 +287,59 @@ internal sealed record ScanFixture(
             for (var row = 0; row < values.Length; row++)
                 values[row] = ScanChecksum.CreateInt32(row + salt);
             return values;
+        }
+    }
+
+    // Setup-time truth gate: re-scans the fixture through the Lokad reader and
+    // asserts row counts, per-column folded hashes, and null counts before any
+    // timing runs. Integer lanes only; UTF-8 lanes are covered by their sink
+    // checksum comparison at each call site.
+    internal async Task AssertLokadScanAsync()
+    {
+        if (ScanWorkloadCatalog.IsString(Workload))
+            throw new InvalidOperationException("The scan truth gate covers integer lanes only.");
+        await using var file = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)Bytes);
+        if (file.Metadata.RowCount != RowCount || file.Metadata.Schema.Columns.Count != ColumnCount)
+            throw new InvalidOperationException("The scan truth gate found unexpected metadata.");
+        var valueChains = new long[ColumnCount];
+        var nullChains = new long[ColumnCount];
+        var nullCounts = new int[ColumnCount];
+        var consumed = new int[ColumnCount];
+        Array.Fill(valueChains, ScanChecksum.Seed);
+        Array.Fill(nullChains, ScanChecksum.Seed);
+        var rows = 0;
+        await foreach (var batch in file.ScanAsync(new ParquetScanOptions(file.Metadata.Schema.Columns)))
+        {
+            using (batch)
+            {
+                rows += batch.RowCount;
+                for (var columnIndex = 0; columnIndex < batch.Columns.Count; columnIndex++)
+                {
+                    if (batch.Columns[columnIndex] is not ParquetPrimitiveColumnBatch<int> integers)
+                        throw new InvalidOperationException("The scan truth gate decoded an unexpected batch type.");
+                    for (var row = 0; row < integers.RowCount; row++)
+                    {
+                        if (integers.Validity.IsValid(row))
+                            valueChains[columnIndex] = ScanChecksum.Mix(valueChains[columnIndex], integers.Values.Span[row]);
+                        else
+                        {
+                            nullChains[columnIndex] = ScanChecksum.Mix(nullChains[columnIndex], consumed[columnIndex] + row);
+                            nullCounts[columnIndex]++;
+                        }
+                    }
+                    consumed[columnIndex] += integers.RowCount;
+                }
+            }
+        }
+        if (rows != RowCount)
+            throw new InvalidOperationException($"The scan truth gate saw {rows} rows instead of {RowCount}.");
+        for (var column = 0; column < ColumnCount; column++)
+        {
+            if (nullCounts[column] != NullCounts[column])
+                throw new InvalidOperationException($"The scan truth gate saw {nullCounts[column]} nulls instead of {NullCounts[column]} in column {column}.");
+            var folded = ScanChecksum.CombineColumn(valueChains[column], nullChains[column]);
+            if (folded != ColumnChecksums[column])
+                throw new InvalidOperationException($"The scan truth gate hash mismatch in column {column}.");
         }
     }
 }

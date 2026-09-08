@@ -77,7 +77,9 @@ public class PlainInt32KernelBenchmarks
         var file = _scanFile ?? throw new InvalidOperationException("The scan benchmark is not initialized.");
         var columns = file.Metadata.Schema.Columns;
         var perColumn = new long[columns.Count];
+        var nullChains = new long[columns.Count];
         Array.Fill(perColumn, ScanChecksum.Seed);
+        Array.Fill(nullChains, ScanChecksum.Seed);
         await foreach (var batch in file.ScanAsync(new(columns)))
         {
             using (batch)
@@ -89,7 +91,7 @@ public class PlainInt32KernelBenchmarks
                 }
             }
         }
-        var checksum = ScanChecksum.CombineColumns(perColumn);
+        var checksum = ScanChecksum.CombineColumns(perColumn, nullChains);
         if (checksum != _scanChecksum)
             throw new InvalidOperationException("The PLAIN INT32 scan-mode benchmark failed its truth check.");
         return checksum;

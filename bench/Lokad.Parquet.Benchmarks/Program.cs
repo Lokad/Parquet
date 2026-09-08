@@ -37,6 +37,8 @@ if (string.IsNullOrEmpty(repositoryRoot))
     Environment.SetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT", repositoryRoot);
 }
 
+if (args.Contains("--verify-truth", StringComparer.Ordinal))
+    return await ScanTruthVerification.RunAsync();
 BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
 if (args.Contains("--force-scalar", StringComparer.Ordinal))
     AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
