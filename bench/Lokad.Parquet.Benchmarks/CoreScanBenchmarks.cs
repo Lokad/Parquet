@@ -34,6 +34,7 @@ public class CoreScanBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         var fixture = await ScanFixture.CreateAsync(Workload, RowCount);
         _fixture = fixture.Bytes;
         _expectedChecksum = fixture.Checksum;

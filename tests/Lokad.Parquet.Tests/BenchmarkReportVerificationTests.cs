@@ -45,7 +45,7 @@ public static class BenchmarkReportQuartet
         WritePaired(2, "Ubuntu 24.04 Linux 6.8", "synthetic-linux-fingerprint", "0x1", recorded.AddMinutes(10));
         WritePaired(3, "Ubuntu 24.04 Linux 6.8", "synthetic-linux-fingerprint", "0x2", recorded.AddMinutes(15)); var census = new JsonObject
         {
-            ["schemaVersion"] = 2,
+            ["schemaVersion"] = schemaVersion == 9 ? 3 : 2,
             ["recordedAtUtc"] = recorded.ToString("o"),
             ["sourceRevision"] = sourceRevision,
             ["runtime"] = "synthetic-runtime",
@@ -96,6 +96,18 @@ public static class BenchmarkReportQuartet
                 },
             },
         };
+        if (schemaVersion == 9)
+        {
+            census["processorAffinity"] = "0x1";
+            census["processor"] = "synthetic-processor";
+            census["logicalProcessor"] = 0;
+            census["serverGarbageCollection"] = false;
+            census["gcLatencyMode"] = "Interactive";
+            census["tieredCompilation"] = "unrecorded";
+            census["tieredPgo"] = "unrecorded";
+            census["resolvedOutputPath"] = root;
+            census["outputFileSystem"] = "synthetic-fs";
+        }
         File.WriteAllText(Path.Combine(root, "census.json"), census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(
             Path.Combine(root, "BENCHMARKS.md"),
@@ -169,6 +181,16 @@ public static class BenchmarkReportQuartet
                     },
                 },
             };
+            if (schemaVersion == 9)
+            {
+                snapshot["logicalProcessor"] = 0;
+                snapshot["serverGarbageCollection"] = false;
+                snapshot["gcLatencyMode"] = "Interactive";
+                snapshot["tieredCompilation"] = "unrecorded";
+                snapshot["tieredPgo"] = "unrecorded";
+                snapshot["resolvedOutputPath"] = root;
+                snapshot["outputFileSystem"] = "synthetic-fs";
+            }
             File.WriteAllText(Path.Combine(root, "paired-" + index + ".json"), snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         }
         JsonArray BuildObservations(double firstLokad, double secondLokad, double baseline, DateTimeOffset start)
@@ -316,6 +338,7 @@ public sealed class BenchmarkReportQuartetFixture : IDisposable
         V8LegacyRoot = BenchmarkReportQuartet.Build(8, true, false);
         V7Root = BenchmarkReportQuartet.Build(7, true, true);
         V7FutureRoot = BenchmarkReportQuartet.Build(7, false, false);
+        V9Root = BenchmarkReportQuartet.Build(9, false, true);
     }
 
     public string V8Root { get; }
@@ -326,9 +349,11 @@ public sealed class BenchmarkReportQuartetFixture : IDisposable
 
     public string V7FutureRoot { get; }
 
+    public string V9Root { get; }
+
     public void Dispose()
     {
-        foreach (var root in new[] { V8Root, V8LegacyRoot, V7Root, V7FutureRoot })
+        foreach (var root in new[] { V8Root, V8LegacyRoot, V7Root, V7FutureRoot, V9Root })
         {
             try
             {
@@ -620,6 +645,75 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
             var outcome = RunVerify(root);
             Assert.NotEqual(0, outcome.ExitCode);
             Assert.Contains("four distinct sessions", outcome.Output);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void CleanSchema9QuartetPassesVerify()
+    {
+        var outcome = RunVerify(_quartets.V9Root);
+        Assert.Equal(0, outcome.ExitCode);
+        Assert.Contains("matches the supplied snapshots", outcome.Output);
+    }
+
+    [Fact]
+    public void MissingPairedHostEvidenceIsRejected()
+    {
+        var outcome = VerifyAfterRunMutation(_quartets.V9Root, 0, static target =>
+        {
+            target.Remove("tieredPgo");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its runtime tuning evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void MissingPairedOutputEvidenceIsRejected()
+    {
+        var outcome = VerifyAfterRunMutation(_quartets.V9Root, 0, static target =>
+        {
+            target.Remove("resolvedOutputPath");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its output storage evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusAffinityViolationIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            census["processorAffinity"] = "0x3";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("must be bound to exactly one logical processor", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusTuningEvidenceMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            census.Remove("tieredCompilation");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its runtime tuning evidence", outcome.Output);
+    }
+
+    private static (int ExitCode, string Output) VerifyAfterRunMutation(string source, int snapshotIndex, Action<JsonObject> mutate)
+    {
+        var root = CopyQuartet(source);
+        try
+        {
+            var path = Path.Combine(root, "paired-" + snapshotIndex + ".json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            mutate(snapshot);
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return RunVerify(root);
         }
         finally
         {

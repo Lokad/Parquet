@@ -27,6 +27,31 @@ string BindToOneLogicalProcessor()
         throw new InvalidOperationException("The benchmark process could not be bound to one logical processor.");
     return $"0x{applied:x}";
 }
+int CheckPath(string[] arguments)
+{
+    string? target = null;
+    var role = "benchmark path";
+    for (var index = 0; index < arguments.Length; index++)
+    {
+        if (string.Equals(arguments[index], "--check-path", StringComparison.Ordinal))
+        {
+            if (index + 1 >= arguments.Length)
+                throw new ArgumentException("--check-path requires a path.", nameof(arguments));
+            target = arguments[index + 1];
+        }
+        if (string.Equals(arguments[index], "--check-role", StringComparison.Ordinal))
+        {
+            if (index + 1 >= arguments.Length)
+                throw new ArgumentException("--check-role requires a role.", nameof(arguments));
+            role = arguments[index + 1];
+        }
+    }
+    if (target is null)
+        throw new ArgumentException("--check-path requires a path.", nameof(arguments));
+    var evidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(target, role);
+    Console.WriteLine("Workspace (" + evidence.Role + "): " + evidence.ResolvedPath + "; mount: " + evidence.MountPoint + " " + evidence.FileSystem + "; windows-backed: " + evidence.WindowsBacked + ".");
+    return 0;
+}
 
 var repositoryRoot = Environment.GetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT");
 if (string.IsNullOrEmpty(repositoryRoot))
@@ -37,12 +62,17 @@ if (string.IsNullOrEmpty(repositoryRoot))
     Environment.SetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT", repositoryRoot);
 }
 
+if (args.Contains("--check-path", StringComparer.Ordinal))
+    return CheckPath(args);
 if (args.Contains("--verify-truth", StringComparer.Ordinal))
     return await ScanTruthVerification.RunAsync();
 BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
 if (args.Contains("--force-scalar", StringComparer.Ordinal))
     AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
-Console.WriteLine($"Processor affinity: {BindToOneLogicalProcessor()}");
+var launcherAffinity = BindToOneLogicalProcessor();
+Console.WriteLine($"Processor affinity: {launcherAffinity}");
+if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+    Environment.SetEnvironmentVariable(BenchmarkHostPolicy.AffinityEnvironmentVariable, launcherAffinity);
 Console.WriteLine($"Source revision: {Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded"}");
 if (args.Contains("--catalog", StringComparer.Ordinal))
 {

@@ -69,25 +69,6 @@ try {
         $governor = Get-Content -LiteralPath "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" -ErrorAction SilentlyContinue
         if ($governor) { "scaling_governor: $($governor -join " ")" } else { "power management unavailable" }
     }
-    # Native-Linux qualification: source, build, and result paths must live on a
-    # native Linux filesystem, never a Windows-backed WSL mount. The runner
-    # enforces the same check at collection time; this entry-point check fails
-    # fast with concrete paths before restoring or building.
-    function Test-NativeLinuxPath([string] $Path, [string] $Role) {
-        $full = [IO.Path]::GetFullPath($Path).Replace("\", "/")
-        Write-Host "$Role path: $full"
-        if ($full.StartsWith("/mnt/", [StringComparison]::Ordinal)) {
-            throw "Benchmark $Role must run from a native Linux filesystem workspace, never a Windows-backed mount such as /mnt/c: $full"
-        }
-        return $full
-    }
-    if (-not $IsWindows) {
-        $nativeRepository = Test-NativeLinuxPath $PSScriptRoot 'Repository'
-        $nativeBuild = Test-NativeLinuxPath (Split-Path -Parent $benchmarkDll) 'Build output'
-        $nativeArtifacts = Test-NativeLinuxPath (Join-Path $PSScriptRoot 'artifacts/benchmarks') 'Artifacts output'
-        try { & df -T $nativeRepository $nativeBuild $nativeArtifacts 2>$null | Write-Host } catch { }
-        try { Get-Content -LiteralPath '/proc/version' -ErrorAction Stop | Write-Host } catch { }
-    }
     $env:LOKAD_PARQUET_BENCHMARK_MODE = if ($Suite -eq "ColdOpen") { "ColdOpen" } else { "Qualification" }
 
     if (-not $Filter) {
@@ -114,6 +95,20 @@ try {
     & dotnet build $project --configuration Release --tl:off --nologo -v minimal --no-restore
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
+    }
+
+    # Filesystem qualification is decided once in C#: links resolve to a final
+    # path and the Linux mount table decides whether storage is Windows-backed
+    # (BenchmarkHostPolicy.CheckNativeWorkspacePath, also enforced at collection
+    # time). The entry point only forwards the workspace paths after the build.
+    foreach ($workspacePath in @(
+        @{ Path = $PSScriptRoot; Role = "Repository" },
+        @{ Path = (Split-Path -Parent $benchmarkDll); Role = "Build output" },
+        @{ Path = (Join-Path $PSScriptRoot "artifacts/benchmarks"); Role = "Artifacts output" })) {
+        & dotnet $benchmarkDll --check-path $workspacePath.Path --check-role $workspacePath.Role
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
     }
 
     if ($Suite -eq "Paired") {

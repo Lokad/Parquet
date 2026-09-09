@@ -24,6 +24,7 @@ public class PreopenedScanBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
         Console.WriteLine($"Fixture SHA-256: {_scanCase.FixtureHash}.");
         Console.WriteLine(
@@ -66,6 +67,7 @@ public class PreopenedUtf8ScanBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
         Console.WriteLine($"Fixture SHA-256: {_scanCase.FixtureHash}.");
         Console.WriteLine(
@@ -108,7 +110,11 @@ public class PreopenedMaterializationBenchmarks
     public ScanWorkload Workload { get; set; }
 
     [GlobalSetup]
-    public async Task Setup() => _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
+    public async Task Setup()
+    {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
+        _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
+    }
 
     [Benchmark(Baseline = true, Description = "Lokad pre-opened materialization")]
     public Task<long> LokadMaterialize() => GetScanCase().MaterializeLokadAsync();

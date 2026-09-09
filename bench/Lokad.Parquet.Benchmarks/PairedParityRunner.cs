@@ -13,7 +13,7 @@ internal static class PairedParityRunner
 {
     private const int RowCount = 65_536;
     private const int SampleCount = 400;
-    internal const int SnapshotSchemaVersion = 8;
+    internal const int SnapshotSchemaVersion = 9;
     private const int WarmupCount = 64;
     private const int MinimumStabilizationOperations = 16_384;
     private const int PreliminaryStabilizationBlockCount = 40;
@@ -47,15 +47,11 @@ internal static class PairedParityRunner
     {
         var enforce = arguments.Contains("--paired-enforce", StringComparer.Ordinal);
         var outputPath = ResolveOutputPath();
+        var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "paired snapshot output");
         using var process = Process.GetCurrentProcess();
-        long appliedAffinity;
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
-            appliedAffinity = process.ProcessorAffinity.ToInt64();
-        else
-            throw new PlatformNotSupportedException("Paired benchmarks require Windows or Linux processor affinity.");
-        if (appliedAffinity == 0 || (appliedAffinity & (appliedAffinity - 1)) != 0)
-            throw new InvalidOperationException("The paired benchmark process is not bound to one logical processor.");
-        var processorAffinity = $"0x{appliedAffinity:x}";
+        var appliedAffinity = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
+        var processorAffinity = BenchmarkHostPolicy.FormatAffinity(appliedAffinity);
+        var logicalProcessor = BenchmarkHostPolicy.GetSelectedLogicalProcessor(appliedAffinity);
         if (OperatingSystem.IsWindows())
             process.PriorityClass = ProcessPriorityClass.High;
         string? selectedCase = null;
@@ -95,7 +91,7 @@ internal static class PairedParityRunner
             Runtime: RuntimeInformation.FrameworkDescription,
             OperatingSystem: OperatingSystem.IsLinux() && !RuntimeInformation.OSDescription.Contains("Linux", StringComparison.Ordinal) ? "Linux " + RuntimeInformation.OSDescription : RuntimeInformation.OSDescription,
             Architecture: RuntimeInformation.ProcessArchitecture.ToString(),
-            Processor: GetProcessorName(),
+            Processor: BenchmarkHostPolicy.GetProcessorName(),
             ProcessPriority: process.PriorityClass.ToString(),
             ProcessorAffinity: processorAffinity,
             PowerMode: Environment.GetEnvironmentVariable("LOKAD_PARQUET_POWER_MODE") ?? "unrecorded",
@@ -113,6 +109,13 @@ internal static class PairedParityRunner
             TargetBlockMilliseconds: TargetBlockTime.TotalMilliseconds,
             Estimator: "exp(mean(paired log ratio)); one-sided 95% Student-t upper bound",
             OutlierRule: "none; retain every balanced AB/BA observation",
+            LogicalProcessor: logicalProcessor,
+            ServerGarbageCollection: BenchmarkHostPolicy.GetServerGarbageCollection(),
+            GcLatencyMode: BenchmarkHostPolicy.GetGcLatencyMode(),
+            TieredCompilation: BenchmarkHostPolicy.GetTieredCompilation(),
+            TieredPgo: BenchmarkHostPolicy.GetTieredPgo(),
+            ResolvedOutputPath: outputEvidence.ResolvedPath,
+            OutputFileSystem: outputEvidence.FileSystem,
             Cases: caseResults);
 
         var directory = Path.GetDirectoryName(outputPath);
@@ -205,34 +208,6 @@ internal static class PairedParityRunner
         {
             var path = Assembly.GetExecutingAssembly().Location;
             return Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
-        }
-
-        // PROCESSOR_IDENTIFIER exists only on Windows; collect the Linux CPU
-        // model directly so qualification evidence names concrete hardware.
-        static string GetProcessorName()
-        {
-            var identifier = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
-            if (!string.IsNullOrEmpty(identifier))
-                return identifier;
-            if (OperatingSystem.IsLinux())
-            {
-                try
-                {
-                    foreach (var line in File.ReadLines("/proc/cpuinfo"))
-                    {
-                        const string prefix = "model name\t: ";
-                        if (line.StartsWith(prefix, StringComparison.Ordinal))
-                            return line[prefix.Length..].Trim();
-                    }
-                }
-                catch (IOException)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
-                }
-            }
-            return "unrecorded";
         }
     }
 
@@ -517,4 +492,11 @@ internal sealed record PairedRunSnapshot(
     double TargetBlockMilliseconds,
     string Estimator,
     string OutlierRule,
-    IReadOnlyList<PairedCaseResult> Cases);
+    IReadOnlyList<PairedCaseResult> Cases,
+    int LogicalProcessor,
+    bool ServerGarbageCollection,
+    string GcLatencyMode,
+    string TieredCompilation,
+    string TieredPgo,
+    string ResolvedOutputPath,
+    string OutputFileSystem);

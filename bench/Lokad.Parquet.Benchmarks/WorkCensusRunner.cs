@@ -8,6 +8,7 @@ namespace Lokad.Parquet.Benchmarks;
 internal static class WorkCensusRunner
 {
     private const int RowCount = 65_536;
+    internal const int SnapshotSchemaVersion = 3;
     private static readonly Type PoolType =
         typeof(ParquetFile).Assembly
             .GetType("Lokad.Parquet.Internal.ParquetArrayPool", throwOnError: true, ignoreCase: false)
@@ -43,19 +44,30 @@ internal static class WorkCensusRunner
                 ScanWorkload.TwoRequiredInt32Plain));
         }
 
+        var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
+        var outputPath = Path.Combine(
+            "artifacts",
+            "benchmarks",
+            "work-census-" + platform + "-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + ".json");
+        var affinityMask = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
+        var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "work census output");
         var snapshot = new WorkCensusSnapshot(
-            2,
+            SnapshotSchemaVersion,
             DateTimeOffset.UtcNow,
             Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
             RuntimeInformation.FrameworkDescription,
             RuntimeInformation.OSDescription,
             RuntimeInformation.ProcessArchitecture.ToString(),
+            BenchmarkHostPolicy.GetProcessorName(),
+            BenchmarkHostPolicy.FormatAffinity(affinityMask),
+            BenchmarkHostPolicy.GetSelectedLogicalProcessor(affinityMask),
+            BenchmarkHostPolicy.GetServerGarbageCollection(),
+            BenchmarkHostPolicy.GetGcLatencyMode(),
+            BenchmarkHostPolicy.GetTieredCompilation(),
+            BenchmarkHostPolicy.GetTieredPgo(),
+            outputEvidence.ResolvedPath,
+            outputEvidence.FileSystem,
             results);
-        var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
-        var outputPath = Path.Combine(
-            "artifacts",
-            "benchmarks",
-            $"work-census-{platform}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json");
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ??
             throw new InvalidOperationException("The work-census output has no directory."));
         await using (var output = File.Create(outputPath))
@@ -564,5 +576,14 @@ internal sealed record WorkCensusSnapshot(
     string Runtime,
     string OperatingSystem,
     string Architecture,
+    string Processor,
+    string ProcessorAffinity,
+    int LogicalProcessor,
+    bool ServerGarbageCollection,
+    string GcLatencyMode,
+    string TieredCompilation,
+    string TieredPgo,
+    string ResolvedOutputPath,
+    string OutputFileSystem,
     IReadOnlyList<WorkCensusCase> Cases);
 

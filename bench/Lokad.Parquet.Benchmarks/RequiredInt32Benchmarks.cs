@@ -18,6 +18,7 @@ public class RequiredInt32Benchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         async Task ValidateMetadataAsync()
         {
             using var lokadStream = new MemoryStream(_fixture, writable: false);
@@ -183,6 +184,7 @@ public class MetadataOpenBenchmarks
     [GlobalSetup(Target = nameof(LokadOpen))]
     public async Task SetupLokad()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         await PrepareFixtureAsync();
         using var stream = new MemoryStream(_fixture, writable: false);
         await using var reference = await BaselineParquetReader.CreateAsync(stream);
@@ -194,6 +196,7 @@ public class MetadataOpenBenchmarks
     [GlobalSetup(Target = nameof(ParquetNetOpen))]
     public async Task SetupParquetNet()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         await PrepareFixtureAsync();
         using var stream = new MemoryStream(_fixture, writable: false);
         await using var reference = await ParquetFile.OpenAsync(stream);

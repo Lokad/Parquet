@@ -39,6 +39,7 @@ public class PlainInt32KernelBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         _source = new byte[checked(ValueCount * sizeof(int))];
         _destination = new int[ValueCount];
         for (var i = 0; i < ValueCount; i++)

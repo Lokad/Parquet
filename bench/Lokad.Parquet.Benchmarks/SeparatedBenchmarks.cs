@@ -30,6 +30,7 @@ public class SnappyCodecBenchmarks
     [GlobalSetup]
     public void Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         var lengthBytes = new List<byte>();
         var length = (uint)ByteCount;
         while (length >= 0x80)
@@ -78,6 +79,7 @@ public class SteadyStateScanBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         var fixture = await ScanFixture.CreateAsync(ScanWorkload.RequiredInt32Plain, RowCount);
         _expectedChecksum = fixture.Checksum;
         _stream = new MemoryStream(fixture.Bytes, writable: false);
@@ -119,6 +121,7 @@ public class SourceScanBenchmarks
     [GlobalSetup]
     public async Task Setup()
     {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
         var fixture = await ScanFixture.CreateAsync(ScanWorkload.RequiredInt32Plain, RowCount);
         _fixture = fixture.Bytes;
         _expectedChecksum = fixture.Checksum;

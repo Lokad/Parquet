@@ -67,18 +67,21 @@ if ($pairedSchema -eq 6) {
     $caseLabels = $legacyCaseLabels
     $censusSchema = 1
 }
-elseif ($pairedSchema -eq 7 -or $pairedSchema -eq 8) {
+elseif ($pairedSchema -eq 7 -or $pairedSchema -eq 8 -or $pairedSchema -eq 9) {
     Assert-ReportCondition ($catalogDoc.pairedSchemaVersion -eq $pairedSchema) `
         "The catalog does not match the paired snapshot schema."
     $caseNames = @($catalogDoc.cases.name)
     $caseLabels = @{}
     foreach ($entry in $catalogDoc.cases) { $caseLabels[$entry.name] = $entry.label }
     $censusSchema = 2
+    if ($pairedSchema -eq 9) {
+        $censusSchema = 3
+    }
 }
 else {
     throw "Unsupported paired snapshot schema."
 }
-$useLegacyInterval = ($pairedSchema -ne 8)
+$useLegacyInterval = ($pairedSchema -ne 8 -and $pairedSchema -ne 9)
 
 $sourceRevisions = @($runs.sourceRevision | Sort-Object -Unique)
 $packageLocks = @($runs.packageLockHash | Sort-Object -Unique)
@@ -109,6 +112,26 @@ foreach ($run in $runs) {
         "A paired snapshot is missing its stopwatch frequency."
 }
 
+
+if ($pairedSchema -eq 9) {
+    # Schema 9 records the bound worker host tuning and output storage, so
+    # the report gates the same CPU evidence the runners persist. Earlier
+    # schemas predate these fields and stay frozen.
+    foreach ($run in $runs) {
+        Assert-ReportCondition ($null -ne $run.logicalProcessor -and $run.logicalProcessor -ge 0) `
+            "A paired snapshot is missing its bound logical processor."
+        Assert-ReportCondition ($null -ne $run.serverGarbageCollection) `
+            "A paired snapshot is missing its server GC evidence."
+        foreach ($field in @("gcLatencyMode", "tieredCompilation", "tieredPgo")) {
+            Assert-ReportCondition (-not [string]::IsNullOrEmpty($run.$field)) `
+                "A paired snapshot is missing its runtime tuning evidence."
+        }
+        foreach ($field in @("resolvedOutputPath", "outputFileSystem")) {
+            Assert-ReportCondition (-not [string]::IsNullOrEmpty($run.$field)) `
+                "A paired snapshot is missing its output storage evidence."
+        }
+    }
+}
 foreach ($run in $runs) {
     # Note: $IsWindows/$IsLinux are read-only automatic variables; use other names.
     $onWindows = $run.operatingSystem -like "*Windows*"
@@ -271,12 +294,34 @@ Assert-ReportCondition ($census.schemaVersion -eq $censusSchema) `
     "Unsupported work-census schema."
 Assert-ReportCondition ($null -ne $census.recordedAtUtc -and "$($census.recordedAtUtc)" -ne "") `
     "The work census is missing its recording timestamp."
+
+if ($censusSchema -eq 3) {
+    # Schema 3 carries the census worker affinity, host tuning, and output
+    # storage alongside the pool evidence.
+    Assert-ReportCondition ($census.processorAffinity -match "^0x[0-9a-f]+$") `
+        "The work census must record a hexadecimal processor affinity."
+    $censusAffinity = [Convert]::ToInt64($census.processorAffinity.Substring(2), 16)
+    Assert-ReportCondition ($censusAffinity -ne 0 -and ($censusAffinity -band ($censusAffinity - 1)) -eq 0) `
+        "The work-census process must be bound to exactly one logical processor."
+    Assert-ReportCondition ($null -ne $census.logicalProcessor -and $census.logicalProcessor -ge 0) `
+        "The work census is missing its bound logical processor."
+    Assert-ReportCondition ($null -ne $census.serverGarbageCollection) `
+        "The work census is missing its server GC evidence."
+    foreach ($field in @("gcLatencyMode", "tieredCompilation", "tieredPgo")) {
+        Assert-ReportCondition (-not [string]::IsNullOrEmpty($census.$field)) `
+            "The work census is missing its runtime tuning evidence."
+    }
+    foreach ($field in @("resolvedOutputPath", "outputFileSystem")) {
+        Assert-ReportCondition (-not [string]::IsNullOrEmpty($census.$field)) `
+            "The work census is missing its output storage evidence."
+    }
+}
 foreach ($caseName in $caseNames) {
     $hashes = @($runs | ForEach-Object { (@($_.cases | Where-Object name -EQ $caseName))[0].fixtureHash })
     Assert-ReportCondition ((@($hashes | Sort-Object -Unique)).Count -eq 1) `
         "$caseName fixture hashes differ across sessions."
     $identityFields = @("rowCount", "columnCount")
-    if ($pairedSchema -eq 7 -or $pairedSchema -eq 8) {
+    if ($pairedSchema -eq 7 -or $pairedSchema -eq 8 -or $pairedSchema -eq 9) {
         # utf8PayloadBytes exists only on post-UTF-8 snapshots; the frozen
         # schema-6 evidence predates the field and pins identity by fixture hash.
         $identityFields += "utf8PayloadBytes"

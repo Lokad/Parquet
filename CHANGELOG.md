@@ -70,6 +70,10 @@
   from raw timings in `benchmark-report.ps1`, rejecting raw-time, log, bound,
   identity, and protocol tampering; schema-8 snapshots use a tested
   Cornish-Fisher Student-t quantile instead of the flat 1.645 fallback.
+- Bind every benchmark worker to one logical processor from an explicit
+  affinity handoff, resolve workspace links against the Linux mount table
+  instead of /mnt prefixes, and persist host tuning plus output storage in
+  schema-9 paired and schema-3 census snapshots.
 
 ## 0.1.0 - 2026-09-02
 
