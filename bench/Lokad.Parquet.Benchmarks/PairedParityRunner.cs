@@ -13,13 +13,35 @@ internal static class PairedParityRunner
 {
     private const int RowCount = 65_536;
     private const int SampleCount = 400;
-    internal const int SnapshotSchemaVersion = 7;
+    internal const int SnapshotSchemaVersion = 8;
     private const int WarmupCount = 64;
     private const int MinimumStabilizationOperations = 16_384;
     private const int PreliminaryStabilizationBlockCount = 40;
     private const int FinalStabilizationBlockCount = 10;
     private const int RandomSeed = 24_081_993;
     private static readonly TimeSpan TargetBlockTime = TimeSpan.FromMilliseconds(100);
+
+    // One-sided 95% Student-t quantile. Degrees of freedom up to 30 use exact
+    // textbook values; above that a Cornish-Fisher expansion around the normal
+    // 1.644854 applies, accurate within 1e-3 for df >= 31 against published table
+    // values (pinned by truth verification). Snapshots recorded with the legacy
+    // flat 1.645 fallback stay on schema 7; schema 8 always uses this function.
+    internal static double OneSided95StudentT(int degreesOfFreedom)
+    {
+        ReadOnlySpan<double> values =
+        [
+            6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812,
+            1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
+            1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697,
+        ];
+        if (degreesOfFreedom <= 0)
+            throw new ArgumentOutOfRangeException(nameof(degreesOfFreedom));
+        if (degreesOfFreedom <= values.Length)
+            return values[degreesOfFreedom - 1];
+        const double z = 1.6448536269514722;
+        var inverse = 1.0 / degreesOfFreedom;
+        return z + (((z * z) + 1.0) * z) / 4.0 * inverse + ((((5.0 * z * z) + 16.0) * z * z * z) + (3.0 * z)) / 96.0 * inverse * inverse;
+    }
 
     public static async Task<int> RunAsync(string[] arguments)
     {
@@ -394,18 +416,6 @@ internal static class PairedParityRunner
             return hash;
         }
 
-        static double OneSided95StudentT(int degreesOfFreedom)
-        {
-            ReadOnlySpan<double> values =
-            [
-                6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812,
-                1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
-                1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697,
-            ];
-            if (degreesOfFreedom <= 0)
-                throw new ArgumentOutOfRangeException(nameof(degreesOfFreedom));
-            return degreesOfFreedom <= values.Length ? values[degreesOfFreedom - 1] : 1.645;
-        }
     }
 
 }

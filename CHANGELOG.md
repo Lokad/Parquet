@@ -66,6 +66,10 @@
 - Measure work-census source reads on the exercised async path with per-pass
   peaks, an uneven multi-row-group case, and warmed competitor retention in the
   snapshot.
+- Recompute paired-report point estimates, Student-t intervals, and log ratios
+  from raw timings in `benchmark-report.ps1`, rejecting raw-time, log, bound,
+  identity, and protocol tampering; schema-8 snapshots use a tested
+  Cornish-Fisher Student-t quantile instead of the flat 1.645 fallback.
 
 ## 0.1.0 - 2026-09-02
 

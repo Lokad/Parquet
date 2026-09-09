@@ -65,6 +65,7 @@ public static class ScanTruthVerification
     {
         var failures = new List<string>();
         CheckScheme(failures);
+        CheckStudentTQuantile(failures);
         await CheckCoreConsumersAsync(failures);
         await CheckParityConsumersAsync(failures);
         await CheckCensusConsumersAsync(failures);
@@ -94,6 +95,40 @@ public static class ScanTruthVerification
             var nullColumn = ScanChecksum.CombineColumn(ScanChecksum.Mix(ScanChecksum.Seed, 7), ScanChecksum.Mix(ScanChecksum.Seed, 1));
             if (markerColumn == nullColumn)
                 failures.Add("CombineColumn confuses a null with the retired null marker.");
+        }
+
+        // Pins the report interval quantile against published Student-t table values:
+        // exact textbook spots at df 1..30, expansion range at df 31..399, the normal
+        // limit from above, and rejection of non-positive degrees of freedom.
+        static void CheckStudentTQuantile(List<string> failures)
+        {
+            RequireNear(failures, "t(1)", PairedParityRunner.OneSided95StudentT(1), 6.31375, 0.001);
+            RequireNear(failures, "t(2)", PairedParityRunner.OneSided95StudentT(2), 2.91999, 0.001);
+            RequireNear(failures, "t(5)", PairedParityRunner.OneSided95StudentT(5), 2.01505, 0.001);
+            RequireNear(failures, "t(10)", PairedParityRunner.OneSided95StudentT(10), 1.81246, 0.001);
+            RequireNear(failures, "t(30)", PairedParityRunner.OneSided95StudentT(30), 1.69726, 0.001);
+            RequireNear(failures, "t(31)", PairedParityRunner.OneSided95StudentT(31), 1.6955, 0.001);
+            RequireNear(failures, "t(60)", PairedParityRunner.OneSided95StudentT(60), 1.6706, 0.001);
+            RequireNear(failures, "t(100)", PairedParityRunner.OneSided95StudentT(100), 1.6602, 0.001);
+            RequireNear(failures, "t(200)", PairedParityRunner.OneSided95StudentT(200), 1.6525, 0.001);
+            RequireNear(failures, "t(399)", PairedParityRunner.OneSided95StudentT(399), 1.6487, 0.001);
+            var limit = PairedParityRunner.OneSided95StudentT(100000);
+            if (limit <= 1.644854 || limit >= 1.6455)
+                failures.Add("t(df) does not approach the normal 1.644854 limit from above: " + limit + ".");
+            try
+            {
+                PairedParityRunner.OneSided95StudentT(0);
+                failures.Add("t(0) did not reject non-positive degrees of freedom.");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+            }
+        }
+
+        static void RequireNear(List<string> failures, string name, double actual, double expected, double tolerance)
+        {
+            if (Math.Abs(actual - expected) > tolerance)
+                failures.Add(name + ": got " + actual + ", expected " + expected + " within " + tolerance + ".");
         }
 
         static void RequireEqual(List<string> failures, string name, long actual, long expected)
