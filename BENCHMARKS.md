@@ -51,7 +51,7 @@ substituted for pipeline claims.
 
 | Endpoint | Benchmarks | Measures | Excludes | Ownership |
 |---|---|---|---|---|
-| open | Metadata open (both readers) | Footer open on a MemoryStream | Scan and consume | Stream disposed per invocation |
+| open | Metadata open and open-stage diagnostics (both readers) | Footer open on a MemoryStream; stages split reads, parse, open-only, dispose-only, and large schemas | Scan and consume | Stream disposed per invocation (or in iteration cleanup for the no-dispose split) |
 | preopened-scan | Pre-opened projected scans and UTF-8 pipelines | Scan and consume on pre-opened readers | Open | Preallocated baseline destinations and pooled Lokad batches; sinks reset per invocation |
 | open-scan-required | Required INT32 open and scan, plus the public-accessor diagnostic | Open, scan, and consume of one required INT32 column | Shared state across invocations | Fresh stream per invocation; the diagnostic uses per-row accessors and is not a parity endpoint |
 | open-scan-workloads | Core open and scan across workloads | Open, scan, and consume across the workload catalog | Cross-workload pooling | Fresh stream per invocation |
@@ -107,6 +107,27 @@ Each result is point estimate / upper 95% bound for Lokad / Parquet.NET; lower i
 | Two required INT32, PLAIN | 4 / 524800 | 4 | 786432 B / 524288 B (1.500x) | 786688 | unrecorded | 0 |
 | Eight required INT32, PLAIN | 16 / 2099200 | 10 | 2359296 B / 2097152 B (1.125x) | 2359552 | unrecorded | 0 |
 <!-- END GENERATED PARITY REPORT -->
+
+## Warm metadata open
+
+Warm metadata open is an accepted parity limitation for small footers: the
+paired lane reports about 1.21 / 1.23 (point / upper 95%) on the current
+build and 1.26 / 1.29 on the pristine 0.1.0 control under matching process,
+runtime, CPU, and warmup conditions, so the deficit predates the review fixes
+and current code does not regress it. The gap is about 0.35 microseconds per
+open at this size. (An older recorded table passed the gate; it comes from a
+different protocol revision and machine state and is not relabeled.)
+
+Stage attribution on the required-INT32 fixture (203-byte footer) puts the cost
+in footer parsing: byte-range reads about 0.6 microseconds, Thrift decode with
+validation and immutable metadata construction about 3.2 microseconds, file
+teardown about 0.3 microseconds (in-process medians; the `MetadataOpenBenchmarks`
+stage benchmarks keep each stage reproducible). The gap is fixed validation
+overhead, not scaling: the eight-column open already favors Lokad.Parquet over
+the baseline in the same suite. All validation is preserved; closing the
+remaining gap would mean micro-optimizing validated parsing, which stays open
+as future work rather than a silent relaxation. The B08 campaign re-measures
+this lane from fresh sessions on both platforms.
 
 ## Published throughput and allocation cross-check
 

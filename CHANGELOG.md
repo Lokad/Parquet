@@ -80,6 +80,9 @@
   documenting rows, nulls, output bytes, and ownership per endpoint. Fold the
   single-column required checksum so open-file, source, and steady-state scans
   compare against the same fixture checksum as the Core consumer.
+- Attribute warm metadata open per stage and record the small-footer deficit as an
+  accepted parity limitation: footer parsing dominates, the pristine control fails
+  the same lane, and wider schemas already favor the validated reader.
 
 ## 0.1.0 - 2026-09-02
 

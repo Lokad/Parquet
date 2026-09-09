@@ -15,6 +15,12 @@ public static class BenchmarkEndpoints
     [
         new("open", "Metadata open", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.LokadOpen), false),
         new("open", "Metadata open", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.ParquetNetOpen), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.FooterReadFloor), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.LokadFooterParse), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.LokadOpenNoDispose), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.LokadDisposeOnly), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.LokadOpenLargeSchema), false),
+        new("open", "Metadata open stages", nameof(MetadataOpenBenchmarks), nameof(MetadataOpenBenchmarks.ParquetNetOpenLargeSchema), false),
         new("preopened-scan", "Pre-opened projected scan", nameof(PreopenedScanBenchmarks), nameof(PreopenedScanBenchmarks.LokadProjectedScan), true),
         new("preopened-scan", "Pre-opened projected scan", nameof(PreopenedScanBenchmarks), nameof(PreopenedScanBenchmarks.ParquetNetProjectedScan), true),
         new("preopened-scan", "Pre-opened UTF-8 pipeline", nameof(PreopenedUtf8ScanBenchmarks), nameof(PreopenedUtf8ScanBenchmarks.LokadUtf8Pipeline), true),

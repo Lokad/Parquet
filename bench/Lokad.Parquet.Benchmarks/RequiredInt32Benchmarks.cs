@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Reflection;
 using System.Diagnostics;
+using System.Buffers.Binary;
 using BenchmarkDotNet.Attributes;
 using BaselineParquetReader = Parquet.ParquetReader;
 
@@ -207,6 +208,28 @@ public class MetadataOpenBenchmarks
 {
     private byte[] _fixture = [];
 
+    private delegate ParquetFileMetadata ParseFooterDelegate(ReadOnlySpan<byte> footer, long footerOffset, long sourceLength, ParquetReaderOptions options, CancellationToken cancellationToken);
+
+    private static readonly ParseFooterDelegate ParseFooter;
+
+    private byte[] _largeFixture = [];
+    private byte[] _footerBytes = [];
+    private long _footerOffset;
+    private long _sourceLength;
+    private ParquetFile? _pendingLokadFile;
+    private MemoryStream? _pendingLokadStream;
+
+
+
+    static MetadataOpenBenchmarks()
+    {
+        var type = typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetFooterParser") ??
+            throw new InvalidOperationException("The internal footer parser type was not found.");
+        var method = type.GetMethod("Parse", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("The internal footer parser was not found.");
+        ParseFooter = method.CreateDelegate<ParseFooterDelegate>();
+    }
+
     [GlobalSetup(Target = nameof(LokadOpen))]
     public async Task SetupLokad()
     {
@@ -243,6 +266,111 @@ public class MetadataOpenBenchmarks
     public async Task<long> ParquetNetOpen()
     {
         using var stream = new MemoryStream(_fixture, writable: false);
+        await using var reader = await BaselineParquetReader.CreateAsync(stream);
+        return reader.Metadata?.NumRows ?? 0;
+    }
+
+    [GlobalSetup]
+    public async Task SetupShared()
+    {
+        BenchmarkHostPolicy.AssertWorkerEnvironment();
+        await PrepareFixtureAsync();
+        var footerLength = BinaryPrimitives.ReadInt32LittleEndian(_fixture.AsSpan(_fixture.Length - 8));
+        _footerOffset = _fixture.Length - 8 - footerLength;
+        _sourceLength = _fixture.Length;
+        _footerBytes = _fixture.AsSpan(checked((int)_footerOffset), footerLength).ToArray();
+        var parsed = ParseFooter(_footerBytes, _footerOffset, _sourceLength, ParquetReaderOptions.Default, CancellationToken.None);
+        if (parsed.RowCount != 262_144)
+            throw new InvalidOperationException("The footer parse benchmark failed its truth check.");
+        _largeFixture = (await ScanFixture.CreateAsync(ScanWorkload.EightRequiredInt32Plain, 262_144)).Bytes;
+        using var largeStream = new MemoryStream(_largeFixture, writable: false);
+        await using var largeReference = await ParquetFile.OpenAsync(largeStream);
+        if (largeReference.Metadata.RowCount != 262_144 || largeReference.Metadata.Schema.Columns.Count != 8)
+            throw new InvalidOperationException("The large-schema fixture failed its truth check.");
+        Console.WriteLine($"Large fixture bytes: {_largeFixture.Length}.");
+    }
+
+    [Benchmark(Description = "Footer byte-range reads only (I/O floor shared by both readers)")]
+    public async Task<long> FooterReadFloor()
+    {
+        using var stream = new MemoryStream(_fixture, writable: false);
+        var boundaries = new byte[12];
+        await stream.ReadExactlyAsync(boundaries.AsMemory(0, 4), CancellationToken.None);
+        _ = stream.Seek(_fixture.Length - 8, SeekOrigin.Begin);
+        await stream.ReadExactlyAsync(boundaries.AsMemory(4, 8), CancellationToken.None);
+        var footerLength = BinaryPrimitives.ReadInt32LittleEndian(boundaries.AsSpan(4, 4));
+        var footer = new byte[footerLength];
+        _ = stream.Seek(_fixture.Length - 8 - footerLength, SeekOrigin.Begin);
+        await stream.ReadExactlyAsync(footer, CancellationToken.None);
+        long checksum = ScanChecksum.Seed;
+        foreach (var value in footer)
+            checksum = ScanChecksum.Mix(checksum, value);
+        return checksum;
+    }
+
+    [Benchmark(Description = "Lokad footer parse on pre-read bytes (no I/O)")]
+    public long LokadFooterParse()
+    {
+        var metadata = ParseFooter(_footerBytes, _footerOffset, _sourceLength, ParquetReaderOptions.Default, CancellationToken.None);
+        return metadata.RowCount;
+    }
+    [Benchmark(Description = "Lokad metadata open without disposal (disposed in iteration cleanup)")]
+    public async Task<long> LokadOpenNoDispose()
+    {
+        var stream = new MemoryStream(_fixture, writable: false);
+        var file = await ParquetFile.OpenAsync(stream);
+        _pendingLokadStream = stream;
+        _pendingLokadFile = file;
+        return file.Metadata.RowCount;
+    }
+
+    [IterationCleanup(Target = nameof(LokadOpenNoDispose))]
+    public void CleanupLokadOpen()
+    {
+        if (_pendingLokadFile is not null)
+        {
+            _pendingLokadFile.DisposeAsync().GetAwaiter().GetResult();
+            _pendingLokadFile = null;
+        }
+        _pendingLokadStream?.Dispose();
+        _pendingLokadStream = null;
+    }
+
+    [IterationSetup(Target = nameof(LokadDisposeOnly))]
+    public void SetupLokadDispose()
+    {
+        var stream = new MemoryStream(_fixture, writable: false);
+        _pendingLokadStream = stream;
+        _pendingLokadFile = ParquetFile.OpenAsync(stream).GetAwaiter().GetResult();
+        if (_pendingLokadFile.Metadata.RowCount != 262_144)
+            throw new InvalidOperationException("The dispose benchmark opened an unexpected file.");
+    }
+
+    [Benchmark(Description = "Lokad metadata dispose only (file opened in iteration setup)")]
+    public async Task LokadDisposeOnly()
+    {
+        var file = _pendingLokadFile ?? throw new InvalidOperationException("The dispose benchmark has no open file.");
+        _pendingLokadFile = null;
+        var stream = _pendingLokadStream;
+        _pendingLokadStream = null;
+        await using (file)
+        {
+        }
+        stream?.Dispose();
+    }
+
+    [Benchmark(Description = "Lokad large-schema metadata open")]
+    public async Task<long> LokadOpenLargeSchema()
+    {
+        using var stream = new MemoryStream(_largeFixture, writable: false);
+        await using var file = await ParquetFile.OpenAsync(stream);
+        return file.Metadata.RowCount;
+    }
+
+    [Benchmark(Description = "Parquet.NET large-schema metadata open")]
+    public async Task<long> ParquetNetOpenLargeSchema()
+    {
+        using var stream = new MemoryStream(_largeFixture, writable: false);
         await using var reader = await BaselineParquetReader.CreateAsync(stream);
         return reader.Metadata?.NumRows ?? 0;
     }

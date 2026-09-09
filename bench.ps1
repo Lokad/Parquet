@@ -77,7 +77,7 @@ try {
             "Utf8" { "*PreopenedUtf8ScanBenchmarks*" }
             "Parity" { "*Preopened*ScanBenchmarks*" }
             "Materialization" { "*PreopenedMaterializationBenchmarks*" }
-            "ColdOpen" { "*MetadataOpenBenchmarks*" }
+            "ColdOpen" { "*MetadataOpenBenchmarks.LokadOpen* *MetadataOpenBenchmarks.ParquetNetOpen*" }
             "WarmOpen" { "*MetadataOpenBenchmarks*" }
             "Kernel" { "*PlainInt32KernelBenchmarks*" }
             "Codec" { "*SnappyCodecBenchmarks*" }
@@ -133,7 +133,11 @@ try {
         exit $LASTEXITCODE
     }
 
-    & dotnet $benchmarkDll --filter $Filter
+    # Space-separated patterns become one --filter flag each so suites like
+    # ColdOpen can exclude diagnostic benchmarks while sharing the class.
+    $filterArguments = @()
+    foreach ($pattern in $Filter.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) { $filterArguments += @('--filter', $pattern) }
+    & dotnet $benchmarkDll @filterArguments
     exit $LASTEXITCODE
 }
 finally {

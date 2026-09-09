@@ -71,6 +71,12 @@ public sealed class BenchmarkEndpointTests
             [
                 "MetadataOpenBenchmarks.LokadOpen",
                 "MetadataOpenBenchmarks.ParquetNetOpen",
+                "MetadataOpenBenchmarks.FooterReadFloor",
+                "MetadataOpenBenchmarks.LokadFooterParse",
+                "MetadataOpenBenchmarks.LokadOpenNoDispose",
+                "MetadataOpenBenchmarks.LokadDisposeOnly",
+                "MetadataOpenBenchmarks.LokadOpenLargeSchema",
+                "MetadataOpenBenchmarks.ParquetNetOpenLargeSchema",
                 "RequiredInt32Benchmarks.LokadPublicAccessorDiagnostic",
                 "SteadyStateScanBenchmarks.Scan",
                 "PlainInt32KernelBenchmarks.EightColumnScan",
