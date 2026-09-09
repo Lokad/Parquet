@@ -234,12 +234,12 @@ public static class ScanTruthVerification
                 var fixture = await ScanFixture.CreateAsync(ScanWorkload.TwoRequiredInt32Plain, 128);
                 await using var file = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)fixture.Bytes);
                 var columns = file.Metadata.Schema.Columns;
-                await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, columns, 128, fixture.Checksum, fixture.ColumnChecksums, fixture.NullCounts);
+                await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, columns, 128, fixture.Checksum, fixture.ColumnChecksums, fixture.NullCounts, null);
                 var secondHalf = columns.Skip(1).ToArray();
-                await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, secondHalf, 4, WorkCensusRunner.CensusExpectedChecksum(fixture.Checksum, fixture.ColumnChecksums, columns.Count, secondHalf), fixture.ColumnChecksums, fixture.NullCounts);
+                await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, secondHalf, 4, WorkCensusRunner.CensusExpectedChecksum(fixture.Checksum, fixture.ColumnChecksums, columns.Count, secondHalf), fixture.ColumnChecksums, fixture.NullCounts, null);
                 try
                 {
-                    await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, [columns[1], columns[0]], 128, fixture.Checksum, fixture.ColumnChecksums, fixture.NullCounts);
+                    await WorkCensusRunner.RunCensusPassAsync(file, fixture.Workload, 128, 0, [columns[1], columns[0]], 128, fixture.Checksum, fixture.ColumnChecksums, fixture.NullCounts, null);
                     failures.Add("census swapped projection did not fail the truth check.");
                 }
                 catch (InvalidOperationException exception) when (exception.Message.Contains("truth check", StringComparison.Ordinal))
@@ -248,11 +248,11 @@ public static class ScanTruthVerification
                 var (markerBytes, markerValues, markerExpected, markerConflated, markerNulls) = await WriteNullableMarkerFixtureAsync();
                 await using var markerFile = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)markerBytes);
                 var markerColumns = markerFile.Metadata.Schema.Columns;
-                await WorkCensusRunner.RunCensusPassAsync(markerFile, ScanWorkload.NullableInt32Plain, markerValues.Length, 0, markerColumns, markerValues.Length, markerExpected, [markerExpected], [markerNulls]);
+                await WorkCensusRunner.RunCensusPassAsync(markerFile, ScanWorkload.NullableInt32Plain, markerValues.Length, 0, markerColumns, markerValues.Length, markerExpected, [markerExpected], [markerNulls], null);
                 var (unevenBytes, unevenFolded, unevenExpected) = await WriteUnevenTwoColumnFixtureAsync(5, 9);
                 await using var unevenFile = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)unevenBytes);
                 var unevenColumns = unevenFile.Metadata.Schema.Columns;
-                await WorkCensusRunner.RunCensusPassAsync(unevenFile, ScanWorkload.TwoRequiredInt32Plain, 14, 0, unevenColumns, 14, unevenExpected, unevenFolded, [0, 0]);
+                await WorkCensusRunner.RunCensusPassAsync(unevenFile, ScanWorkload.TwoRequiredInt32Plain, 14, 0, unevenColumns, 14, unevenExpected, unevenFolded, [0, 0], null);
             }
             catch (Exception exception)
             {

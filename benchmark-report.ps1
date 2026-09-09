@@ -75,7 +75,7 @@ elseif ($pairedSchema -eq 7 -or $pairedSchema -eq 8 -or $pairedSchema -eq 9) {
     foreach ($entry in $catalogDoc.cases) { $caseLabels[$entry.name] = $entry.label }
     $censusSchema = 2
     if ($pairedSchema -eq 9) {
-        $censusSchema = 3
+        $censusSchema = 4
     }
 }
 else {
@@ -295,7 +295,7 @@ Assert-ReportCondition ($census.schemaVersion -eq $censusSchema) `
 Assert-ReportCondition ($null -ne $census.recordedAtUtc -and "$($census.recordedAtUtc)" -ne "") `
     "The work census is missing its recording timestamp."
 
-if ($censusSchema -eq 3) {
+if ($censusSchema -eq 3 -or $censusSchema -eq 4) {
     # Schema 3 carries the census worker affinity, host tuning, and output
     # storage alongside the pool evidence.
     Assert-ReportCondition ($census.processorAffinity -match "^0x[0-9a-f]+$") `
@@ -354,9 +354,19 @@ foreach ($entry in $census.cases) {
         foreach ($pass in $entry.passPeaks) {
             Assert-ReportCondition ($pass.peakPooledBytes -le (6 * $pass.logicalOutputBytes)) `
                 "The $($entry.name) work census exceeds the 6x pooled-memory gate in one pass."
+            if ($censusSchema -eq 4) {
+                Assert-ReportCondition (($null -ne $pass.elapsedMilliseconds) -and (-not ([double]::IsNaN($pass.elapsedMilliseconds) -or [double]::IsInfinity($pass.elapsedMilliseconds))) -and ($pass.elapsedMilliseconds -ge 0)) `
+                    "The $($entry.name) work census is missing its pass timing evidence."
+                Assert-ReportCondition (($null -ne $pass.batchCount) -and ($pass.batchCount -gt 0)) `
+                    "The $($entry.name) work census is missing its pass batch count."
+                Assert-ReportCondition (($null -ne $pass.allocatedBytes) -and ($pass.allocatedBytes -ge 0)) `
+                    "The $($entry.name) work census is missing its pass allocation evidence."
+                Assert-ReportCondition (($null -ne $pass.gen0Collections) -and ($pass.gen0Collections -ge 0) -and ($null -ne $pass.gen1Collections) -and ($pass.gen1Collections -ge 0) -and ($null -ne $pass.gen2Collections) -and ($pass.gen2Collections -ge 0)) `
+                    "The $($entry.name) work census is missing its pass GC evidence."
+            }
         }
     }
-    if ($censusSchema -eq 2) {
+    if ($censusSchema -eq 2 -or $censusSchema -eq 4) {
         Assert-ReportCondition ($entry.consumerUtf8CopiedBytes -eq (2 * $entry.utf8PayloadBytes)) `
             "The $($entry.name) work census has inconsistent UTF-8 consumer-copy accounting."
     }

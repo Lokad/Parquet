@@ -146,6 +146,27 @@ public class CoreScanBenchmarks
                                 }
                             }
                             break;
+                        case ParquetPrimitiveColumnBatch<bool> flags:
+                            if (multi)
+                                throw new InvalidOperationException("A multi-column boolean benchmark lane is unsupported.");
+                            else if (flags.Validity.IsAllValid)
+                            {
+                                foreach (var value in flags.Values.Span)
+                                    valueChains[0] = ScanChecksum.Mix(valueChains[0], value ? 1 : 0);
+                            }
+                            else
+                            {
+                                var values = flags.Values.Span;
+                                var bits = flags.Validity.Bits.Span;
+                                for (var row = 0; row < values.Length; row++)
+                                {
+                                    if ((bits[row >> 3] & (1 << (row & 7))) != 0)
+                                        valueChains[0] = ScanChecksum.Mix(valueChains[0], values[row] ? 1 : 0);
+                                    else
+                                        nullChains[0] = ScanChecksum.Mix(nullChains[0], consumed + row);
+                                }
+                            }
+                            break;
                         case ParquetBinaryColumnBatch strings:
                             if (!strings.Validity.IsAllValid || utf8Sink is null)
                                 throw new InvalidOperationException("The required UTF-8 benchmark column is invalid.");
@@ -207,7 +228,20 @@ public class CoreScanBenchmarks
         for (var groupOrdinal = 0; groupOrdinal < reader.RowGroupCount; groupOrdinal++)
         {
             using var rowGroup = reader.OpenRowGroupReader(groupOrdinal);
-            if (workload == ScanWorkload.NullableInt32Plain)
+            if (fields.Length == 1 && fields[0].ClrType == typeof(bool))
+            {
+                var values = new bool?[checked((int)rowGroup.RowCount)];
+                await rowGroup.ReadAsync<bool>(fields[0], values);
+                for (var row = 0; row < values.Length; row++)
+                {
+                    if (values[row] is bool value)
+                        valueChains[0] = ScanChecksum.Mix(valueChains[0], value ? 1 : 0);
+                    else
+                        nullChains[0] = ScanChecksum.Mix(nullChains[0], consumed + row);
+                }
+                consumed += values.Length;
+            }
+            else if (workload == ScanWorkload.NullableInt32Plain)
             {
                 var values = new int?[checked((int)rowGroup.RowCount)];
                 await rowGroup.ReadAsync<int>(fields[0], values);

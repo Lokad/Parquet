@@ -45,7 +45,7 @@ public static class BenchmarkReportQuartet
         WritePaired(2, "Ubuntu 24.04 Linux 6.8", "synthetic-linux-fingerprint", "0x1", recorded.AddMinutes(10));
         WritePaired(3, "Ubuntu 24.04 Linux 6.8", "synthetic-linux-fingerprint", "0x2", recorded.AddMinutes(15)); var census = new JsonObject
         {
-            ["schemaVersion"] = schemaVersion == 9 ? 3 : 2,
+            ["schemaVersion"] = schemaVersion == 9 ? 4 : 2,
             ["recordedAtUtc"] = recorded.ToString("o"),
             ["sourceRevision"] = sourceRevision,
             ["runtime"] = "synthetic-runtime",
@@ -107,6 +107,26 @@ public static class BenchmarkReportQuartet
             census["tieredPgo"] = "unrecorded";
             census["resolvedOutputPath"] = root;
             census["outputFileSystem"] = "synthetic-fs";
+            if (census["cases"] is JsonArray censusCases && censusCases.Count > 0 &&
+                censusCases[0] is JsonObject firstCase &&
+                firstCase["passPeaks"] is JsonArray peaks)
+            {
+                var batchCounts = new[] { 17, 4 };
+                var index = 0;
+                foreach (var peak in peaks)
+                {
+                    if (peak is JsonObject peakObject)
+                    {
+                        peakObject["elapsedMilliseconds"] = 0.5 + index;
+                        peakObject["batchCount"] = batchCounts[index % batchCounts.Length];
+                        peakObject["allocatedBytes"] = 1000;
+                        peakObject["gen0Collections"] = 0;
+                        peakObject["gen1Collections"] = 0;
+                        peakObject["gen2Collections"] = 0;
+                    }
+                    index++;
+                }
+            }
         }
         File.WriteAllText(Path.Combine(root, "census.json"), census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(
@@ -702,6 +722,34 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
         });
         Assert.NotEqual(0, outcome.ExitCode);
         Assert.Contains("missing its runtime tuning evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusPassTimingMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var entry = Assert.IsType<JsonObject>(cases[0]);
+            var peaks = Assert.IsType<JsonArray>(entry["passPeaks"]);
+            Assert.IsType<JsonObject>(peaks[0]).Remove("elapsedMilliseconds");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its pass timing evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusPassBatchCountMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var entry = Assert.IsType<JsonObject>(cases[0]);
+            var peaks = Assert.IsType<JsonArray>(entry["passPeaks"]);
+            Assert.IsType<JsonObject>(peaks[1]).Remove("batchCount");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its pass batch count", outcome.Output);
     }
 
     private static (int ExitCode, string Output) VerifyAfterRunMutation(string source, int snapshotIndex, Action<JsonObject> mutate)

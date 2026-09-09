@@ -83,6 +83,11 @@
 - Attribute warm metadata open per stage and record the small-footer deficit as an
   accepted parity limitation: footer parsing dominates, the pristine control fails
   the same lane, and wider schemas already favor the validated reader.
+- Extend the work census with narrow-projection, small-row-range, many-row-group,
+  low-cardinality dictionary, compressible Snappy, and nullable-boolean lanes,
+  recording per-pass time, batch counts, managed allocation, and GC counts in
+  schema-4 snapshots. CRC-bearing pages remain unmeasured: no available
+  producer emits them.
 
 ## 0.1.0 - 2026-09-02
 
