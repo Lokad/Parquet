@@ -40,6 +40,36 @@ This is application-pipeline parity, not a claim that the libraries expose the
 same intermediate representation. UTF-16 conversion would be artificial work
 for Lokad.Parquet and is therefore not added to its path.
 
+## Endpoint catalog
+
+Every BenchmarkDotNet benchmark belongs to exactly one frozen endpoint
+(see `BenchmarkEndpoints`; `BenchmarkEndpointTests` pins the coverage both
+ways). Pipeline evidence comes only from full read pipelines; checksum-only
+loops, materialization sentinels, decoder/codec kernels, open-only timings,
+and the public-accessor diagnostic are labeled non-pipeline and can never be
+substituted for pipeline claims.
+
+| Endpoint | Benchmarks | Measures | Excludes | Ownership |
+|---|---|---|---|---|
+| open | Metadata open (both readers) | Footer open on a MemoryStream | Scan and consume | Stream disposed per invocation |
+| preopened-scan | Pre-opened projected scans and UTF-8 pipelines | Scan and consume on pre-opened readers | Open | Preallocated baseline destinations and pooled Lokad batches; sinks reset per invocation |
+| open-scan-required | Required INT32 open and scan, plus the public-accessor diagnostic | Open, scan, and consume of one required INT32 column | Shared state across invocations | Fresh stream per invocation; the diagnostic uses per-row accessors and is not a parity endpoint |
+| open-scan-workloads | Core open and scan across workloads | Open, scan, and consume across the workload catalog | Cross-workload pooling | Fresh stream per invocation |
+| consumer-only | Steady-state and eight-column scans, array and span checksums | Consume work with the open cost excluded | Open; decoding for the pure checksum loops | Pre-opened files or plain arrays |
+| materialization | Pre-opened materialization sentinels | First/last value probes per column | Full row coverage | Pre-opened readers and destinations |
+| source-io | Open and scan from memory, stream, file, or a custom source | The full pipeline with the source as the varied axis | Source-specific warmup beyond the stated state | Borrowed memory, caller streams, warmed files, custom adapters |
+| decoder-codec | PLAIN INT32 and Snappy kernels | Codec kernels without any reader | File and page structure | Caller arrays |
+
+Equivalence invariants: every pipeline endpoint reads the same rows, columns,
+and nulls from identical fixture bytes and must reproduce the same output
+bytes and checksum before timing (setup truth checks throw otherwise); the
+work census counts retained pooled capacity per workload against the warmed
+competitor buffers. The baseline UTF-8 re-encoding (UTF-16 interlude plus
+per-value allocations) is part of the measured UTF-8 endpoint, not a universal
+string-reading claim; no UTF-16-output endpoint is measured. Baseline scan
+destinations stay preallocated and Lokad pool reuse stays intentional so
+allocation differences reflect steady-state retention, not per-invocation setup.
+
 ## Result
 
 For the recorded pre-expansion catalog, Lokad.Parquet reached the declared

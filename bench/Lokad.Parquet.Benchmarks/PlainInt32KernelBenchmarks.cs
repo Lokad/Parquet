@@ -65,14 +65,14 @@ public class PlainInt32KernelBenchmarks
         AppContext.SetSwitch("Lokad.Parquet.ForceScalar", false);
     }
 
-    [Benchmark(OperationsPerInvoke = 262_144)]
+    [Benchmark(OperationsPerInvoke = 262_144, Description = "PLAIN INT32 decoder kernel (no reader)")]
     public int Decode()
     {
         DecodeInt32(_source, _destination, CancellationToken.None);
         return _destination[^1];
     }
 
-    [Benchmark]
+    [Benchmark(Description = "Eight-column scan on an open file (consumer side; open excluded)")]
     public async Task<long> EightColumnScan()
     {
         var file = _scanFile ?? throw new InvalidOperationException("The scan benchmark is not initialized.");
@@ -98,7 +98,7 @@ public class PlainInt32KernelBenchmarks
         return checksum;
     }
 
-    [Benchmark(OperationsPerInvoke = 262_144)]
+    [Benchmark(OperationsPerInvoke = 262_144, Description = "Consumer-only array checksum (no decode)")]
     public long ArrayChecksum()
     {
         var checksum = ScanChecksum.Seed;
@@ -107,7 +107,7 @@ public class PlainInt32KernelBenchmarks
         return checksum;
     }
 
-    [Benchmark(OperationsPerInvoke = 262_144)]
+    [Benchmark(OperationsPerInvoke = 262_144, Description = "Consumer-only span checksum (no decode)")]
     public long MemorySpanChecksum()
     {
         var checksum = ScanChecksum.Seed;

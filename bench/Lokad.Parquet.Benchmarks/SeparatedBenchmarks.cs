@@ -89,7 +89,7 @@ public class SteadyStateScanBenchmarks
             throw new InvalidOperationException("The steady-state scan benchmark failed its truth check.");
     }
 
-    [Benchmark(Description = "Lokad scan on an open file")]
+    [Benchmark(Description = "Lokad scan on an open file (consumer side; open excluded)")]
     public async Task<long> Scan()
     {
         var checksum = await BenchmarkScan.ReadRequiredInt32Async(
@@ -131,12 +131,14 @@ public class SourceScanBenchmarks
         Directory.CreateDirectory(inputDirectory);
         _temporaryPath = Path.Combine(inputDirectory, $"lokad-parquet-benchmark-{Guid.NewGuid():N}.parquet");
         await File.WriteAllBytesAsync(_temporaryPath, _fixture);
+        var custom = await BenchmarkScan.ReadCustomSourceAsync(_fixture);
         var memory = await BenchmarkScan.ReadMemoryAsync(_fixture);
         var stream = await BenchmarkScan.ReadStreamAsync(_fixture);
         var localFile = await BenchmarkScan.ReadFileAsync(_temporaryPath);
-        if (memory != _expectedChecksum || stream != _expectedChecksum || localFile != _expectedChecksum)
+        Console.WriteLine("Source comparison uses direct memory, a MemoryStream wrapper, a custom random-access source, and a warmed local temporary file.");
+        Console.WriteLine("Source checksums: memory=" + memory + "; stream=" + stream + "; custom=" + custom + "; file=" + localFile + "; expected=" + _expectedChecksum + ".");
+        if (memory != _expectedChecksum || stream != _expectedChecksum || localFile != _expectedChecksum || custom != _expectedChecksum)
             throw new InvalidOperationException("The source comparison benchmark failed its truth check.");
-        Console.WriteLine("Source comparison uses direct memory, a MemoryStream wrapper, and a warmed local temporary file.");
     }
 
     [Benchmark(Baseline = true, Description = "In-memory open and scan")]
@@ -147,6 +149,9 @@ public class SourceScanBenchmarks
 
     [Benchmark(Description = "Warmed local-file open and scan")]
     public Task<long> LocalFile() => BenchmarkScan.ReadFileAsync(_temporaryPath);
+
+    [Benchmark(Description = "Custom random-access source open and scan")]
+    public Task<long> CustomSource() => BenchmarkScan.ReadCustomSourceAsync(_fixture);
 
     [GlobalCleanup]
     public void Cleanup()
@@ -177,6 +182,39 @@ internal static class BenchmarkScan
         return await ReadRequiredInt32Async(file);
     }
 
+    public static async Task<long> ReadCustomSourceAsync(byte[] bytes)
+    {
+        await using var source = new MemoryRandomAccessSource(bytes);
+        await using var file = await ParquetFile.OpenAsync(source);
+        return await ReadRequiredInt32Async(file);
+    }
+
+    // Bench-side custom random-access source: synchronous segment copies over
+    // borrowed fixture memory. The source-I/O endpoint distinguishes custom
+    // sources from non-exposable streams and files by construction.
+    public sealed class MemoryRandomAccessSource : IParquetRandomAccessSource
+    {
+        private readonly byte[] _bytes;
+
+        public MemoryRandomAccessSource(byte[] bytes) => _bytes = bytes;
+
+        public long Length => _bytes.Length;
+
+        public ValueTask ReadExactlyAsync(long offset, ArraySegment<byte> destination, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (offset < 0 || offset > _bytes.Length - destination.Count)
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            _bytes.AsSpan((int)offset, destination.Count).CopyTo(destination.AsSpan());
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    // Canonical single-column fold: every consumer returns the value chain folded
+    // with its (here all-valid) null chain, so open-file, source, and steady-state
+    // scans compare against the same fixture checksum as the Core consumer.
     public static async Task<long> ReadRequiredInt32Async(ParquetFile file)
     {
         long checksum = ScanChecksum.Seed;
@@ -188,6 +226,6 @@ internal static class BenchmarkScan
                 checksum = ScanChecksum.ConsumeRequired(checksum, values);
             }
         }
-        return checksum;
+        return ScanChecksum.CombineColumn(checksum, ScanChecksum.Seed);
     }
 }

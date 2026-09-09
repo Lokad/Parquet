@@ -74,6 +74,12 @@
   affinity handoff, resolve workspace links against the Linux mount table
   instead of /mnt prefixes, and persist host tuning plus output storage in
   schema-9 paired and schema-3 census snapshots.
+- Freeze explicit benchmark endpoints: equivalent bulk consumers for engine
+  comparisons with a labeled public-accessor diagnostic, a custom-source
+  source-I/O lane, labeled consumer-only probes, and a pinned endpoint catalog
+  documenting rows, nulls, output bytes, and ownership per endpoint. Fold the
+  single-column required checksum so open-file, source, and steady-state scans
+  compare against the same fixture checksum as the Core consumer.
 
 ## 0.1.0 - 2026-09-02
 

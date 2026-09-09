@@ -129,12 +129,18 @@ public class CoreScanBenchmarks
                                     throw new InvalidOperationException("A required multi-column benchmark value decoded as null.");
                                 valueChains[columnIndex] = ScanChecksum.ConsumeRequired(valueChains[columnIndex], integers.Values.Span);
                             }
+                            else if (integers.Validity.IsAllValid)
+                            {
+                                valueChains[0] = ScanChecksum.ConsumeRequired(valueChains[0], integers.Values.Span);
+                            }
                             else
                             {
-                                for (var row = 0; row < integers.RowCount; row++)
+                                var values = integers.Values.Span;
+                                var bits = integers.Validity.Bits.Span;
+                                for (var row = 0; row < values.Length; row++)
                                 {
-                                    if (integers.Validity.IsValid(row))
-                                        valueChains[0] = ScanChecksum.Mix(valueChains[0], integers.Values.Span[row]);
+                                    if ((bits[row >> 3] & (1 << (row & 7))) != 0)
+                                        valueChains[0] = ScanChecksum.Mix(valueChains[0], values[row]);
                                     else
                                         nullChains[0] = ScanChecksum.Mix(nullChains[0], consumed + row);
                                 }

@@ -93,7 +93,33 @@ public class RequiredInt32Benchmarks
         }
         return ScanChecksum.CombineColumn(checksum, ScanChecksum.Seed);
     }
+    // Public-accessor diagnostic: the retired per-row Validity/Span consumer on
+    // the required lane. It prices the public accessor path against the bulk
+    // engine consumer above and never feeds a parity claim.
+    [Benchmark(Description = "Lokad public-accessor diagnostic (per-row Validity/Span; not a parity endpoint)")]
+    public async Task<long> LokadPublicAccessorDiagnostic()
+    {
+        using var stream = new MemoryStream(_fixture, writable: false);
+        await using var file = await ParquetFile.OpenAsync(stream);
+        long valueChain = ScanChecksum.Seed;
+        await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]])))
+        {
+            using (batch)
+            {
+                var integers = (ParquetPrimitiveColumnBatch<int>)batch.Columns[0];
+                for (var row = 0; row < integers.RowCount; row++)
+                {
+                    if (integers.Validity.IsValid(row))
+                        valueChain = ScanChecksum.Mix(valueChain, integers.Values.Span[row]);
+                    else
+                        throw new InvalidOperationException("The required diagnostic lane decoded a null.");
+                }
+            }
+        }
+        return ScanChecksum.CombineColumn(valueChain, ScanChecksum.Seed);
+    }
 }
+
 
 internal static class PeakPoolMeasurement
 {
