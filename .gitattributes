@@ -1,0 +1,4 @@
+# Keep text checkout bytes identical on Windows and Linux.
+# The fixture manifest pins SHA-256 over working-copy bytes, so
+# platform-dependent normalization would break the gate (see CI).
+*.cs text eol=crlf
