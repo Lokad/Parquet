@@ -1,0 +1,81 @@
+name: ci
+
+# Public Release qualification on both supported operating systems. Timing
+# campaigns stay on controlled hosts; this workflow asserts correctness,
+# packaging, and distributable contents only, never performance parity.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: qualify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Release test, vector lane
+        shell: pwsh
+        run: |
+          ./test.ps1 -Configuration Release | Tee-Object -FilePath test-vector.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Release test, forced-scalar lane
+        shell: pwsh
+        run: |
+          ./test.ps1 -Configuration Release -ForceScalar | Tee-Object -FilePath test-scalar.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Format check
+        shell: pwsh
+        run: dotnet format Lokad.Parquet.slnx --verify-no-changes --no-restore
+
+      - name: Benchmark truth verification
+        shell: pwsh
+        run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --tl:off --no-launch-profile -- --verify-truth
+
+      - name: Package
+        shell: pwsh
+        run: ./pack.ps1
+
+      - name: Inspect distributable
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -Path "artifacts/nuget/Lokad.Parquet.*.nupkg")
+          if ($packages.Count -eq 0) { throw "No NuGet package was produced." }
+          $stage = Join-Path ([System.IO.Path]::GetTempPath()) "nupkg-inspect"
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          Expand-Archive -Path $packages[0].FullName -DestinationPath $stage
+          foreach ($required in @("README.md", "CHANGELOG.md", "LICENSE.txt", "icon.png", "lib/net10.0/Lokad.Parquet.dll", "lib/net10.0/Lokad.Parquet.xml")) {
+            if (-not (Test-Path (Join-Path $stage $required))) { throw "Package is missing $required." }
+          }
+          [xml]$nuspec = Get-Content (Join-Path $stage "Lokad.Parquet.nuspec")
+          if ($nuspec.SelectNodes("//*[local-name()='dependency']").Count -ne 0) { throw "Package gained a third-party dependency." }
+          if ((Get-Content (Join-Path $stage "README.md") -Raw) -match "\]\((SPEC|BENCHMARKS)\.md\)") { throw "Package README has repository-relative links." }
+          Remove-Item -Recurse -Force $stage
+
+      - name: Publish test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: test-*.log
+
+      - name: Publish package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}
+          path: artifacts/nuget/*

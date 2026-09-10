@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$project = Join-Path $PSScriptRoot "src\Lokad.Parquet\Lokad.Parquet.csproj"
+$project = Join-Path $PSScriptRoot "src/Lokad.Parquet/Lokad.Parquet.csproj"
 
 Push-Location $PSScriptRoot
 try {

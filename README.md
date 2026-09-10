@@ -10,7 +10,7 @@ metadata, projected asynchronous scans, row-group/range selection, and
 disposable aligned column batches. It reads flat required or optional columns
 of every Parquet physical type except `INT96`, using Data Page V1/V2, PLAIN or
 dictionary encoding, and UNCOMPRESSED or SNAPPY payloads. Nested/repeated
-schemas and other codecs remain intentionally unsupported; [SPEC.md](SPEC.md)
+schemas and other codecs remain intentionally unsupported; [SPEC.md](https://github.com/Lokad/Parquet/blob/master/SPEC.md)
 is the exact support contract.
 
 The primary scan API uses descriptors resolved once from immutable metadata:
@@ -88,7 +88,7 @@ Benchmark execution is restricted to `Release` builds:
 
 The harness restricts each benchmark process to one logical processor. Linux
 measurements must be built, run, and written on a native Linux filesystem, not
-on a Windows-backed WSL path such as `/mnt/c`; see [BENCHMARKS.md](BENCHMARKS.md).
+on a Windows-backed WSL path such as `/mnt/c`; see [BENCHMARKS.md](https://github.com/Lokad/Parquet/blob/master/BENCHMARKS.md).
 
 ## License
 
