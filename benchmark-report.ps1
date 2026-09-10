@@ -95,6 +95,16 @@ Assert-ReportCondition ($packageLocks[0] -ne "unrecorded") `
     "Paired snapshots must record a package-lock hash."
 Assert-ReportCondition ($census.sourceRevision -eq $sourceRevisions[0]) `
     "The work census has a different source revision."
+if ($pairedSchema -eq 9) {
+    Assert-ReportCondition ((-not [string]::IsNullOrEmpty($catalogDoc.sourceRevision)) -and ($catalogDoc.sourceRevision -ne "unrecorded")) `
+        "The catalog does not record its source identity."
+    Assert-ReportCondition ($catalogDoc.sourceRevision -eq $sourceRevisions[0]) `
+        "The catalog has a different source revision."
+    Assert-ReportCondition ((-not [string]::IsNullOrEmpty($catalogDoc.packageLockHash)) -and ($catalogDoc.packageLockHash -ne "unrecorded")) `
+        "The catalog does not record its package identity."
+    Assert-ReportCondition ($catalogDoc.packageLockHash -eq $packageLocks[0]) `
+        "The catalog has a different package-lock hash."
+}
 Assert-ReportCondition ((@($runs.sessionId | Sort-Object -Unique)).Count -eq 4) `
     "Paired snapshots must come from four distinct sessions."
 foreach ($run in $runs) {
@@ -159,6 +169,8 @@ Assert-ReportCondition ((@($linuxRuns.runnerFingerprint | Sort-Object -Unique)).
     "Linux sessions have different runner fingerprints."
 # Native-filesystem qualification is enforced at collection time: the benchmark
 # refuses Windows-backed mounts on Linux. powerMode stays informational only.
+# Lane outcomes below only record evidence validity; the strict parity gate is
+# evaluated once, explicitly, after the diagnostic report renders.
 
 foreach ($run in $runs) {
     Assert-ReportCondition ($run.schemaVersion -eq $pairedSchema) `
@@ -252,10 +264,6 @@ foreach ($run in $runs) {
             "$caseName recorded gate is inconsistent."
         Assert-ReportCondition ($case[0].upper95Ratio -ge $point) `
             "$caseName upper bound is below its recomputed point."
-        Assert-ReportCondition $case[0].passed `
-            "$caseName does not pass its recorded non-inferiority gate."
-        Assert-ReportCondition ($case[0].upper95Ratio -le 1.05) `
-            "$caseName exceeds the 1.05 upper-bound gate."
         if ($caseName -like "PreopenedScan/RequiredString*") {
             Assert-ReportCondition ($case[0].utf8PayloadBytes -gt 0) `
                 "$caseName does not record its UTF-8 payload size."
@@ -340,6 +348,122 @@ foreach ($caseName in $caseNames) {
             "The $workload census fixture differs from the paired sessions."
     }
 }
+$frozenDiagnosticCensusCases = @(
+    "UnevenInt32Plain",
+    "NarrowInt32Plain",
+    "RequiredInt32RowRange",
+    "SmallRowGroupsInt32Plain",
+    "CompressibleInt32Snappy",
+    "NullableBooleanPlain",
+    "LowCardinalityStringDictionary",
+    "RequiredInt64Plain",
+    "RequiredFloatPlain",
+    "RequiredDoublePlain",
+    "NullableInt64Plain",
+    "NullableFixedByteArrayPlain",
+    "NullableBinaryPlain",
+    "RequiredInt32V2",
+    "NullableInt32V2",
+    "HighCardinalityStringDictionary",
+    "NullableInt32DenseNulls",
+    "CrcInt64Dictionary",
+    "CrcBinaryDictionarySnappy",
+    "MisalignedMultiPage"
+)
+$frozenDiagnosticPassCounts = @{
+    "UnevenInt32Plain" = 2
+    "NarrowInt32Plain" = 2
+    "RequiredInt32RowRange" = 1
+    "SmallRowGroupsInt32Plain" = 2
+    "CompressibleInt32Snappy" = 2
+    "NullableBooleanPlain" = 2
+    "LowCardinalityStringDictionary" = 2
+    "RequiredInt64Plain" = 2
+    "RequiredFloatPlain" = 2
+    "RequiredDoublePlain" = 2
+    "NullableInt64Plain" = 2
+    "NullableFixedByteArrayPlain" = 2
+    "NullableBinaryPlain" = 2
+    "RequiredInt32V2" = 2
+    "NullableInt32V2" = 2
+    "HighCardinalityStringDictionary" = 2
+    "NullableInt32DenseNulls" = 2
+    "CrcInt64Dictionary" = 2
+    "CrcBinaryDictionarySnappy" = 2
+    "MisalignedMultiPage" = 2
+}
+$frozenCensusPhysicalTypes = @("boolean", "int32", "int64", "float", "double", "fixed", "utf8", "binary")
+$frozenCensusConsumers = @("int32", "nullable-int32", "multi-int32", "boolean", "utf8", "int64", "float", "double", "fixed", "nullable-int64", "binary", "nullable-binary")
+
+function Get-CensusSlotWidth([object] $PhysicalType, [object] $ValueWidthBytes, [string] $CaseName) {
+    switch ($PhysicalType) {
+        "boolean" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 1) "$CaseName census layout changed its boolean width."
+            return 1
+        }
+        "int32" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 4) "$CaseName census layout changed its INT32 width."
+            return 4
+        }
+        "int64" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 8) "$CaseName census layout changed its INT64 width."
+            return 8
+        }
+        "float" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 4) "$CaseName census layout changed its FLOAT width."
+            return 4
+        }
+        "double" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 8) "$CaseName census layout changed its DOUBLE width."
+            return 8
+        }
+        "fixed" {
+            Assert-ReportCondition (($null -ne $ValueWidthBytes) -and ($ValueWidthBytes -gt 0)) "$CaseName census layout changed its fixed width."
+            return [long]$ValueWidthBytes
+        }
+        "utf8" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 0) "$CaseName census layout changed its UTF-8 width."
+            return 0
+        }
+        "binary" {
+            Assert-ReportCondition ($ValueWidthBytes -eq 0) "$CaseName census layout changed its binary width."
+            return 0
+        }
+    }
+    throw "$CaseName census layout carries an unknown physical type."
+}
+function Get-CensusLogicalBytes([object] $Entry, [int] $ColumnCount, [string] $CaseName) {
+    $width = Get-CensusSlotWidth $Entry.physicalType $Entry.valueWidthBytes $CaseName
+    if ($Entry.physicalType -eq "utf8") {
+        return [long]$Entry.utf8PayloadBytes + [long]$ColumnCount * ([long]$Entry.rowCount + 1) * 4
+    }
+    if ($Entry.physicalType -eq "binary") {
+        Assert-ReportCondition (($null -ne $Entry.binaryPayloadBytes) -and ($Entry.binaryPayloadBytes -ge 0)) "$CaseName census layout is missing its binary payload."
+        $binaryTotal = [long]$Entry.binaryPayloadBytes + [long]$ColumnCount * ([long]$Entry.rowCount + 1) * 4
+        if ($Entry.nullable) {
+            $binaryTotal += [long]$ColumnCount * [long][Math]::Floor(([long]$Entry.rowCount + 7) / 8)
+        }
+        return $binaryTotal
+    }
+    $total = [long]$Entry.rowCount * [long]$ColumnCount * $width
+    if ($Entry.nullable) {
+        $total += [long]$ColumnCount * [long][Math]::Floor(([long]$Entry.rowCount + 7) / 8)
+    }
+    return $total
+}
+function Assert-ReportCounter([object] $Value, [string] $Message) {
+    Assert-ReportCondition (($null -ne $Value) -and ($Value -ge 0)) $Message
+}
+if ($censusSchema -eq 4) {
+    $mappedCensusNames = @($caseNames | Where-Object { $_ -like "PreopenedScan/*" } | ForEach-Object { $_.Substring(14) })
+    $expectedCensusNames = @($mappedCensusNames + $frozenDiagnosticCensusCases | Sort-Object -Unique)
+    $actualCensusNames = @($census.cases | ForEach-Object { $_.name } | Sort-Object -Unique)
+    Assert-ReportCondition ($census.cases.Count -eq $expectedCensusNames.Count) `
+        "The work census does not match the frozen case set."
+    Assert-ReportCondition (@(Compare-Object $expectedCensusNames $actualCensusNames).Count -eq 0) `
+        "The work census does not match the frozen case set."
+}
+
 foreach ($entry in $census.cases) {
     Assert-ReportCondition ($entry.poolRents -eq $entry.poolReturns) `
         "The $($entry.name) work census has unbalanced pool activity."
@@ -366,10 +490,78 @@ foreach ($entry in $census.cases) {
             }
         }
     }
-    if ($censusSchema -eq 2 -or $censusSchema -eq 4) {
+    if (($censusSchema -eq 2 -or $censusSchema -eq 4) -and (($null -eq $entry.physicalType) -or ($entry.physicalType -eq "utf8"))) {
         Assert-ReportCondition ($entry.consumerUtf8CopiedBytes -eq (2 * $entry.utf8PayloadBytes)) `
             "The $($entry.name) work census has inconsistent UTF-8 consumer-copy accounting."
     }
+    if ($censusSchema -eq 4) {
+        Assert-ReportCondition (($entry.sourceReadCalls -gt 0) -and ($entry.sourceBytesRead -gt 0)) `
+            "The $($entry.name) work census is missing its source read evidence."
+        foreach ($field in @("fixtureBytes", "rowCount", "columnCount", "logicalOutputBytes")) {
+            Assert-ReportCondition (($null -ne $entry.$field) -and ($entry.$field -gt 0)) `
+                "The $($entry.name) work census carries invalid $field evidence."
+        }
+        foreach ($field in @("utf8PayloadBytes", "maximumConcurrentReads", "publicBatches", "decodedColumnBatches", "totalMoves", "synchronousMoves", "poolRents", "poolReturns", "requestedPoolBytes", "rentedPoolCapacityBytes", "peakPooledBytes", "returnedPoolCapacityBytes", "sourceCopiedBytes", "endOfScanRetainedPoolBytes", "consumerUtf8CopiedBytes", "pooledBytesCleared", "retainedPoolBytes")) {
+            Assert-ReportCounter $entry.$field "The $($entry.name) work census carries invalid $field evidence."
+        }
+        Assert-ReportCondition ($entry.synchronousMoves -le $entry.totalMoves) `
+            "The $($entry.name) work census has inconsistent move accounting."
+        Assert-ReportCondition ($entry.requestedPoolBytes -le $entry.rentedPoolCapacityBytes) `
+            "The $($entry.name) work census has inconsistent pool budget accounting."
+        Assert-ReportCondition ($entry.rentedPoolCapacityBytes -eq $entry.returnedPoolCapacityBytes) `
+            "The $($entry.name) work census has inconsistent pool budget accounting."
+        Assert-ReportCondition ($entry.pooledBytesCleared -eq $entry.returnedPoolCapacityBytes) `
+            "The $($entry.name) work census has inconsistent pool budget accounting."
+        Assert-ReportCondition ($entry.peakPooledBytes -le $entry.rentedPoolCapacityBytes) `
+            "The $($entry.name) work census has inconsistent pool budget accounting."
+        Assert-ReportCondition ($entry.endOfScanRetainedPoolBytes -le $entry.peakPooledBytes) `
+            "The $($entry.name) work census has inconsistent pool budget accounting."
+        Assert-ReportCondition ($frozenCensusPhysicalTypes -contains $entry.physicalType) `
+            "The $($entry.name) work census carries an unknown layout identity."
+        Assert-ReportCondition ($null -ne $entry.nullable) `
+            "The $($entry.name) work census is missing its nullability evidence."
+        Assert-ReportCondition ($frozenCensusConsumers -contains $entry.consumer) `
+            "The $($entry.name) work census carries an unknown consumer identity."
+        Assert-ReportCondition ((($null -eq $entry.rowRangeStart) -and ($null -eq $entry.rowRangeCount)) -or (($null -ne $entry.rowRangeStart) -and ($null -ne $entry.rowRangeCount))) `
+            "The $($entry.name) work census carries a partial row-range identity."
+        if (($null -ne $entry.rowRangeStart) -and ($null -ne $entry.rowRangeCount)) {
+            Assert-ReportCondition (($entry.rowRangeStart -ge 0) -and ($entry.rowRangeCount -gt 0)) `
+                "The $($entry.name) work census carries an invalid row range."
+            Assert-ReportCondition ($entry.rowCount -eq $entry.rowRangeCount) `
+                "The $($entry.name) work census row count does not match its range."
+        }
+        Assert-ReportCondition ((Get-CensusLogicalBytes $entry $entry.columnCount $entry.name) -eq $entry.logicalOutputBytes) `
+            "The $($entry.name) work census denominator does not match its recorded layout."
+        foreach ($field in @("lokadLiveOwnedBytes", "baselineLiveOwnedBytes")) {
+            Assert-ReportCondition ($null -ne $entry.$field) `
+                "The $($entry.name) work census is missing its $field evidence."
+        }
+        $expectedPassCount = 2
+        if ($frozenDiagnosticPassCounts.ContainsKey($entry.name)) {
+            $expectedPassCount = $frozenDiagnosticPassCounts[$entry.name]
+        }
+        Assert-ReportCondition (($null -ne $entry.passPeaks) -and (@($entry.passPeaks).Count -eq $expectedPassCount)) `
+            "The $($entry.name) work census does not carry its expected pass set."
+        $passIndex = 0
+        foreach ($pass in $entry.passPeaks) {
+            Assert-ReportCondition (($null -ne $pass.projection) -and (@($pass.projection).Count -gt 0)) `
+                "The $($entry.name) work census pass is missing its projection."
+            foreach ($ordinal in $pass.projection) {
+                Assert-ReportCondition (($null -ne $ordinal) -and ($ordinal -ge 0)) `
+                    "The $($entry.name) work census pass carries an invalid ordinal."
+            }
+            Assert-ReportCondition (($null -ne $pass.target) -and ($pass.target -gt 0)) `
+                "The $($entry.name) work census pass is missing its target."
+            $expectedRole = "warm-instrumented"
+            if ($passIndex -eq 0) { $expectedRole = "cold-instrumented" }
+            Assert-ReportCondition ($pass.role -eq $expectedRole) `
+                "The $($entry.name) work census pass carries an unexpected role."
+            Assert-ReportCondition ((Get-CensusLogicalBytes $entry @($pass.projection).Count $entry.name) -eq $pass.logicalOutputBytes) `
+                "The $($entry.name) work census pass denominator does not match its recorded layout."
+            $passIndex++
+        }
+    }
+
 }
 
 $lines = [Collections.Generic.List[string]]::new()
@@ -388,10 +580,32 @@ foreach ($caseName in $caseNames) {
         $case = $run.cases | Where-Object name -EQ $caseName
         "{0:F3} / {1:F3}" -f $case.pointRatio, $case.upper95Ratio
     }
-    $lines.Add("| $($caseLabels[$caseName]) | $($cells[0]) | $($cells[1]) | $($cells[2]) | $($cells[3]) | pass |")
+    $laneFailed = $false
+    foreach ($run in @($windowsRuns + $linuxRuns)) {
+        $gateCase = $run.cases | Where-Object name -EQ $caseName
+        if (-not $gateCase.passed) { $laneFailed = $true }
+    }
+    $laneGate = "pass"
+    if ($laneFailed) { $laneGate = "FAIL" }
+    $lines.Add("| $($caseLabels[$caseName]) | $($cells[0]) | $($cells[1]) | $($cells[2]) | $($cells[3]) | $laneGate |")
 }
 $lines.Add("")
 $lines.Add("Each result is `point estimate / upper 95% bound` for `Lokad / Parquet.NET`; lower is better and the declared gate is an upper bound no greater than 1.05.")
+$failedScanLanes = @()
+foreach ($scanLane in $caseNames) {
+    if ($scanLane -notlike "PreopenedScan/*") { continue }
+    foreach ($run in @($windowsRuns + $linuxRuns)) {
+        if (-not ($run.cases | Where-Object name -EQ $scanLane).passed) {
+            $failedScanLanes += $scanLane
+            break
+        }
+    }
+}
+$failedScanLanes = @($failedScanLanes | Sort-Object -Unique)
+$parityClaim = "PASS"
+if ($failedScanLanes.Count -gt 0) { $parityClaim = "FAIL ($($failedScanLanes -join ", "))" }
+$lines.Add("- Parity claim (upper 95% bound no greater than 1.05 on every pre-opened scan lane): $parityClaim")
+$lines.Add("- Warm metadata open is an accepted parity limitation for small footers and does not join the parity claim.")
 $lines.Add("")
 $lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | End-scan retained | Retained |")
 $lines.Add("|---|---:|---:|---:|---:|---:|---:|")
@@ -400,6 +614,73 @@ foreach ($entry in $census.cases) {
     $label = $caseLabels["PreopenedScan/$($entry.name)"]
     if ($null -eq $label) { $label = $entry.name }
     $lines.Add("| $label | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) |")
+}
+
+$lines.Add("")
+$lines.Add("Per-observation allocation and GC totals pool the four sessions (1,600 observations per workload).")
+$lines.Add("")
+$lines.Add("| Workload | Lokad mean B/obs | Parquet.NET mean B/obs | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 |")
+$lines.Add("|---|---:|---:|---:|---:|")
+foreach ($caseName in $caseNames) {
+    $lokadBytes = 0.0
+    $baselineBytes = 0.0
+    $lokadGc = @(0, 0, 0)
+    $baselineGc = @(0, 0, 0)
+    $observationCount = 0
+    foreach ($run in @($windowsRuns + $linuxRuns)) {
+        $allocationCase = $run.cases | Where-Object name -EQ $caseName
+        foreach ($observation in $allocationCase.observations) {
+            $lokadBytes += $observation.lokadAllocatedBytes
+            $baselineBytes += $observation.parquetNetAllocatedBytes
+            $lokadGc[0] += $observation.lokadGen0Collections
+            $lokadGc[1] += $observation.lokadGen1Collections
+            $lokadGc[2] += $observation.lokadGen2Collections
+            $baselineGc[0] += $observation.parquetNetGen0Collections
+            $baselineGc[1] += $observation.parquetNetGen1Collections
+            $baselineGc[2] += $observation.parquetNetGen2Collections
+            $observationCount++
+        }
+    }
+    $lines.Add("| $($caseLabels[$caseName]) | $(($lokadBytes / $observationCount).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)) | $(($baselineBytes / $observationCount).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)) | $($lokadGc[0])/$($lokadGc[1])/$($lokadGc[2]) | $($baselineGc[0])/$($baselineGc[1])/$($baselineGc[2]) |")
+}
+$lines.Add("")
+$lines.Add("Census pass dimensions record the projection, target, role and budget envelope of every pass; roles distinguish cold-instrumented first passes from warm-instrumented later passes.")
+$lines.Add("")
+$lines.Add("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output |")
+$lines.Add("|---|---|---|---|---|---|---:|---:|---:|---:|")
+foreach ($entry in $census.cases) {
+    $label = $caseLabels["PreopenedScan/$($entry.name)"]
+    if ($null -eq $label) { $label = $entry.name }
+    $passNumber = 0
+    foreach ($pass in $entry.passPeaks) {
+        $passNumber++
+        $passDenominator = "unrecorded"
+        if (($null -ne $pass.logicalOutputBytes) -and ($pass.logicalOutputBytes -gt 0)) {
+            $passRatio = $pass.peakPooledBytes / $pass.logicalOutputBytes
+            $passDenominator = "$($pass.peakPooledBytes) B / $($pass.logicalOutputBytes) B (" + $passRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture) + "x)"
+        }
+        $projectionText = "unrecorded"
+        if ($null -ne $pass.projection) { $projectionText = ($pass.projection -join ",") }
+        $elapsedText = "unrecorded"
+        if ($null -ne $pass.elapsedMilliseconds) { $elapsedText = $pass.elapsedMilliseconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture) }
+        $lines.Add("| $label | $passNumber | $projectionText | $($pass.target) | $($pass.role) | $($pass.batchCount) | $elapsedText | $($pass.allocatedBytes) | $($pass.gen0Collections)/$($pass.gen1Collections)/$($pass.gen2Collections) | $passDenominator |")
+    }
+}
+$lines.Add("")
+$lines.Add("Census live memory separates session-held storage from post-disposal growth for both readers.")
+$lines.Add("")
+$lines.Add("| Case | Layout | Nullable | Consumer | Range | Lokad live B | Baseline live B | Lokad retained | Baseline retained | End-scan retained | Retained |")
+$lines.Add("|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|")
+foreach ($entry in $census.cases) {
+    $label = $caseLabels["PreopenedScan/$($entry.name)"]
+    if ($null -eq $label) { $label = $entry.name }
+    if ($null -eq $entry.physicalType) {
+        $lines.Add("| $label | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded | unrecorded |")
+        continue
+    }
+    $rangeText = "-"
+    if (($null -ne $entry.rowRangeStart) -and ($null -ne $entry.rowRangeCount)) { $rangeText = "$($entry.rowRangeStart)+$($entry.rowRangeCount)" }
+    $lines.Add("| $label | $($entry.physicalType)/$($entry.valueWidthBytes) | $($entry.nullable) | $($entry.consumer) | $rangeText | $($entry.lokadLiveOwnedBytes) | $($entry.baselineLiveOwnedBytes) | $($entry.lokadRetainedManagedBytes)/$($entry.lokadRetainedProcessPrivateBytes) | $($entry.baselineRetainedManagedBytes)/$($entry.baselineRetainedProcessPrivateBytes) | $($entry.endOfScanRetainedPoolBytes) | $($entry.retainedPoolBytes) |")
 }
 
 $documentText = [IO.File]::ReadAllText($Document).Replace("`r`n", "`n")
@@ -415,8 +696,13 @@ if ($Verify) {
     Assert-ReportCondition ($documentText -eq $expected) `
         "BENCHMARKS.md does not match the supplied snapshots."
     Write-Output "BENCHMARKS.md matches the supplied snapshots."
+    Assert-ReportCondition ($failedScanLanes.Count -eq 0) `
+        "The parity claim fails on $($failedScanLanes -join ", ")."
 }
 else {
     [IO.File]::WriteAllText($Document, $expected, [Text.UTF8Encoding]::new($false))
     Write-Output "Rewrote the generated parity report in $Document."
+    Assert-ReportCondition ($failedScanLanes.Count -eq 0) `
+        "The parity claim fails on $($failedScanLanes -join ", ")."
 }
+

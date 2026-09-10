@@ -4,18 +4,6 @@ using System.Reflection;
 
 public sealed class ExhaustiveTeardownTests
 {
-    private static readonly Type PoolType =
-        (typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetArrayPool") ??
-        throw new InvalidOperationException("The internal pool facade was not found."));
-
-    private static readonly PropertyInfo RentObserverProperty =
-        (PoolType.GetProperty("RentObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool rent observer was not found."));
-
-    private static readonly PropertyInfo ReturnObserverProperty =
-        (PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool return observer was not found."));
-
     [Fact]
     public async Task FileDisposalDisposesOwnedSourceEvenWhenCancellationCallbackThrows()
     {
@@ -71,29 +59,20 @@ public sealed class ExhaustiveTeardownTests
         // A throwing pool-return observer during file disposal must not skip the
         // retained dictionary: every array is still released and a repeated disposal
         // reports the same failure without further side effects.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         var throwingEnabled = false;
         var injected = false;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
+        PoolTracker.SetObservers(
+            (array, _) => outstanding.NoteRent(array),
+            (array, _) =>
             {
-                outstanding.Add(array, array.Length);
-            }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-
-            if (throwingEnabled && !injected)
-            {
-                injected = true;
-                throw new IOException("Injected pool return failure.");
-            }
-        }));
+                outstanding.NoteReturn(array);
+                if (throwingEnabled && !injected)
+                {
+                    injected = true;
+                    throw new IOException("Injected pool return failure.");
+                }
+            });
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
@@ -112,15 +91,14 @@ public sealed class ExhaustiveTeardownTests
             Assert.True(injected);
             throwingEnabled = false;
             await scan.DisposeAsync();
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
             IOException second = await Assert.ThrowsAsync<IOException>(async () => await file.DisposeAsync());
             Assert.Same(first, second);
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
     }
 
@@ -160,35 +138,28 @@ public sealed class ExhaustiveTeardownTests
         // Cancellation injected on the definition-level rent unwinds through page,
         // emission, and scan teardown while every pool return also throws. The
         // original cancellation must still surface instead of a teardown error.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         var throwingEnabled = true;
         var fired = false;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
-        {
-            lock (outstanding)
+        PoolTracker.SetObservers(
+            (array, requested) =>
             {
-                outstanding.Add(array, array.Length);
-            }
-
-            if (array is int[] && requested == 3)
+                outstanding.NoteRent(array);
+                if (array is int[] && requested == 3)
+                {
+                    fired = true;
+                    cancellation.Cancel();
+                }
+            },
+            (array, _) =>
             {
-                fired = true;
-                cancellation.Cancel();
-            }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-
-            if (throwingEnabled && cancellation.IsCancellationRequested)
-            {
-                throw new IOException("Injected teardown failure.");
-            }
-        }));
+                outstanding.NoteReturn(array);
+                if (throwingEnabled && cancellation.IsCancellationRequested)
+                {
+                    throw new IOException("Injected teardown failure.");
+                }
+            });
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
@@ -206,11 +177,10 @@ public sealed class ExhaustiveTeardownTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     private sealed class ThrowAfterDispose(IDisposable inner) : IDisposable

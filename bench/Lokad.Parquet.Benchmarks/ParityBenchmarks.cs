@@ -178,6 +178,9 @@ internal sealed class ParityScanCase : IAsyncDisposable
         FixtureLength = fixture.Bytes.Length;
         FixtureHash = Convert.ToHexStringLower(SHA256.HashData(fixture.Bytes));
 
+        if (fixture.Workload is not (ScanWorkload.RequiredInt32Plain or ScanWorkload.NullableInt32Plain or ScanWorkload.RequiredInt32Snappy or ScanWorkload.TwoRequiredInt32Plain or ScanWorkload.EightRequiredInt32Plain) &&
+            !ScanWorkloadCatalog.IsString(fixture.Workload))
+            throw new InvalidOperationException("The census diagnostic lane has no parity case.");
         if (fixture.Workload == ScanWorkload.NullableInt32Plain)
         {
             _nullableDestination = new int?[fixture.RowCount];

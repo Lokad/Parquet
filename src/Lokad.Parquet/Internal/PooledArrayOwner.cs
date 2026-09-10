@@ -111,7 +111,20 @@ internal interface IEvictableArrayCache
     bool EvictIdle();
 }
 
-internal sealed class PooledArrayOwnerCache<T> : IDisposable, IEvictableArrayCache
+/// <summary>File-owned typed array cache: rents typed pooled buffers with disposal and idle eviction.</summary>
+internal interface IColumnValueCache : IEvictableArrayCache, IDisposable
+{
+    /// <summary>Rents a typed pooled buffer; the requested element type must match the cache.</summary>
+    PooledArrayOwner<T> Rent<T>(int length);
+}
+
+/// <summary>Rents typed pooled buffers from the file-owned column caches.</summary>
+internal interface IColumnValueCacheProvider
+{
+    /// <summary>Rents a typed pooled buffer from the cache owned by the column.</summary>
+    PooledArrayOwner<T> RentColumnValues<T>(ParquetColumn column, int length);
+}
+internal sealed class PooledArrayOwnerCache<T> : IColumnValueCache
 {
     private readonly ParquetScanMemoryBudget _budget;
     private readonly object _lock = new();
@@ -120,6 +133,13 @@ internal sealed class PooledArrayOwnerCache<T> : IDisposable, IEvictableArrayCac
     private bool _disposed;
 
     public PooledArrayOwnerCache(ParquetScanMemoryBudget budget) => _budget = budget;
+
+    PooledArrayOwner<TRequested> IColumnValueCache.Rent<TRequested>(int length)
+    {
+        if (typeof(TRequested) != typeof(T))
+            throw new InvalidOperationException("A column value cache has an inconsistent physical type.");
+        return (PooledArrayOwner<TRequested>)(object)Rent(length);
+    }
 
     public PooledArrayOwner<T> Rent(int length)
     {
@@ -253,3 +273,7 @@ internal sealed class PooledArrayOwnerCache<T> : IDisposable, IEvictableArrayCac
         PooledArrayOwner<T>.ReturnAndRelease(released, _budget, releasedBytes);
     }
 }
+
+
+
+

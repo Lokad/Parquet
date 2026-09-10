@@ -63,8 +63,10 @@ substituted for pipeline claims.
 Equivalence invariants: every pipeline endpoint reads the same rows, columns,
 and nulls from identical fixture bytes and must reproduce the same output
 bytes and checksum before timing (setup truth checks throw otherwise); the
-work census counts retained pooled capacity per workload against the warmed
-competitor buffers. The baseline UTF-8 re-encoding (UTF-16 interlude plus
+work census counts retained pooled capacity per workload, and retention probes
+hold one pre-opened reader per side with reused destinations and sink alive
+through the observation, verifying the same emitted rows, columns and ranges
+on every repetition. The baseline UTF-8 re-encoding (UTF-16 interlude plus
 per-value allocations) is part of the measured UTF-8 endpoint, not a universal
 string-reading claim; no UTF-16-output endpoint is measured. Baseline scan
 destinations stay preallocated and Lokad pool reuse stays intentional so
@@ -111,8 +113,8 @@ Each result is point estimate / upper 95% bound for Lokad / Parquet.NET; lower i
 ## Warm metadata open
 
 Warm metadata open is an accepted parity limitation for small footers: the
-paired lane reports about 1.21 / 1.23 (point / upper 95%) on the current
-build and 1.26 / 1.29 on the pristine 0.1.0 control under matching process,
+paired lane reports about 1.21 / 1.23 (point / upper 95%) at revision
+d854233 (B06) and 1.26 / 1.29 on the pristine 0.1.0 control under matching process,
 runtime, CPU, and warmup conditions, so the deficit predates the review fixes
 and current code does not regress it. The gap is about 0.35 microseconds per
 open at this size. (An older recorded table passed the gate; it comes from a
@@ -150,20 +152,55 @@ allocation is 0.022–0.025 B per decoded fixed-width cell, below the declared
 because rented arrays are not managed allocations in BenchmarkDotNet's table.
 The work census runs two truth-checked passes per workload: the full projection
 at the full-row target, then the second half of the columns at a 4,096-row
-target, sharing one pool-balanced case. Its table reports end-of-scan retained
+target, sharing one pool-balanced case. The first pass is labeled
+cold-instrumented and later passes warm-instrumented; instrumented time covers
+consumer, checksum and sink work, so differently shaped passes are never a
+comparative timing sample. Its table reports end-of-scan retained
 bytes (file-cache storage still held after the scans) separately from the
 zero-after-disposal check, and consumer UTF-8 bytes are measured across both
 passes. Each pass records its own peak pooled bytes against its own decoded layout,
 counting file-cache storage carried into the pass, so each pass carries its own budget
-envelope. An uneven two-column multi-row-group case covers uneven batch partitioning
+envelope. Live owned storage (session held open), warmed pool retention and
+post-disposal growth are recorded as separate snapshot fields. Two recorded budget failures are resolved on the current
+revision, not hidden. The short required-INT32 row range once peaked at
+278,528 pooled bytes for 16,384 emitted bytes (17.0x) because page loading
+materialized whole payloads; bounded buffering for required uncompressed
+pages cut that lane to 32,768 bytes (2.0x), pinned by range-peak ceilings for
+1-row, short-range, and full-range selections. The nullable-boolean lane once
+peaked at 58,368 pooled bytes against a corrected 9,216-byte layout (6.33x,
+previously hidden behind an INT32-sized denominator); bitmap definition
+levels cut it to 9,472 bytes (1.03x) with headroom under the enforced 6x
+gate. Compressed, CRC-bearing, and dictionary pages can still require
+full-page work, so short-range peaks on those paths are judged against their
+page sizes, not against the required-uncompressed selection ratio.
+
+The parity objective and the Core budgets are separate gates evaluated from
+different evidence. Parity means an upper one-sided 95% ratio no greater than
+1.05 on every declared paired lane. The Core budgets are: managed allocation
+below 0.10 fixed-width bytes per cell with zero measured GC collections after
+stabilization; peak pooled bytes within 6x the decoded layout per census case
+and pass; and no Core workload above 3x pinned-baseline CPU on the paired
+ratios. Every recorded scan ratio sits far below that CPU ceiling; the
+campaign review checks it from the same paired tables rather than rerunning
+until a lane happens to pass, and any lane that fails any gate is retained in
+the evidence with its failure visible. An uneven two-column multi-row-group case covers uneven batch partitioning
 with a fully known oracle. Source reads are measured on the stream path with exactly
 one read in flight; exact-MemoryStream and direct-memory borrows bypass reads and sit
 outside these figures. Each case also records warmed Lokad and competitor retention
 measured with the same yardstick. The retired composite-copy gate assumed zero copies; copies remain
 legitimate on slicing and binary paths, which the UTF-8 and multi-batch lanes
-exercise under truth and pool-balance checks. Cross-column page misalignment
-cannot come from the single-page baseline writer and is covered by the
-partitioning tests against synthetic uneven fixtures. The census table above
+exercise under truth and pool-balance checks. Cross-column page misalignment cannot come from the single-page baseline writer;
+the partitioning tests cover it against synthetic uneven fixtures, and a real
+multi-page census lane splits two columns at different rows within one row group.
+Named diagnostic lanes extend the census beyond the frozen parity catalog without
+joining the parity claim: wider required primitives (INT64/FLOAT/DOUBLE), nullable
+non-INT32 and variable-width binary lanes, hand-built Data Page V2 layouts the
+baseline writer cannot produce, high-cardinality and dense-null dictionary shapes,
+and committed producer fixtures carrying page CRCs. Committed-fixture truth comes from
+pinned independent column hashes plus Lokad/baseline agreement before timing. The pinned
+baseline never reads or validates page CRCs, while Lokad validates every present CRC
+before trusting payload bytes, so the CRC lanes measure validation-inclusive decode on
+one side against unchecked decode on the other. The census table above
 regenerates with fresh snapshots on the next qualification.
 
 ## What changed
@@ -251,3 +288,4 @@ itself stays with the runner. Every session must report Windows or Linux.
 .\benchmark-report.ps1 -PairedSnapshot <four-paths> `
     -CensusSnapshot <census-path> -Catalog <catalog-path> -Verify
 ```
+

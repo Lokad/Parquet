@@ -5,40 +5,20 @@ using System.Reflection;
 
 public sealed class ScanMemoryFeasibilityTests
 {
-    private static readonly Type PoolType =
-        (typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetArrayPool") ??
-        throw new InvalidOperationException("The internal pool facade was not found."));
-
-    private static readonly PropertyInfo RentObserverProperty =
-        (PoolType.GetProperty("RentObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool rent observer was not found."));
-
-    private static readonly PropertyInfo ReturnObserverProperty =
-        (PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool return observer was not found."));
-
     [Fact]
     public async Task MalformedPageValueCountFailsBeforeDisproportionateRent()
     {
         // One row claims 1,000,000 page values under a 128-byte budget. The page
         // must fail against its enclosing row group before any megabyte-scale rent.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         var largestRent = 0;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
-        {
-            lock (outstanding)
+        PoolTracker.SetObservers(
+            (array, _) =>
             {
-                outstanding.Add(array, array.Length);
+                outstanding.NoteRent(array);
                 largestRent = Math.Max(largestRent, Buffer.ByteLength(array));
-            }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            },
+            (array, _) => outstanding.NoteReturn(array));
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
@@ -54,11 +34,10 @@ public sealed class ScanMemoryFeasibilityTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]
@@ -67,23 +46,15 @@ public sealed class ScanMemoryFeasibilityTests
         // 100,000 dictionary entries under a 1KB budget, past header scale but far
         // below the 400KB offset rent. That rent must fail its minimum-budget check
         // before touching the array.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         var largestRent = 0;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
-        {
-            lock (outstanding)
+        PoolTracker.SetObservers(
+            (array, _) =>
             {
-                outstanding.Add(array, array.Length);
+                outstanding.NoteRent(array);
                 largestRent = Math.Max(largestRent, Buffer.ByteLength(array));
-            }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            },
+            (array, _) => outstanding.NoteReturn(array));
         try
         {
             var entries = new byte[100000][];
@@ -109,11 +80,10 @@ public sealed class ScanMemoryFeasibilityTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]

@@ -21,7 +21,15 @@ internal sealed class FileRandomAccessSource : IParquetRandomAccessSource
     public FileRandomAccessSource(string path)
     {
         _handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        Length = RandomAccess.GetLength(_handle);
+        try
+        {
+            Length = RandomAccess.GetLength(_handle);
+        }
+        catch
+        {
+            _handle.Dispose();
+            throw;
+        }
     }
 
     public long Length { get; }

@@ -1,19 +1,7 @@
 namespace Lokad.Parquet.Tests;
 
-using System.Reflection;
-
 public sealed class RentOrdinalFailureTests
 {
-    private static readonly Type PoolType =
-        (typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetArrayPool") ??
-            throw new InvalidOperationException("Pool facade was not found."));
-    private static readonly PropertyInfo RentObserverProperty =
-        PoolType.GetProperty("RentObserver", BindingFlags.Public | BindingFlags.Static) ??
-            throw new InvalidOperationException("Rent observer was not found.");
-    private static readonly PropertyInfo ReturnObserverProperty =
-        PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static) ??
-            throw new InvalidOperationException("Return observer was not found.");
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -51,8 +39,7 @@ public sealed class RentOrdinalFailureTests
     private static async Task<int> CountRentsAsync(byte[] bytes, bool projected)
     {
         var rents = 0;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((_, _) => rents++));
-        ReturnObserverProperty.SetValue(null, null);
+        PoolTracker.SetObservers((_, _) => rents++, null);
         try
         {
             await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
@@ -76,37 +63,28 @@ public sealed class RentOrdinalFailureTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
     }
 
     private static async Task AssertOrdinalBalancedAsync(byte[] bytes, int failAtOrdinal, bool projected)
     {
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         var rents = 0;
         var triggered = false;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
-        {
-            rents++;
-            if (rents == failAtOrdinal)
+        PoolTracker.SetObservers(
+            (array, _) =>
             {
-                triggered = true;
-                throw new InvalidOperationException("injected rent failure");
-            }
+                rents++;
+                if (rents == failAtOrdinal)
+                {
+                    triggered = true;
+                    throw new InvalidOperationException("injected rent failure");
+                }
 
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
-        {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+                outstanding.NoteRent(array);
+            },
+            (array, _) => outstanding.NoteReturn(array));
         try
         {
             try
@@ -132,12 +110,11 @@ public sealed class RentOrdinalFailureTests
             {
             }
             Assert.True(triggered);
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
     }
 }

@@ -67,11 +67,37 @@ internal static class SnappyBlockDecoder
             if (distance <= 0 || distance > outputOffset)
                 throw new ParquetFormatException("A Snappy copy has an invalid backward distance.");
             RequireOutput(destination, outputOffset, length, "A Snappy copy exceeds the declared output length.");
-            for (var i = 0; i < length; i++)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (distance == 1)
             {
-                if ((i & 4095) == 0)
-                    cancellationToken.ThrowIfCancellationRequested();
-                destination[outputOffset + i] = destination[outputOffset - distance + i];
+                // A distance-one copy repeats a single byte: one fill replaces
+                // the whole per-byte loop.
+                destination.Slice(outputOffset, length).Fill(destination[outputOffset - 1]);
+            }
+            else if (distance >= length)
+            {
+                // Non-overlapping copies move in one block.
+                destination.Slice(outputOffset - distance, length).CopyTo(destination.Slice(outputOffset, length));
+            }
+            else
+            {
+                // Overlapping copies double the reproduced prefix, so every
+                // block copy reads only already-written bytes and stays
+                // overlap-safe. Chunks are capped so cancellation is observed
+                // at the same 4 KiB granularity as the retired byte loop.
+                var produced = 0;
+                while (produced < length)
+                {
+                    if (produced != 0)
+                        cancellationToken.ThrowIfCancellationRequested();
+                    var chunk = distance + produced;
+                    if (chunk > length - produced)
+                        chunk = length - produced;
+                    if (chunk > 4096)
+                        chunk = 4096;
+                    destination.Slice(outputOffset - distance, chunk).CopyTo(destination.Slice(outputOffset + produced, chunk));
+                    produced += chunk;
+                }
             }
             outputOffset += length;
         }

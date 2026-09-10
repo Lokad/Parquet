@@ -232,6 +232,8 @@ public sealed class SafetyPolicyTests
                 "reflection bridge for testing internal decoders without a friend assembly",
             ["Lokad.Parquet.Tests.ScanCancellationTests.GetCrc32Method"] =
                 "reflection bridge for testing the internal CRC helper without a friend assembly",
+            ["Lokad.Parquet.Tests.ScalarTestMode.Initialize"] =
+                "process-wide forced-scalar test mode for the CI scalar leg",
             ["Lokad.Parquet.Tests.OwnershipAndMutationTests+ConcurrentRecordingSource.ResetPeak"] =
                 "explicit measurement boundary on a sequential-I/O test double",
             ["Lokad.Parquet.Benchmarks.PairedParityRunner.RunAsync"] =
@@ -246,6 +248,58 @@ public sealed class SafetyPolicyTests
                 "command-line runner entry point",
             ["Lokad.Parquet.Benchmarks.WorkCensusRunner+CountingMemoryStream.Reset"] =
                 "explicit source-measurement boundary",
+            ["Lokad.Parquet.Internal.ParquetScanEnumerable.PreflightSelectedChunks"] =
+                "cohesive selected-chunk preflight planning entry point",
+            ["Lokad.Parquet.Tests.BenchmarkReportQuartet.DiagnosticCensusCase"] =
+                "synthetic frozen census-case builder with one fixture-method caller",
+            ["Lokad.Parquet.Tests.OpenFailureTests+PendingFailingSource.Fail"] =
+                "explicit failure-trigger boundary on a pending-read test double",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32"] =
+                "independent fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32Columns"] =
+                "independent multi-column fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateBinaryColumns"] =
+                "independent binary fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.EncodeSnappyLiteral"] =
+                "literal-only test Snappy encoder behind the single copy-encoding switch",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32RowGroups"] =
+                "independent multi-row-group fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Benchmarks.CensusCaseLayout.ForCatalogLane"] =
+                "frozen-catalog workload-to-layout derivation for the work census",
+            ["Lokad.Parquet.Benchmarks.LiveSessionRetention.ScanBaselineSessionAsync"] =
+                "live baseline session scan across the retention observation boundary",
+            ["Lokad.Parquet.Benchmarks.LiveSessionRetention+BaselineDestinations.Create"] =
+                "reusable baseline destination allocation for the live retention session",
+            ["Lokad.Parquet.Benchmarks.BenchmarkScan.ReadBaselineFileAsync"] =
+                "independent Parquet.NET file source benchmark operation",
+            ["Lokad.Parquet.Benchmarks.BenchmarkScan.ReadBaselineStreamAsync"] =
+                "independent Parquet.NET stream source benchmark operation",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.EstablishCommittedTruthAsync"] =
+                "committed-fixture truth oracle across the checksum/time boundary",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.DecodeNullablePrimitive"] =
+                "shared nullable primitive decode helper across the census consumer branches",
+            ["Lokad.Parquet.Benchmarks.PairedSessionRecorder.FindIncompleteSessionDirectories"] =
+                "incomplete paired-session discovery for concurrent-campaign detection",
+            ["Lokad.Parquet.Internal.PooledValueLease.TryTake"] =
+                "typed page-value transfer shared by the primitive batch handoff",
+            ["Lokad.Parquet.Internal.PooledValueLease.TryGetValues"] =
+                "typed page-value access shared by partial batch copies",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.DecodePage"] =
+                "row-group dictionary page decoding behind the scan cursor",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandDataPage"] =
+                "dictionary-encoded data page expansion behind the scan cursor",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.Reset"] =
+                "row-group dictionary store release on page progression",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandBinaryDictionary"] =
+                "variable-width dictionary expansion for one physical layout",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandFixedDictionary"] =
+                "fixed-width dictionary expansion for one physical layout",
+            ["Lokad.Parquet.Internal.DefinitionLevelCodec.DecodeValidated"] =
+                "validated definition-level decoding behind the section decoder",
+            ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandValues"] =
+                "primitive dictionary expansion shared by the five fixed-width layouts",
+            ["Lokad.Parquet.ParquetFile+ColumnCacheProvider.RentColumnValues"] =
+                "typed column-cache rent behind the file provider boundary",
         };
         var opCodes = typeof(OpCodes).GetFields(BindingFlags.Public | BindingFlags.Static)
             .Where(static field => field.FieldType == typeof(OpCode))
@@ -557,3 +611,10 @@ public sealed class SafetyPolicyTests
         (type.IsGenericType && type.GetGenericArguments().Any(ContainsPointer));
 
 }
+
+
+
+
+
+
+

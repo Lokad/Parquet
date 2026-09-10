@@ -154,7 +154,7 @@ internal static class DefinitionLevelCodec
         }
 
         if (consumed != levelInput.Length)
-            throw new ParquetFormatException("An optional V1 page has trailing definition-level bytes.", location);
+            throw new ParquetFormatException("An optional page has trailing definition-level bytes.", location);
         var decodedNullCount = 0;
         for (var index = 0; index < levelOutput.Length; index++)
         {

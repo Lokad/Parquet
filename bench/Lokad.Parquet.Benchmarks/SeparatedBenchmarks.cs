@@ -1,5 +1,6 @@
 using System.Reflection;
 using BenchmarkDotNet.Attributes;
+using BaselineParquetReader = Parquet.ParquetReader;
 
 namespace Lokad.Parquet.Benchmarks;
 
@@ -153,6 +154,12 @@ public class SourceScanBenchmarks
     [Benchmark(Description = "Custom random-access source open and scan")]
     public Task<long> CustomSource() => BenchmarkScan.ReadCustomSourceAsync(_fixture);
 
+    [Benchmark(Description = "Baseline open and scan from a warmed local file")]
+    public Task<long> BaselineFile() => BenchmarkScan.ReadBaselineFileAsync(_temporaryPath, _expectedChecksum);
+
+    [Benchmark(Description = "Baseline open and scan from a memory stream")]
+    public Task<long> BaselineStream() => BenchmarkScan.ReadBaselineStreamAsync(_fixture, _expectedChecksum);
+
     [GlobalCleanup]
     public void Cleanup()
     {
@@ -187,6 +194,41 @@ internal static class BenchmarkScan
         await using var source = new MemoryRandomAccessSource(bytes);
         await using var file = await ParquetFile.OpenAsync(source);
         return await ReadRequiredInt32Async(file);
+    }
+
+    // Competitor counterparts to the Lokad file/stream lanes above, so source
+    // comparisons never rest on a single implementation. The pinned baseline
+    // reads whole row groups into reusable destinations; checksums fold the
+    // same required values as the Lokad source consumer.
+    public static async Task<long> ReadBaselineFileAsync(string path, long expectedChecksum)
+    {
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        return await ReadBaselineStreamAsync(stream, expectedChecksum);
+    }
+
+    public static async Task<long> ReadBaselineStreamAsync(byte[] bytes, long expectedChecksum)
+    {
+        using var stream = new MemoryStream(bytes, writable: false);
+        return await ReadBaselineStreamAsync(stream, expectedChecksum);
+    }
+
+    private static async Task<long> ReadBaselineStreamAsync(Stream stream, long expectedChecksum)
+    {
+        await using var reader = await BaselineParquetReader.CreateAsync(stream);
+        long checksum = ScanChecksum.Seed;
+        for (var groupOrdinal = 0; groupOrdinal < reader.RowGroupCount; groupOrdinal++)
+        {
+            using var group = reader.OpenRowGroupReader(groupOrdinal);
+            var fields = reader.Schema.DataFields.ToArray();
+            var values = new int[checked((int)group.RowCount)];
+            await group.ReadAsync<int>(fields[0], values);
+            checksum = ScanChecksum.ConsumeRequired(checksum, values);
+        }
+
+        checksum = ScanChecksum.CombineColumn(checksum, ScanChecksum.Seed);
+        if (checksum != expectedChecksum)
+            throw new InvalidOperationException("The baseline source benchmark produced an invalid checksum.");
+        return checksum;
     }
 
     // Bench-side custom random-access source: synchronous segment copies over

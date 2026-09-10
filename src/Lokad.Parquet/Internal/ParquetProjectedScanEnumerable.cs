@@ -98,28 +98,13 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _sourceBatches = new DecodedColumnBatch?[ordinals.Length];
             _sourceOffsets = new int[ordinals.Length];
             var selectedRowGroups = ParquetScanEnumerable.BuildRowGroups(file, options);
+            ParquetScanEnumerable.PreflightSelectedChunks(file, selectedRowGroups, ordinals);
             try
             {
-                if (scanCancellation.CanBeCanceled && enumerationCancellation.CanBeCanceled)
-                {
-                    _userLinkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                        scanCancellation,
-                        enumerationCancellation);
-                }
-                var userCancellation = _userLinkedCancellation?.Token ??
-                    (scanCancellation.CanBeCanceled ? scanCancellation : enumerationCancellation);
-                if (userCancellation.CanBeCanceled)
-                {
-                    _linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                        userCancellation,
-                        file.DisposalToken);
-                    _cancellationToken = _linkedCancellation.Token;
-                }
-                else
-                {
-                    _linkedCancellation = null;
-                    _cancellationToken = file.DisposalToken;
-                }
+                (_cancellationToken, _linkedCancellation, _userLinkedCancellation) = ScanCancellation.Compose(
+                    scanCancellation,
+                    enumerationCancellation,
+                    file.DisposalToken);
                 for (var index = 0; index < ordinals.Length; index++)
                 {
                     var column = file.Metadata.Schema.Columns[ordinals[index]];
@@ -308,7 +293,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 {
                     var source = _sourceBatches[index] ??
                         throw new InvalidOperationException("An aligned source batch is missing.");
-                    if (source.Column is ParquetBinaryColumnBatch)
+                    if (source.Column is ParquetBinaryColumnBatch ||
+                        source.Column is ParquetFixedLengthByteArrayColumnBatch)
                     {
                         hasBinary = true;
                         break;
@@ -327,6 +313,11 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                     {
                         var source = _sourceBatches[index] ??
                             throw new InvalidOperationException("An aligned source batch is missing.");
+                        if (source.Column is ParquetFixedLengthByteArrayColumnBatch fixedBytes)
+                        {
+                            payloadBytes += checked((long)middle * fixedBytes.TypeWidth);
+                            continue;
+                        }
                         if (source.Column is not ParquetBinaryColumnBatch binary)
                             continue;
                         var offsets = binary.Offsets.Span;
@@ -377,7 +368,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 sourceBatchDisposition = SourceBatchDisposition.Retained;
                 // Misaligned page boundaries require fresh aligned buffers owned solely by the projected batch.
                 var lifetime = new BatchLifetime();
-                var owners = new List<IDisposable>(_sourceBatches.Length * 3);
+                var ownerStore = new IDisposable[_sourceBatches.Length * 3];
+                var ownerCount = 0;
                 var columns = new ParquetColumnBatch[_sourceBatches.Length];
                 try
                 {
@@ -390,7 +382,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                             _sourceOffsets[index],
                             rowCount,
                             lifetime,
-                            owners);
+                            ownerStore,
+                            ref ownerCount);
                     }
                     return new ParquetBatch(
                         rowOffset,
@@ -399,15 +392,15 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                         rowCount,
                         columns,
                         lifetime,
-                        owners.ToArray());
+                        ownerStore.AsSpan(0, ownerCount).ToArray());
                 }
                 catch
                 {
                     // Best-effort rollback preserves the primary copy error.
                     try { lifetime.Dispose(); } catch (Exception) { }
-                    foreach (var owner in owners)
+                    for (var ownerIndex = 0; ownerIndex < ownerCount; ownerIndex++)
                     {
-                        try { owner.Dispose(); } catch (Exception) { }
+                        try { ownerStore[ownerIndex].Dispose(); } catch (Exception) { }
                     }
 
                     throw;
@@ -431,19 +424,20 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             int sourceOffset,
             int rowCount,
             BatchLifetime lifetime,
-            List<IDisposable> owners)
+            IDisposable[] ownerStore,
+            ref int ownerCount)
             {
-                var validity = CopyValidity(source.Validity, sourceOffset, rowCount, lifetime, owners);
+                var validity = CopyValidity(source.Validity, sourceOffset, rowCount, lifetime, ownerStore, ref ownerCount);
                 return source switch
                 {
-                    ParquetPrimitiveColumnBatch<bool> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, owners),
-                    ParquetPrimitiveColumnBatch<int> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, owners),
-                    ParquetPrimitiveColumnBatch<long> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, owners),
-                    ParquetPrimitiveColumnBatch<float> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, owners),
-                    ParquetPrimitiveColumnBatch<double> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, owners),
-                    ParquetBinaryColumnBatch binary => CopyBinary(binary, sourceOffset, rowCount, validity, lifetime, owners),
+                    ParquetPrimitiveColumnBatch<bool> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
+                    ParquetPrimitiveColumnBatch<int> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
+                    ParquetPrimitiveColumnBatch<long> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
+                    ParquetPrimitiveColumnBatch<float> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
+                    ParquetPrimitiveColumnBatch<double> typed => CopyPrimitive(typed, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
+                    ParquetBinaryColumnBatch binary => CopyBinary(binary, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
                     ParquetFixedLengthByteArrayColumnBatch fixedBytes =>
-                        CopyFixed(fixedBytes, sourceOffset, rowCount, validity, lifetime, owners),
+                        CopyFixed(fixedBytes, sourceOffset, rowCount, validity, lifetime, ownerStore, ref ownerCount),
                     _ => throw new ParquetUnsupportedFeatureException("A projected batch representation is unsupported."),
                 };
             }
@@ -454,13 +448,14 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             int rowCount,
             ParquetValidity validity,
             BatchLifetime lifetime,
-            List<IDisposable> owners)
+            IDisposable[] ownerStore,
+            ref int ownerCount)
             where T : unmanaged
             {
                 _cancellationToken.ThrowIfCancellationRequested();
                 var owner = PooledArrayOwner<T>.Rent(rowCount, _memoryBudget);
                 source.Values.Span.Slice(sourceOffset, rowCount).CopyTo(owner.Memory.Span);
-                owners.Add(owner);
+                ownerStore[ownerCount++] = owner;
                 return new ParquetPrimitiveColumnBatch<T>(lifetime, source.Column, owner.Memory, validity);
             }
 
@@ -470,14 +465,15 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             int rowCount,
             ParquetValidity validity,
             BatchLifetime lifetime,
-            List<IDisposable> owners)
+            IDisposable[] ownerStore,
+            ref int ownerCount)
             {
                 _cancellationToken.ThrowIfCancellationRequested();
                 var sourceOffsets = source.Offsets.Span;
                 var baseOffset = sourceOffsets[sourceOffset];
                 var payloadLength = sourceOffsets[sourceOffset + rowCount] - baseOffset;
                 var offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
-                owners.Add(offsets);
+                ownerStore[ownerCount++] = offsets;
                 _cancellationToken.ThrowIfCancellationRequested();
                 for (var index = 0; index <= rowCount; index++)
                 {
@@ -490,7 +486,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 if (payloadLength != 0)
                 {
                     var payload = PooledArrayOwner<byte>.Rent(payloadLength, _memoryBudget);
-                    owners.Add(payload);
+                    ownerStore[ownerCount++] = payload;
                     source.Payload.Span.Slice(baseOffset, payloadLength).CopyTo(payload.Memory.Span);
                     payloadMemory = payload.Memory;
                 }
@@ -509,12 +505,20 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             int rowCount,
             ParquetValidity validity,
             BatchLifetime lifetime,
-            List<IDisposable> owners)
+            IDisposable[] ownerStore,
+            ref int ownerCount)
             {
                 _cancellationToken.ThrowIfCancellationRequested();
+                if (source.TypeWidth <= 0)
+                    throw new InvalidOperationException("A FIXED_LEN_BYTE_ARRAY batch has an invalid width.");
+                if (source.TypeWidth > _file.Options.MaximumBinaryValueBytes)
+                    throw new ParquetLimitExceededException("A FIXED_LEN_BYTE_ARRAY value exceeds the configured byte limit.");
+                var requestedByteCount = checked((long)rowCount * source.TypeWidth);
+                if (requestedByteCount > _file.Options.MaximumBinaryBatchBytes || requestedByteCount > int.MaxValue)
+                    throw new ParquetLimitExceededException("A FIXED_LEN_BYTE_ARRAY batch exceeds the configured binary batch limit.");
                 var byteCount = checked(rowCount * source.TypeWidth);
                 var payload = PooledArrayOwner<byte>.Rent(byteCount, _memoryBudget);
-                owners.Add(payload);
+                ownerStore[ownerCount++] = payload;
                 source.Payload.Span.Slice(checked(sourceOffset * source.TypeWidth), byteCount)
                     .CopyTo(payload.Memory.Span);
                 return new ParquetFixedLengthByteArrayColumnBatch(
@@ -531,7 +535,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             int sourceOffset,
             int rowCount,
             BatchLifetime lifetime,
-            List<IDisposable> owners)
+            IDisposable[] ownerStore,
+            ref int ownerCount)
             {
                 if (source.IsAllValid)
                     return new ParquetValidity(lifetime, rowCount, ReadOnlyMemory<byte>.Empty, true);
@@ -545,7 +550,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                     out _);
                 if (sliced is null)
                     return new ParquetValidity(lifetime, rowCount, ReadOnlyMemory<byte>.Empty, true);
-                owners.Add(sliced);
+                ownerStore[ownerCount++] = sliced;
                 return new ParquetValidity(lifetime, rowCount, slicedBits, false);
             }
         }
@@ -635,3 +640,15 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
 
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+

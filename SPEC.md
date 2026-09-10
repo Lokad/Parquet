@@ -300,7 +300,10 @@ are unsupported by the initial scanner.
 
 A column chunk may contain at most one dictionary page, and it must precede
 data pages that reference it. Dictionary indices MUST be checked against the
-decoded dictionary count.
+decoded dictionary count. When no dictionary-page offset is advertised but the
+leading page exactly at the advertised data offset is a dictionary page (as
+emitted by some producers), the reader admits that exact shape and requires
+data pages at the computed page end; every other offset mismatch is malformed.
 
 ### 6.2 Encodings
 

@@ -52,6 +52,7 @@ internal static class PairedParityRunner
         var appliedAffinity = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
         var processorAffinity = BenchmarkHostPolicy.FormatAffinity(appliedAffinity);
         var logicalProcessor = BenchmarkHostPolicy.GetSelectedLogicalProcessor(appliedAffinity);
+        var operatingSystem = OperatingSystem.IsLinux() && !RuntimeInformation.OSDescription.Contains("Linux", StringComparison.Ordinal) ? "Linux " + RuntimeInformation.OSDescription : RuntimeInformation.OSDescription;
         if (OperatingSystem.IsWindows())
             process.PriorityClass = ProcessPriorityClass.High;
         string? selectedCase = null;
@@ -63,82 +64,131 @@ internal static class PairedParityRunner
                 throw new ArgumentException("--paired-case requires a workload name.", nameof(arguments));
             selectedCase = arguments[index + 1];
         }
+        var sessionId = Guid.NewGuid();
+        var sessionStartedAt = DateTimeOffset.UtcNow;
+        var snapshotLeaf = Path.GetFileNameWithoutExtension(outputPath);
+        if (string.IsNullOrEmpty(snapshotLeaf))
+            snapshotLeaf = "paired";
+        var snapshotDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        if (string.IsNullOrEmpty(snapshotDirectory))
+            snapshotDirectory = ".";
+        var sessionDirectory = Path.Combine(snapshotDirectory, snapshotLeaf + "." + sessionId.ToString("N")[..8] + ".session");
+        Directory.CreateDirectory(sessionDirectory);
+        foreach (var incomplete in PairedSessionRecorder.FindIncompleteSessionDirectories(snapshotDirectory))
+        {
+            if (!string.Equals(incomplete.SessionDirectory, sessionDirectory, StringComparison.Ordinal))
+                Console.WriteLine($"Warning: incomplete paired session {incomplete.SessionDirectory} has no completeness marker and never qualifies as evidence.");
+        }
+        WriteSessionMetadata("running", null, null, null);
         var caseResults = new List<PairedCaseResult>();
-        var forceScalar = AppContext.TryGetSwitch("Lokad.Parquet.ForceScalar", out var scalarEnabled) &&
-            scalarEnabled;
-        foreach (var workload in ScanWorkloadCatalog.ParityWorkloads)
+        var caseOrder = 0;
+        try
         {
-            if (selectedCase is not null && !string.Equals(selectedCase, workload.ToString(), StringComparison.Ordinal))
-                continue;
-            await using var benchmarkCase = await CreateScanCaseAsync(workload);
-            caseResults.Add(await MeasureAsync(benchmarkCase));
-        }
-        if (selectedCase is null || string.Equals(selectedCase, "WarmMetadataOpen", StringComparison.Ordinal))
-        {
-            await using var metadataCase = await CreateMetadataCaseAsync();
-            caseResults.Add(await MeasureAsync(metadataCase));
-        }
-        if (caseResults.Count == 0)
-            throw new ArgumentException($"Unknown paired case '{selectedCase}'.", nameof(arguments));
-
-        var snapshot = new PairedRunSnapshot(
-            SchemaVersion: SnapshotSchemaVersion,
-            SessionId: Guid.NewGuid(),
-            RecordedAtUtc: DateTimeOffset.UtcNow,
-            SourceRevision: Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
-            RunnerFingerprint: GetRunnerFingerprint(),
-            PackageLockHash: Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
-            Runtime: RuntimeInformation.FrameworkDescription,
-            OperatingSystem: OperatingSystem.IsLinux() && !RuntimeInformation.OSDescription.Contains("Linux", StringComparison.Ordinal) ? "Linux " + RuntimeInformation.OSDescription : RuntimeInformation.OSDescription,
-            Architecture: RuntimeInformation.ProcessArchitecture.ToString(),
-            Processor: BenchmarkHostPolicy.GetProcessorName(),
-            ProcessPriority: process.PriorityClass.ToString(),
-            ProcessorAffinity: processorAffinity,
-            PowerMode: Environment.GetEnvironmentVariable("LOKAD_PARQUET_POWER_MODE") ?? "unrecorded",
-            InstructionMode: forceScalar
-                ? "forced scalar"
-                : $"portable Vector<T>; {Vector<byte>.Count * 8}-bit; " +
-                    $"hardwareAccelerated={Vector.IsHardwareAccelerated}",
-            StopwatchFrequency: Stopwatch.Frequency,
-            RandomSeed: RandomSeed,
-            SampleCount: SampleCount,
-            InitialWarmupOperations: WarmupCount,
-            MinimumStabilizationOperations: MinimumStabilizationOperations,
-            PreliminaryStabilizationBlocks: PreliminaryStabilizationBlockCount,
-            FinalStabilizationBlocks: FinalStabilizationBlockCount,
-            TargetBlockMilliseconds: TargetBlockTime.TotalMilliseconds,
-            Estimator: "exp(mean(paired log ratio)); one-sided 95% Student-t upper bound",
-            OutlierRule: "none; retain every balanced AB/BA observation",
-            LogicalProcessor: logicalProcessor,
-            ServerGarbageCollection: BenchmarkHostPolicy.GetServerGarbageCollection(),
-            GcLatencyMode: BenchmarkHostPolicy.GetGcLatencyMode(),
-            TieredCompilation: BenchmarkHostPolicy.GetTieredCompilation(),
-            TieredPgo: BenchmarkHostPolicy.GetTieredPgo(),
-            ResolvedOutputPath: outputEvidence.ResolvedPath,
-            OutputFileSystem: outputEvidence.FileSystem,
-            Cases: caseResults);
-
-        var directory = Path.GetDirectoryName(outputPath);
-        if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
-        await using (var stream = File.Create(outputPath))
-        {
-            await JsonSerializer.SerializeAsync(stream, snapshot, new JsonSerializerOptions
+            var forceScalar = AppContext.TryGetSwitch("Lokad.Parquet.ForceScalar", out var scalarEnabled) &&
+                scalarEnabled;
+            foreach (var workload in ScanWorkloadCatalog.ParityWorkloads)
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                WriteIndented = true,
-            });
-            await stream.FlushAsync();
-        }
+                if (selectedCase is not null && !string.Equals(selectedCase, workload.ToString(), StringComparison.Ordinal))
+                    continue;
+                var caseStartedAt = DateTimeOffset.UtcNow;
+                await using var benchmarkCase = await CreateScanCaseAsync(workload);
+                var caseResult = await MeasureAsync(benchmarkCase);
+                WriteCaseCheckpoint(caseResult, caseOrder, caseStartedAt, DateTimeOffset.UtcNow);
+                caseOrder++;
+                caseResults.Add(caseResult);
+            }
+            if (selectedCase is null || string.Equals(selectedCase, "WarmMetadataOpen", StringComparison.Ordinal))
+            {
+                var metadataStartedAt = DateTimeOffset.UtcNow;
+                await using var metadataCase = await CreateMetadataCaseAsync();
+                var metadataResult = await MeasureAsync(metadataCase);
+                WriteCaseCheckpoint(metadataResult, caseOrder, metadataStartedAt, DateTimeOffset.UtcNow);
+                caseOrder++;
+                caseResults.Add(metadataResult);
+            }
+            if (caseResults.Count == 0)
+                throw new ArgumentException($"Unknown paired case '{selectedCase}'.", nameof(arguments));
 
-        Console.WriteLine($"Paired snapshot: {Path.GetFullPath(outputPath)}");
-        foreach (var result in caseResults)
-        {
-            Console.WriteLine(
-                $"{result.Name}: ratio {result.PointRatio:F4}, upper 95% {result.Upper95Ratio:F4}, " +
-                $"{(result.Passed ? "PASS" : "FAIL")} ({result.OperationsPerBlock} operations/block).");
+            var snapshot = new PairedRunSnapshot(
+                SchemaVersion: SnapshotSchemaVersion,
+                SessionId: sessionId,
+                RecordedAtUtc: DateTimeOffset.UtcNow,
+                SourceRevision: Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+                RunnerFingerprint: GetRunnerFingerprint(),
+                PackageLockHash: Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+                Runtime: RuntimeInformation.FrameworkDescription,
+                OperatingSystem: operatingSystem,
+                Architecture: RuntimeInformation.ProcessArchitecture.ToString(),
+                Processor: BenchmarkHostPolicy.GetProcessorName(),
+                ProcessPriority: process.PriorityClass.ToString(),
+                ProcessorAffinity: processorAffinity,
+                PowerMode: Environment.GetEnvironmentVariable("LOKAD_PARQUET_POWER_MODE") ?? "unrecorded",
+                InstructionMode: forceScalar
+                    ? "forced scalar"
+                    : $"portable Vector<T>; {Vector<byte>.Count * 8}-bit; " +
+                        $"hardwareAccelerated={Vector.IsHardwareAccelerated}",
+                StopwatchFrequency: Stopwatch.Frequency,
+                RandomSeed: RandomSeed,
+                SampleCount: SampleCount,
+                InitialWarmupOperations: WarmupCount,
+                MinimumStabilizationOperations: MinimumStabilizationOperations,
+                PreliminaryStabilizationBlocks: PreliminaryStabilizationBlockCount,
+                FinalStabilizationBlocks: FinalStabilizationBlockCount,
+                TargetBlockMilliseconds: TargetBlockTime.TotalMilliseconds,
+                Estimator: "exp(mean(paired log ratio)); one-sided 95% Student-t upper bound",
+                OutlierRule: "none; retain every balanced AB/BA observation",
+                LogicalProcessor: logicalProcessor,
+                ServerGarbageCollection: BenchmarkHostPolicy.GetServerGarbageCollection(),
+                GcLatencyMode: BenchmarkHostPolicy.GetGcLatencyMode(),
+                TieredCompilation: BenchmarkHostPolicy.GetTieredCompilation(),
+                TieredPgo: BenchmarkHostPolicy.GetTieredPgo(),
+                ResolvedOutputPath: outputEvidence.ResolvedPath,
+                OutputFileSystem: outputEvidence.FileSystem,
+                Cases: caseResults);
+
+            var directory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+            await using (var stream = File.Create(outputPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, snapshot, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    WriteIndented = true,
+                });
+                await stream.FlushAsync();
+            }
+
+            Console.WriteLine($"Paired snapshot: {Path.GetFullPath(outputPath)}");
+            foreach (var result in caseResults)
+            {
+                Console.WriteLine(
+                    $"{result.Name}: ratio {result.PointRatio:F4}, upper 95% {result.Upper95Ratio:F4}, " +
+                    $"{(result.Passed ? "PASS" : "FAIL")} ({result.OperationsPerBlock} operations/block).");
+            }
+            var returnCode = enforce && caseResults.Exists(static result => !result.Passed) ? 2 : 0;
+            var finishedAt = DateTimeOffset.UtcNow;
+            var completion = new PairedSessionCompletion(
+                sessionId,
+                finishedAt,
+                Path.GetFullPath(outputPath),
+                Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(outputPath))),
+                caseResults.Count,
+                caseResults.Select(static result => result.Name).ToArray(),
+                caseResults.TrueForAll(static result => result.Passed),
+                returnCode);
+            PairedSessionRecorder.WriteSessionFileAtomic(
+                Path.Combine(sessionDirectory, "completed.json"),
+                JsonSerializer.Serialize(completion, PairedSessionRecorder.SessionJson));
+            WriteSessionMetadata("completed", null, returnCode, finishedAt);
+            return returnCode;
         }
-        return enforce && caseResults.Exists(static result => !result.Passed) ? 2 : 0;
+        catch (Exception exception)
+        {
+            WriteSessionMetadata("aborted", exception.Message, null, DateTimeOffset.UtcNow);
+            Console.Error.WriteLine($"The paired session {sessionId} aborted: {exception.Message}");
+            return 1;
+        }
 
         async Task<PairedOperationCase> CreateScanCaseAsync(ScanWorkload workload)
         {
@@ -208,6 +258,39 @@ internal static class PairedParityRunner
         {
             var path = Assembly.GetExecutingAssembly().Location;
             return Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
+        }
+
+        void WriteSessionMetadata(string status, string? failure, int? exitStatus, DateTimeOffset? finishedAt)
+        {
+            var metadata = new PairedSessionMetadata(
+                sessionId,
+                SnapshotSchemaVersion,
+                status,
+                sessionStartedAt,
+                finishedAt,
+                Environment.MachineName,
+                Environment.ProcessId,
+                Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+                GetRunnerFingerprint(),
+                Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+                RuntimeInformation.FrameworkDescription,
+                operatingSystem,
+                RuntimeInformation.ProcessArchitecture.ToString(),
+                selectedCase,
+                Path.GetFullPath(outputPath),
+                failure,
+                exitStatus);
+            PairedSessionRecorder.WriteSessionFileAtomic(
+                Path.Combine(sessionDirectory, "session.json"),
+                JsonSerializer.Serialize(metadata, PairedSessionRecorder.SessionJson));
+        }
+
+        void WriteCaseCheckpoint(PairedCaseResult result, int order, DateTimeOffset startedAt, DateTimeOffset endedAt)
+        {
+            var checkpoint = new PairedCaseCheckpoint(sessionId, order, result.Name, startedAt, endedAt, result);
+            PairedSessionRecorder.WriteSessionFileAtomic(
+                Path.Combine(sessionDirectory, $"checkpoint-{order:D2}.json"),
+                JsonSerializer.Serialize(checkpoint, PairedSessionRecorder.SessionJson));
         }
     }
 

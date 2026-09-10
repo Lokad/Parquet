@@ -90,6 +90,64 @@ internal struct PagePayloadLease
     }
 }
 
+// Rented primitive value buffer for one page or dictionary. The owner and its
+// array are set and cleared together, so a value can never outlive or mismatch
+// its owner. TryTake hands the owner to a full-page batch and resets, while
+// TryGetValues exposes the array for partial copies without releasing it. Set
+// requires an empty lease. The cursor keeps the single instance in a private
+// field and never copies it.
+internal struct PooledValueLease
+{
+    private object? _owner;
+    private Array? _values;
+
+    public bool HasValues => _owner is not null;
+
+    public void Set<T>(PooledArrayOwner<T> owner)
+        where T : unmanaged
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        if (_owner is not null)
+            throw new InvalidOperationException("A page value buffer is already loaded.");
+        _owner = owner;
+        _values = owner.Array;
+    }
+
+    public bool TryTake<T>(out PooledArrayOwner<T>? owner)
+        where T : unmanaged
+    {
+        if (_owner is PooledArrayOwner<T> typed)
+        {
+            owner = typed;
+            _owner = null;
+            _values = null;
+            return true;
+        }
+        owner = null;
+        return false;
+    }
+
+    public bool TryGetValues<T>(out T[]? values)
+        where T : unmanaged
+    {
+        values = _values as T[];
+        return values is not null;
+    }
+
+    public void Dispose()
+    {
+        try
+        {
+            (_owner as IDisposable)?.Dispose();
+        }
+        finally
+        {
+            _owner = null;
+            _values = null;
+        }
+    }
+}
+
 // Page validity states. Only None means no page is loaded; AllValid carries
 // no bitmap at all.
 internal enum PageValidityKind
@@ -183,3 +241,4 @@ internal struct PageValidityState
         }
     }
 }
+

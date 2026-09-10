@@ -15,4 +15,11 @@
     <ProjectReference Include="..\..\src\Lokad.Parquet\Lokad.Parquet.csproj" />
   </ItemGroup>
 
+  <!-- Shared synthetic fixture writer (test tooling, no test-framework dependency).
+       The ten-case paired catalog stays frozen; linked fixtures serve named census
+       diagnostics only (V2 pages, multi-page misalignment, nullable binary). -->
+  <ItemGroup>
+    <Compile Include="..\..\tests\Lokad.Parquet.Tests\ParquetFixtureBuilder.cs" Link="Linked\ParquetFixtureBuilder.cs" />
+  </ItemGroup>
+
 </Project>

@@ -12,16 +12,62 @@ namespace Lokad.Parquet.Internal;
 // public API or the sequential single-scan contract.
 internal static class ScanPageReader
 {
+    // Bounded 8 KiB slicing-by-8 IEEE tables shared by every page check;
+    // the static constructor is the only initializer, so no helper needs a
+    // SafetyPolicy single-caller exception. SSE4.2 CRC32 is deliberately not
+    // used: it computes a different polynomial.
+    private static readonly uint[][] Crc32Tables;
+
+    static ScanPageReader()
+    {
+        var tables = new uint[8][];
+        for (var table = 0; table < 8; table++)
+            tables[table] = new uint[256];
+        for (var value = 0; value < 256; value++)
+        {
+            var entry = (uint)value;
+            for (var bit = 0; bit < 8; bit++)
+                entry = (entry >> 1) ^ (0xEDB88320u & (uint)-(int)(entry & 1));
+            tables[0][value] = entry;
+        }
+        for (var value = 0; value < 256; value++)
+        {
+            var entry = tables[0][value];
+            for (var table = 1; table < 8; table++)
+            {
+                entry = tables[0][entry & 0xFF] ^ (entry >> 8);
+                tables[table][value] = entry;
+            }
+        }
+        Crc32Tables = tables;
+    }
+
     internal static uint ComputeCrc32(ReadOnlySpan<byte> input, CancellationToken cancellationToken)
     {
+        var tables = Crc32Tables;
         var crc = uint.MaxValue;
-        for (var index = 0; index < input.Length; index++)
+        var position = 0;
+        var blockLimit = input.Length & ~7;
+        while (position < blockLimit)
         {
-            if ((index & 4095) == 0)
+            if ((position & 4095) == 0)
                 cancellationToken.ThrowIfCancellationRequested();
-            crc ^= input[index];
-            for (var bit = 0; bit < 8; bit++)
-                crc = (crc >> 1) ^ (0xEDB88320u & (uint)-(int)(crc & 1));
+            crc = tables[7][input[position] ^ (byte)crc]
+                ^ tables[6][input[position + 1] ^ (byte)(crc >> 8)]
+                ^ tables[5][input[position + 2] ^ (byte)(crc >> 16)]
+                ^ tables[4][input[position + 3] ^ (byte)(crc >> 24)]
+                ^ tables[3][input[position + 4]]
+                ^ tables[2][input[position + 5]]
+                ^ tables[1][input[position + 6]]
+                ^ tables[0][input[position + 7]];
+            position += 8;
+        }
+        while (position < input.Length)
+        {
+            if ((position & 4095) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            crc = tables[0][(int)((crc ^ input[position]) & 0xFF)] ^ (crc >> 8);
+            position++;
         }
         return ~crc;
     }
@@ -99,9 +145,8 @@ internal static class ScanPageReader
                     cancellationToken,
                     pageOffset,
                     new ArraySegment<byte>(owner.Array, 0, owner.Memory.Length),
-                    rowGroupOrdinal,
-                    columnOrdinal,
-                    pageOrdinal);
+                    "The immutable input ended during a page read.",
+                    ParquetErrorLocation.AtPage(pageOffset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
             }
             catch
             {
@@ -267,9 +312,8 @@ internal static class ScanPageReader
         CancellationToken cancellationToken,
         long offset,
         ArraySegment<byte> destination,
-        int rowGroupOrdinal,
-        int columnOrdinal,
-        int pageOrdinal)
+        string truncationMessage,
+        ParquetErrorLocation location)
     {
         ValueTask read;
         try
@@ -279,7 +323,7 @@ internal static class ScanPageReader
         catch (EndOfStreamException exception)
         {
             throw new ParquetFormatException(
-                "The immutable input ended during a page read.", exception, ParquetErrorLocation.AtPage(offset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
+                truncationMessage, exception, location);
         }
         if (read.IsCompletedSuccessfully)
         {
@@ -290,20 +334,15 @@ internal static class ScanPageReader
             catch (EndOfStreamException exception)
             {
                 throw new ParquetFormatException(
-                    "The immutable input ended during a page read.", exception, ParquetErrorLocation.AtPage(offset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
+                    truncationMessage, exception, location);
             }
 
             return ValueTask.CompletedTask;
         }
 
-        return AwaitReadAsync(read, offset, rowGroupOrdinal, columnOrdinal, pageOrdinal);
+        return AwaitReadAsync(read, truncationMessage, location);
 
-        static async ValueTask AwaitReadAsync(
-            ValueTask pendingRead,
-            long offset,
-            int rowGroupOrdinal,
-            int columnOrdinal,
-            int pageOrdinal)
+        static async ValueTask AwaitReadAsync(ValueTask pendingRead, string truncationMessage, ParquetErrorLocation location)
         {
             try
             {
@@ -312,8 +351,11 @@ internal static class ScanPageReader
             catch (EndOfStreamException exception)
             {
                 throw new ParquetFormatException(
-                    "The immutable input ended during a page read.", exception, ParquetErrorLocation.AtPage(offset, rowGroupOrdinal, columnOrdinal, pageOrdinal));
+                    truncationMessage, exception, location);
             }
         }
     }
 }
+
+
+

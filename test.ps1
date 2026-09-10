@@ -2,7 +2,8 @@ param(
     [ValidateSet("Debug", "Release")]
     [string] $Configuration = "Debug",
     [switch] $SkipBuild,
-    [string] $Filter
+    [string] $Filter,
+    [switch] $ForceScalar
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,6 +21,11 @@ try {
         if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
         }
+    }
+
+    if ($ForceScalar) {
+        $env:LOKAD_PARQUET_FORCE_SCALAR = "1"
+        Write-Output "Forced-scalar mode: every decoder takes its scalar lane."
     }
 
     $testArguments = @(

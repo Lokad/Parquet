@@ -160,7 +160,7 @@ public sealed class ParquetPrimitiveColumnBatch<T> : ParquetColumnBatch where T 
         ParquetValidity validity)
         : base(lifetime, column, values.Length, validity) => _values = values;
 
-    /// <summary>Gets one value slot per row; the view is invalid after its batch is disposed.</summary>
+    /// <summary>Gets one value slot per row; null-row slots are unspecified and must not be read without checking validity. The view is invalid after its batch is disposed.</summary>
     public ReadOnlyMemory<T> Values
     {
         get
@@ -200,7 +200,7 @@ public sealed class ParquetBinaryColumnBatch : ParquetColumnBatch
         }
     }
 
-    /// <summary>Gets monotonically non-decreasing offsets with length <c>RowCount + 1</c>; the view is invalid after batch disposal.</summary>
+    /// <summary>Gets monotonically non-decreasing offsets with length <c>RowCount + 1</c>; a null row has equal adjacent offsets. The view is invalid after batch disposal.</summary>
     public ReadOnlyMemory<int> Offsets
     {
         get
@@ -232,7 +232,7 @@ public sealed class ParquetFixedLengthByteArrayColumnBatch : ParquetColumnBatch
     /// <summary>Gets the positive byte width of each row slot.</summary>
     public int TypeWidth { get; }
 
-    /// <summary>Gets exactly <c>RowCount * TypeWidth</c> bytes; the view is invalid after batch disposal.</summary>
+    /// <summary>Gets exactly <c>RowCount * TypeWidth</c> bytes; bytes in null-row slots are unspecified. The view is invalid after batch disposal.</summary>
     public ReadOnlyMemory<byte> Payload
     {
         get

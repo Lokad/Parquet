@@ -10,7 +10,18 @@ public enum ScanWorkload
 {
     RequiredInt32Plain,
     NullableInt32Plain,
+    NullableBooleanPlain,
     RequiredInt32Snappy,
+    RequiredInt64Plain,
+    NullableInt64Plain,
+    RequiredFloatPlain,
+    RequiredDoublePlain,
+    NullableFixedByteArrayPlain,
+    NullableBinaryPlain,
+    RequiredInt32V2,
+    NullableInt32V2,
+    CrcInt64Dictionary,
+    CrcBinaryDictionarySnappy,
     RequiredStringPlain,
     RequiredStringSnappy,
     RequiredStringDictionary,
@@ -46,7 +57,18 @@ internal static class ScanWorkloadCatalog
     {
         [ScanWorkload.RequiredInt32Plain] = "Required INT32, PLAIN",
         [ScanWorkload.NullableInt32Plain] = "Nullable INT32, PLAIN",
+        [ScanWorkload.NullableBooleanPlain] = "Nullable BOOLEAN, PLAIN",
         [ScanWorkload.RequiredInt32Snappy] = "Required INT32, Snappy",
+        [ScanWorkload.RequiredInt64Plain] = "Required INT64, PLAIN",
+        [ScanWorkload.NullableInt64Plain] = "Nullable INT64, PLAIN",
+        [ScanWorkload.RequiredFloatPlain] = "Required FLOAT, PLAIN",
+        [ScanWorkload.RequiredDoublePlain] = "Required DOUBLE, PLAIN",
+        [ScanWorkload.NullableFixedByteArrayPlain] = "Nullable FIXED_LEN_BYTE_ARRAY, PLAIN",
+        [ScanWorkload.NullableBinaryPlain] = "Nullable BYTE_ARRAY, PLAIN",
+        [ScanWorkload.RequiredInt32V2] = "Required INT32, V2",
+        [ScanWorkload.NullableInt32V2] = "Nullable INT32, V2",
+        [ScanWorkload.CrcInt64Dictionary] = "CRC INT64 dictionary pages",
+        [ScanWorkload.CrcBinaryDictionarySnappy] = "CRC BYTE_ARRAY dictionary pages, Snappy",
         [ScanWorkload.RequiredStringPlain] = "Required UTF-8, PLAIN",
         [ScanWorkload.RequiredStringSnappy] = "Required UTF-8, PLAIN + Snappy",
         [ScanWorkload.RequiredStringDictionary] = "Required UTF-8, dictionary",
@@ -104,6 +126,25 @@ internal static class ScanChecksum
 
     internal static int CreateInt32(int value) => unchecked((value * 1_000_003) ^ (value >> 3));
 
+    internal static long MixInt64(long checksum, long value) =>
+        Mix(Mix(checksum, (int)value), (int)(value >> 32));
+
+    internal static long MixFloat(long checksum, float value) =>
+        Mix(checksum, BitConverter.SingleToInt32Bits(value));
+
+    internal static long MixDouble(long checksum, double value)
+    {
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        return Mix(Mix(checksum, (int)bits), (int)(bits >> 32));
+    }
+
+    internal static long MixBytes(long checksum, byte[] value)
+    {
+        foreach (var octet in value)
+            checksum = Mix(checksum, octet);
+        return Mix(checksum, ValueSeparator);
+    }
+
     internal static long Mix(long checksum, int value) =>
         unchecked((checksum * 1_099_511_628_211L) ^ value);
 
@@ -144,10 +185,15 @@ internal static class ScanChecksum
             throw new ArgumentException("Value and null chains must cover the same columns.", nameof(nullChains));
         if (valueChains.Length == 1)
             return CombineColumn(valueChains[0], nullChains[0]);
-        var folded = new long[valueChains.Length];
-        for (var column = 0; column < folded.Length; column++)
-            folded[column] = CombineColumn(valueChains[column], nullChains[column]);
-        return CombineColumns(folded);
+        var combined = Seed;
+        for (var column = 0; column < valueChains.Length; column++)
+        {
+            var folded = CombineColumn(valueChains[column], nullChains[column]);
+            combined = Mix(combined, (int)folded);
+            combined = Mix(combined, (int)(folded >> 32));
+        }
+
+        return combined;
     }
 }
 
@@ -164,6 +210,8 @@ internal sealed record ScanFixture(
     internal static async Task<ScanFixture> CreateAsync(ScanWorkload workload, int rowCount)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rowCount);
+        if (workload is not (ScanWorkload.RequiredInt32Plain or ScanWorkload.NullableInt32Plain or ScanWorkload.RequiredInt32Snappy or ScanWorkload.RequiredStringPlain or ScanWorkload.RequiredStringSnappy or ScanWorkload.RequiredStringDictionary or ScanWorkload.RequiredStringDictionarySnappy or ScanWorkload.TwoRequiredInt32Plain or ScanWorkload.EightRequiredInt32Plain))
+            throw new InvalidOperationException("The census diagnostic fixture is built by the work-census runner, not the shared fixture writer.");
         var columnCount = ScanWorkloadCatalog.GetColumnCount(workload);
         var usesDictionary = workload is ScanWorkload.RequiredStringDictionary or
             ScanWorkload.RequiredStringDictionarySnappy;
@@ -402,3 +450,4 @@ internal sealed class Utf8ScanSink
         _offsets[_rowCount] = _byteCount;
     }
 }
+

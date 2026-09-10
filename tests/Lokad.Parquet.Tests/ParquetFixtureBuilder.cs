@@ -15,6 +15,7 @@ internal enum FixtureDictionaryMode
     DuplicateBeforeDataPage,
     AfterDataPage,
     LegacyEncodingBeforeDataPage,
+    UnadvertisedBeforeDataPage,
 }
 
 internal enum FixtureRowGroupMode
@@ -53,6 +54,10 @@ internal sealed class ParquetFixtureOptions
     public FixturePageVersion PageVersion { get; init; }
     public Array? DictionaryValues { get; init; }
     public int[]? DictionaryIndices { get; init; }
+    public bool CoalesceIndexRuns { get; init; }
+    public bool BitPackedIndices { get; init; }
+    public bool AppendTrailingIndexRun { get; init; }
+    public bool SnappyCopyEncoding { get; init; }
     public FixtureDictionaryMode DictionaryMode { get; init; }
     public Array? TrailingPlainValues { get; init; }
     public FixtureRowGroupMode RowGroupMode { get; init; }
@@ -69,6 +74,7 @@ internal sealed class ParquetFixtureOptions
     public ParquetPageHeaderOverrides? PageHeaderOverrides { get; init; }
     public long? AuxiliaryOffset { get; init; }
     public long? ChunkTotalCompressedSize { get; init; }
+    public long? ChunkTotalUncompressedSize { get; init; }
     public bool OmitBloomLength { get; init; }
     public bool BloomLengthWithoutOffset { get; init; }
     public int AuxiliaryLength { get; init; } = 1;
@@ -98,6 +104,15 @@ internal sealed class RequiredInt32FixtureColumn
     public int? LogicalTypeDiscriminator { get; init; }
 }
 
+internal sealed class FixtureBinaryColumn
+{
+    public required string Name { get; init; }
+    public required int PhysicalTypeCode { get; init; }
+    public int? TypeLength { get; init; }
+    public required Array PhysicalValues { get; init; }
+    public ParquetCompressionCodec FooterCodec { get; init; } = ParquetCompressionCodec.Uncompressed;
+}
+
 internal static class ParquetFixtureBuilder
 {
     private static ReadOnlySpan<byte> Magic => "PAR1"u8;
@@ -125,9 +140,13 @@ internal static class ParquetFixtureBuilder
             options.DictionaryValues,
             options.DictionaryIndices,
             options.DictionaryMode,
+            options.CoalesceIndexRuns,
+            options.BitPackedIndices,
+            options.AppendTrailingIndexRun,
+            options.SnappyCopyEncoding,
             options.CompressionCodec,
             options.CrcMode,
-            options.PageHeaderOverrides) : new GeneratedPages([], 0, null);
+            options.PageHeaderOverrides) : new GeneratedPages([], 0, null, 0);
         if (options.TrailingPlainValues is { } trailingValues)
         {
             if (!hasRowGroup || isOptional || options.DictionaryMode == FixtureDictionaryMode.AfterDataPage)
@@ -142,13 +161,18 @@ internal static class ParquetFixtureBuilder
                 null,
                 null,
                 FixtureDictionaryMode.BeforeDataPage,
+                false,
+                false,
+                false,
+                false,
                 options.CompressionCodec,
                 options.CrcMode,
                 null);
             pages = new GeneratedPages(
                 Combine(pages.Bytes, trailingPage.Bytes),
                 pages.DataPageOffset,
-                pages.DictionaryPageOffset);
+                pages.DictionaryPageOffset,
+                checked(pages.UncompressedLength + trailingPage.UncompressedLength));
         }
         var page = pages.Bytes;
         var rowCount = checked(physicalValues.LongLength + (options.TrailingPlainValues?.LongLength ?? 0));
@@ -205,7 +229,7 @@ internal static class ParquetFixtureBuilder
                         footer.StringListField(ref metadata, 3, [options.ColumnNames[0]]);
                         footer.Int32Field(ref metadata, 4, (int)options.CompressionCodec);
                         footer.Int64Field(ref metadata, 5, rowCount);
-                        footer.Int64Field(ref metadata, 6, page.Length);
+                        footer.Int64Field(ref metadata, 6, options.ChunkTotalUncompressedSize ?? pages.UncompressedLength);
                         footer.Int64Field(ref metadata, 7, options.ChunkTotalCompressedSize ?? page.Length);
                         footer.Int64Field(ref metadata, 9, 4 + pages.DataPageOffset);
                         if (options.AuxiliaryOffset is long auxiliaryOffset)
@@ -281,6 +305,10 @@ internal static class ParquetFixtureBuilder
                     null,
                     null,
                     FixtureDictionaryMode.BeforeDataPage,
+                    false,
+                    false,
+                    false,
+                    false,
                     ParquetCompressionCodec.Uncompressed,
                     FixtureCrcMode.Valid,
                     null);
@@ -358,6 +386,102 @@ internal static class ParquetFixtureBuilder
         return CompleteFile(file, footer);
     }
 
+    public static byte[] CreateBinaryColumns(FixtureBinaryColumn[] columns)
+    {
+        if (columns.Length == 0)
+            throw new ArgumentException("A generated fixture needs at least one column.", nameof(columns));
+        var rowCount = columns[0].PhysicalValues.Length;
+        if (columns.Any(column => column.PhysicalValues.Length != rowCount))
+            throw new ArgumentException("Every generated column needs the same row count.", nameof(columns));
+
+        var chunks = new byte[columns.Length][];
+        for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
+        {
+            var column = columns[columnIndex];
+            var page = CreateInt32Page(
+                column.PhysicalValues,
+                column.PhysicalTypeCode,
+                column.TypeLength,
+                ParquetRepetition.Required,
+                null,
+                FixturePageVersion.DataPageV1,
+                null,
+                null,
+                FixtureDictionaryMode.BeforeDataPage,
+                false,
+                false,
+                false,
+                false,
+                ParquetCompressionCodec.Uncompressed,
+                FixtureCrcMode.Absent,
+                null);
+            chunks[columnIndex] = page.Bytes;
+        }
+
+        using var file = new MemoryStream();
+        file.Write(Magic);
+        var chunkOffsets = new long[chunks.Length];
+        for (var columnIndex = 0; columnIndex < chunks.Length; columnIndex++)
+        {
+            chunkOffsets[columnIndex] = file.Position;
+            file.Write(chunks[columnIndex]);
+        }
+
+        var footer = new CompactTestWriter();
+        short previous = 0;
+        footer.Int32Field(ref previous, 1, 1);
+        footer.ListField(ref previous, 2, CompactTestType.Struct, columns.Length + 1, () =>
+        {
+            short root = 0;
+            footer.StringField(ref root, 4, "schema");
+            footer.Int32Field(ref root, 5, columns.Length);
+            footer.Stop();
+            foreach (var column in columns)
+            {
+                short leaf = 0;
+                footer.Int32Field(ref leaf, 1, column.PhysicalTypeCode);
+                if (column.TypeLength is int typeLength)
+                    footer.Int32Field(ref leaf, 2, typeLength);
+                footer.Int32Field(ref leaf, 3, (int)ParquetRepetition.Required);
+                footer.StringField(ref leaf, 4, column.Name);
+                footer.Stop();
+            }
+        });
+        footer.Int64Field(ref previous, 3, rowCount);
+        footer.ListField(ref previous, 4, CompactTestType.Struct, 1, () =>
+        {
+            short rowGroup = 0;
+            footer.ListField(ref rowGroup, 1, CompactTestType.Struct, columns.Length, () =>
+            {
+                for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
+                {
+                    short chunk = 0;
+                    footer.Int64Field(ref chunk, 2, chunkOffsets[columnIndex]);
+                    footer.StructField(ref chunk, 3, () =>
+                    {
+                        short metadata = 0;
+                        footer.Int32Field(ref metadata, 1, columns[columnIndex].PhysicalTypeCode);
+                        footer.Int32ListField(ref metadata, 2, [(int)ParquetEncoding.Plain]);
+                        footer.StringListField(ref metadata, 3, [columns[columnIndex].Name]);
+                        footer.Int32Field(ref metadata, 4, (int)columns[columnIndex].FooterCodec);
+                        footer.Int64Field(ref metadata, 5, rowCount);
+                        footer.Int64Field(ref metadata, 6, chunks[columnIndex].Length);
+                        footer.Int64Field(ref metadata, 7, chunks[columnIndex].Length);
+                        footer.Int64Field(ref metadata, 9, chunkOffsets[columnIndex]);
+                        footer.Stop();
+                    });
+                    footer.Stop();
+                }
+            });
+            footer.Int64Field(ref rowGroup, 2, chunks.Sum(static chunk => (long)chunk.Length));
+            footer.Int64Field(ref rowGroup, 3, rowCount);
+            footer.Int64Field(ref rowGroup, 6, chunks.Sum(static chunk => (long)chunk.Length));
+            footer.Stop();
+        });
+        footer.Stop();
+        return CompleteFile(file, footer);
+    }
+
     private static void AddAnnotations(
         CompactTestWriter footer,
         ref short previous,
@@ -416,6 +540,10 @@ internal static class ParquetFixtureBuilder
                 null,
                 null,
                 FixtureDictionaryMode.BeforeDataPage,
+                false,
+                false,
+                false,
+                false,
                 ParquetCompressionCodec.Uncompressed,
                 FixtureCrcMode.Valid,
                 null).Bytes;
@@ -492,6 +620,10 @@ internal static class ParquetFixtureBuilder
         Array? dictionaryValues,
         int[]? dictionaryIndices,
         FixtureDictionaryMode dictionaryMode,
+        bool coalesceIndexRuns,
+        bool bitPackedIndices,
+        bool appendTrailingIndexRun,
+        bool snappyCopyEncoding,
         ParquetCompressionCodec codec,
         FixtureCrcMode crcMode,
         ParquetPageHeaderOverrides? overrides)
@@ -533,7 +665,7 @@ internal static class ParquetFixtureBuilder
             : ParquetPhysicalType.Int32;
         var encodedPhysical = dictionaryValues is null
             ? EncodePlainValues(values, effectiveValidity, repetition, physicalType, physicalCount, typeLength)
-            : EncodeDictionaryIndices(dictionaryValues, dictionaryIndices, physicalCount);
+            : EncodeDictionaryIndices(dictionaryValues, dictionaryIndices, physicalCount, coalesceIndexRuns, bitPackedIndices, appendTrailingIndexRun);
         byte[] uncompressed;
         byte[] payload;
         if (dataPageV2)
@@ -545,7 +677,7 @@ internal static class ParquetFixtureBuilder
             payload = codec switch
             {
                 ParquetCompressionCodec.Uncompressed => uncompressed,
-                ParquetCompressionCodec.Snappy when v2IsCompressed => Combine(levels, EncodeSnappyLiteral(encodedPhysical)),
+                ParquetCompressionCodec.Snappy when v2IsCompressed => Combine(levels, EncodeSnappyPage(encodedPhysical, snappyCopyEncoding)),
                 ParquetCompressionCodec.Snappy => uncompressed,
                 _ => throw new ArgumentException("The generated fixture supports only uncompressed and Snappy pages.", nameof(codec)),
             };
@@ -567,7 +699,7 @@ internal static class ParquetFixtureBuilder
             payload = codec switch
             {
                 ParquetCompressionCodec.Uncompressed => uncompressed,
-                ParquetCompressionCodec.Snappy => EncodeSnappyLiteral(uncompressed),
+                ParquetCompressionCodec.Snappy => EncodeSnappyPage(uncompressed, snappyCopyEncoding),
                 _ => throw new ArgumentException("The generated fixture supports only uncompressed and Snappy pages.", nameof(codec)),
             };
         }
@@ -625,30 +757,36 @@ internal static class ParquetFixtureBuilder
         var dataPage = new byte[header.Length + payload.Length];
         header.ToArray().CopyTo(dataPage, 0);
         payload.CopyTo(dataPage, header.Length);
+        var dataUncompressedLength = checked((long)header.Length + uncompressed.Length);
         if (dictionaryValues is null)
-            return new GeneratedPages(dataPage, 0, null);
+            return new GeneratedPages(dataPage, 0, null, dataUncompressedLength);
 
         var dictionaryPage = CreateDictionaryPage(
             dictionaryValues,
             physicalType,
             typeLength,
             dictionaryMode,
+            snappyCopyEncoding,
             codec,
             crcMode);
         if (dictionaryMode == FixtureDictionaryMode.DuplicateBeforeDataPage)
             return new GeneratedPages(
-                Combine(Combine(dictionaryPage, dictionaryPage), dataPage),
-                checked(dictionaryPage.Length * 2),
-                0);
+                Combine(Combine(dictionaryPage.Bytes, dictionaryPage.Bytes), dataPage),
+                checked(dictionaryPage.Bytes.Length * 2),
+                0,
+                checked(dictionaryPage.UncompressedLength * 2 + dataUncompressedLength));
         if (dictionaryMode == FixtureDictionaryMode.AfterDataPage)
-            return new GeneratedPages(Combine(dataPage, dictionaryPage), 0, dataPage.Length);
-        return new GeneratedPages(Combine(dictionaryPage, dataPage), dictionaryPage.Length, 0);
+            return new GeneratedPages(Combine(dataPage, dictionaryPage.Bytes), 0, dataPage.Length, checked(dataUncompressedLength + dictionaryPage.UncompressedLength));
+        if (dictionaryMode == FixtureDictionaryMode.UnadvertisedBeforeDataPage)
+            return new GeneratedPages(Combine(dictionaryPage.Bytes, dataPage), 0, null, checked(dataUncompressedLength + dictionaryPage.UncompressedLength));
+        return new GeneratedPages(Combine(dictionaryPage.Bytes, dataPage), dictionaryPage.Bytes.Length, 0, checked(dictionaryPage.UncompressedLength + dataUncompressedLength));
 
-        static byte[] CreateDictionaryPage(
+        static (byte[] Bytes, long UncompressedLength) CreateDictionaryPage(
         Array values,
         ParquetPhysicalType physicalType,
         int? typeLength,
         FixtureDictionaryMode dictionaryMode,
+        bool snappyCopyEncoding,
         ParquetCompressionCodec codec,
         FixtureCrcMode crcMode)
         {
@@ -663,7 +801,7 @@ internal static class ParquetFixtureBuilder
             var payload = codec switch
             {
                 ParquetCompressionCodec.Uncompressed => uncompressed,
-                ParquetCompressionCodec.Snappy => EncodeSnappyLiteral(uncompressed),
+                ParquetCompressionCodec.Snappy => EncodeSnappyPage(uncompressed, snappyCopyEncoding),
                 _ => throw new ArgumentException("The generated fixture supports only uncompressed and Snappy pages.", nameof(codec)),
             };
             var header = new CompactTestWriter();
@@ -689,28 +827,210 @@ internal static class ParquetFixtureBuilder
             var result = new byte[header.Length + payload.Length];
             header.ToArray().CopyTo(result, 0);
             payload.CopyTo(result, header.Length);
-            return result;
+            return (result, checked((long)header.Length + uncompressed.Length));
         }
 
         static byte[] EncodeDictionaryIndices(
         Array dictionary,
         int[]? indices,
-        int physicalCount)
+        int physicalCount,
+        bool coalesceRuns,
+        bool bitPacked,
+        bool trailingRun)
         {
             if (indices is null || indices.Length != physicalCount)
                 throw new ArgumentException("Dictionary fixtures require one index per physical value.", nameof(indices));
+            if (coalesceRuns && bitPacked)
+                throw new ArgumentException("Dictionary fixtures support only one index encoding shape.", nameof(bitPacked));
             var bitWidth = 0;
             for (var maximum = dictionary.Length - 1; maximum > 0; maximum >>= 1)
                 bitWidth++;
-            var byteWidth = (bitWidth + 7) / 8;
             var result = new List<byte> { checked((byte)bitWidth) };
-            foreach (var index in indices)
+            if (bitPacked)
             {
+                if (indices.Length != 0)
+                    EncodeBitPackedIndices(result, indices, bitWidth);
+            }
+            else
+            {
+                EncodeRleIndices(result, indices, bitWidth, coalesceRuns);
+            }
+            if (trailingRun)
+            {
+                // One unconsumed run exercises the trailing-index rejection.
                 result.Add(2);
-                for (var i = 0; i < byteWidth; i++)
-                    result.Add((byte)(index >> (8 * i)));
+                var trailingWidth = (bitWidth + 7) / 8;
+                for (var i = 0; i < trailingWidth; i++)
+                    result.Add(0);
             }
             return result.ToArray();
+        }
+
+        // Dictionary indices as RLE runs: singletons by default, coalesced
+        // repeats when the repeated-run shape is requested.
+        static void EncodeRleIndices(List<byte> result, int[] indices, int bitWidth, bool coalesceRuns)
+        {
+            var byteWidth = (bitWidth + 7) / 8;
+            var position = 0;
+            while (position < indices.Length)
+            {
+                var runLength = 1;
+                while (coalesceRuns &&
+                    position + runLength < indices.Length &&
+                    indices[position + runLength] == indices[position])
+                    runLength++;
+                WriteIndexVarUInt32(result, checked((uint)runLength << 1));
+                for (var i = 0; i < byteWidth; i++)
+                    result.Add((byte)(indices[position] >> (8 * i)));
+                position += runLength;
+            }
+        }
+
+        // Dictionary indices as one bit-packed run with a minimal zero-padded
+        // final group, matching the decoder padding contract.
+        static void EncodeBitPackedIndices(List<byte> result, int[] indices, int bitWidth)
+        {
+            var groupCount = checked((indices.Length + 7) / 8);
+            WriteIndexVarUInt32(result, checked(((uint)groupCount << 1) | 1u));
+            var dataStart = result.Count;
+            ulong buffer = 0;
+            var bufferedBits = 0;
+            foreach (var index in indices)
+            {
+                buffer |= (ulong)(uint)index << bufferedBits;
+                bufferedBits += bitWidth;
+                while (bufferedBits >= 8)
+                {
+                    result.Add((byte)buffer);
+                    buffer >>= 8;
+                    bufferedBits -= 8;
+                }
+            }
+            if (bufferedBits > 0)
+                result.Add((byte)buffer);
+            while (result.Count - dataStart < groupCount * bitWidth)
+                result.Add(0);
+        }
+
+        static void WriteIndexVarUInt32(List<byte> output, uint value)
+        {
+            while (value >= 0x80)
+            {
+                output.Add((byte)(value | 0x80));
+                value >>= 7;
+            }
+            output.Add((byte)value);
+        }
+
+        static byte[] EncodeSnappyPage(byte[] input, bool copyEncoding) =>
+            copyEncoding ? EncodeSnappyMixed(input) : EncodeSnappyLiteral(input);
+
+        // Test Snappy encoder emitting literals and back-reference copies: a
+        // greedy bigram-indexed matcher finds runs and repeats, so page
+        // payloads exercise the copy tags end to end. The first copy uses the
+        // four-byte tag whenever it fits, pinning that path as well.
+        static byte[] EncodeSnappyMixed(byte[] input)
+        {
+            var result = new List<byte>();
+            var lengthPrefix = (uint)input.Length;
+            while (lengthPrefix >= 0x80)
+            {
+                result.Add((byte)(lengthPrefix | 0x80));
+                lengthPrefix >>= 7;
+            }
+            result.Add((byte)lengthPrefix);
+            var lastOccurrence = new Dictionary<int, int>();
+            var literalStart = 0;
+            var position = 0;
+            var firstCopy = true;
+            while (position < input.Length)
+            {
+                var match = FindSnappyMatch(input, position, lastOccurrence);
+                if (match.Length < 4)
+                {
+                    if (position - literalStart == 60)
+                    {
+                        EmitSnappyLiterals(result, input, literalStart, position);
+                        literalStart = position;
+                    }
+                    IndexSnappyBigrams(input, position, position + 1, lastOccurrence);
+                    position++;
+                    continue;
+                }
+                EmitSnappyLiterals(result, input, literalStart, position);
+                var matchStart = position;
+                position = EmitSnappyCopy(result, position, match.Distance, match.Length, ref firstCopy);
+                IndexSnappyBigrams(input, matchStart, position, lastOccurrence);
+                literalStart = position;
+            }
+            EmitSnappyLiterals(result, input, literalStart, position);
+            return result.ToArray();
+        }
+
+        static (int Distance, int Length) FindSnappyMatch(byte[] input, int position, Dictionary<int, int> lastOccurrence)
+        {
+            if (position + 4 > input.Length)
+                return (0, 0);
+            if (!lastOccurrence.TryGetValue((input[position] << 8) | input[position + 1], out var candidate))
+                return (0, 0);
+            var distance = position - candidate;
+            if (distance <= 0 || distance > 65535)
+                return (0, 0);
+            var length = 0;
+            while (position + length < input.Length && input[candidate + length] == input[position + length])
+                length++;
+            return length >= 4 ? (distance, length) : (0, 0);
+        }
+
+        static void IndexSnappyBigrams(byte[] input, int start, int end, Dictionary<int, int> lastOccurrence)
+        {
+            for (var index = start; index + 1 < input.Length && index < end; index++)
+                lastOccurrence[(input[index] << 8) | input[index + 1]] = index;
+        }
+
+        static void EmitSnappyLiterals(List<byte> result, byte[] input, int start, int end)
+        {
+            while (start < end)
+            {
+                var chunk = Math.Min(60, end - start);
+                result.Add((byte)((chunk - 1) << 2));
+                for (var index = 0; index < chunk; index++)
+                    result.Add(input[start + index]);
+                start += chunk;
+            }
+        }
+
+        static int EmitSnappyCopy(List<byte> result, int position, int distance, int length, ref bool firstCopy)
+        {
+            while (length > 0)
+            {
+                var chunk = Math.Min(64, length);
+                if (length - chunk is > 0 and < 4)
+                    chunk = length - 4;
+                if (firstCopy)
+                {
+                    result.Add((byte)(((chunk - 1) << 2) | 3));
+                    result.Add((byte)distance);
+                    result.Add((byte)(distance >> 8));
+                    result.Add(0);
+                    result.Add(0);
+                    firstCopy = false;
+                }
+                else if (chunk <= 11 && distance <= 2047)
+                {
+                    result.Add((byte)(((chunk - 4) << 2) | ((distance >> 8) << 5) | 1));
+                    result.Add((byte)distance);
+                }
+                else
+                {
+                    result.Add((byte)(((chunk - 1) << 2) | 2));
+                    result.Add((byte)distance);
+                    result.Add((byte)(distance >> 8));
+                }
+                length -= chunk;
+                position += chunk;
+            }
+            return position;
         }
     }
 
@@ -877,7 +1197,7 @@ internal static class ParquetFixtureBuilder
         return ~crc;
     }
 
-    private readonly record struct GeneratedPages(byte[] Bytes, int DataPageOffset, int? DictionaryPageOffset);
+    private readonly record struct GeneratedPages(byte[] Bytes, int DataPageOffset, int? DictionaryPageOffset, long UncompressedLength);
 }
 
 internal enum CompactTestType : byte

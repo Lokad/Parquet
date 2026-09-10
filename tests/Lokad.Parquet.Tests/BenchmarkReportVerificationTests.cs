@@ -24,6 +24,8 @@ public static class BenchmarkReportQuartet
         var catalog = new JsonObject
         {
             ["pairedSchemaVersion"] = schemaVersion,
+            ["sourceRevision"] = sourceRevision,
+            ["packageLockHash"] = packageLockHash,
             ["cases"] = new JsonArray
             {
                 new JsonObject
@@ -74,23 +76,35 @@ public static class BenchmarkReportQuartet
                     ["rentedPoolCapacityBytes"] = 524544,
                     ["peakPooledBytes"] = 200000,
                     ["returnedPoolCapacityBytes"] = 524544,
-                    ["logicalOutputBytes"] = 100000,
+                    ["logicalOutputBytes"] = 262144,
                     ["sourceCopiedBytes"] = 524800,
                     ["endOfScanRetainedPoolBytes"] = 200000,
                     ["consumerUtf8CopiedBytes"] = 0,
                     ["pooledBytesCleared"] = 524544,
                     ["retainedPoolBytes"] = 0,
+                    ["physicalType"] = "int32",
+                    ["valueWidthBytes"] = 4,
+                    ["nullable"] = false,
+                    ["consumer"] = "int32",
+                    ["lokadLiveOwnedBytes"] = 300000,
+                    ["baselineLiveOwnedBytes"] = 400000,
                     ["passPeaks"] = new JsonArray
                     {
                         new JsonObject
                         {
                             ["peakPooledBytes"] = 200000,
-                            ["logicalOutputBytes"] = 100000,
+                            ["logicalOutputBytes"] = 262144,
+                            ["projection"] = new JsonArray(0),
+                            ["target"] = 65536,
+                            ["role"] = "cold-instrumented",
                         },
                         new JsonObject
                         {
                             ["peakPooledBytes"] = 150000,
-                            ["logicalOutputBytes"] = 100000,
+                            ["logicalOutputBytes"] = 262144,
+                            ["projection"] = new JsonArray(0),
+                            ["target"] = 4096,
+                            ["role"] = "warm-instrumented",
                         },
                     },
                 },
@@ -128,6 +142,32 @@ public static class BenchmarkReportQuartet
                 }
             }
         }
+        if (schemaVersion == 9 && census["cases"] is JsonArray schema9Cases)
+        {
+            // The schema-4 diagnostic case set is frozen alongside the paired
+            // catalog cases: every extra below carries fully consistent
+            // dimensions, denominators, pool accounting and pass evidence.
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "UnevenInt32Plain", "int32", 4, false, "multi-int32", 8192, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 8192), (new[] { 1 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NarrowInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt32RowRange", "int32", 4, false, "int32", 4096, 1, 0, 0, 4096, 15000, [(new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "SmallRowGroupsInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CompressibleInt32Snappy", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableBooleanPlain", "boolean", 1, true, "boolean", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "LowCardinalityStringDictionary", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt64Plain", "int64", 8, false, "int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredFloatPlain", "float", 4, false, "float", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredDoublePlain", "double", 8, false, "double", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt64Plain", "int64", 8, true, "nullable-int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableFixedByteArrayPlain", "fixed", 4, true, "fixed", 1000, 1, 0, null, null, 20000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableBinaryPlain", "binary", 0, true, "nullable-binary", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 10922));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt32V2", "int32", 4, false, "int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt32V2", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "HighCardinalityStringDictionary", "utf8", 0, false, "utf8", 65536, 1, 388776, null, null, 500000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 777552, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt32DenseNulls", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CrcInt64Dictionary", "int64", 8, false, "int64", 1000, 1, 0, null, null, 30000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CrcBinaryDictionarySnappy", "binary", 0, false, "binary", 1000, 1, 0, null, null, 30000, [(new[] { 1 }, 1000), (new[] { 1 }, 256)], 0, 8000));
+            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "MisalignedMultiPage", "int32", 4, false, "multi-int32", 2000, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 2000), (new[] { 0, 1 }, 128)], 0, 0));
+        }
         File.WriteAllText(Path.Combine(root, "census.json"), census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(
             Path.Combine(root, "BENCHMARKS.md"),
@@ -143,8 +183,8 @@ public static class BenchmarkReportQuartet
 
         void WritePaired(int index, string operatingSystem, string fingerprint, string affinity, DateTimeOffset start)
         {
-            var scan = Summarize(1010.0, 1000.0, 1000.0);
-            var meta = Summarize(1000.0, 1000.0, 1000.0);
+            var scan = Summarize(1010.0, 1000.0, 1000.0, legacyInterval);
+            var meta = Summarize(1000.0, 1000.0, 1000.0, legacyInterval);
             var snapshot = new JsonObject
             {
                 ["schemaVersion"] = schemaVersion,
@@ -240,38 +280,40 @@ public static class BenchmarkReportQuartet
             return observations;
         }
 
-        // Mirrors the report verifier operation for operation: sequential mean,
-        // squared deviations via Math.Pow, and the schema-selected quantile.
-        (double Point, double Upper) Summarize(double firstLokad, double secondLokad, double baseline)
+    }
+
+
+
+    // Mirrors the report verifier operation for operation: sequential mean,
+    // squared deviations via Math.Pow, and the schema-selected quantile.
+    internal static (double Point, double Upper) Summarize(double firstLokad, double secondLokad, double baseline, bool legacyInterval)
+    {
+        const int count = 400;
+        var sum = 0.0;
+        for (var index = 0; index < count; index++)
         {
-            const int count = 400;
-            var sum = 0.0;
-            for (var index = 0; index < count; index++)
-            {
-                var lokad = index % 2 == 0 ? firstLokad : secondLokad;
-                sum += Math.Log(lokad / baseline);
-            }
-
-            var mean = sum / count;
-            var squared = 0.0;
-            for (var index = 0; index < count; index++)
-            {
-                var lokad = index % 2 == 0 ? firstLokad : secondLokad;
-                squared += Math.Pow(Math.Log(lokad / baseline) - mean, 2);
-            }
-
-            var error = Math.Sqrt(squared / (count - 1)) / Math.Sqrt(count);
-            return (Math.Exp(mean), Math.Exp(mean + Quantile(count - 1) * error));
+            var lokad = index % 2 == 0 ? firstLokad : secondLokad;
+            sum += Math.Log(lokad / baseline);
         }
 
-        double Quantile(int degreesOfFreedom)
+        var mean = sum / count;
+        var squared = 0.0;
+        for (var index = 0; index < count; index++)
+        {
+            var lokad = index % 2 == 0 ? firstLokad : secondLokad;
+            squared += Math.Pow(Math.Log(lokad / baseline) - mean, 2);
+        }
+
+        var error = Math.Sqrt(squared / (count - 1)) / Math.Sqrt(count);
+
+        static double Quantile(int degreesOfFreedom, bool legacyInterval)
         {
             double[] exact =
             [
                 6.314, 2.920, 2.353, 2.132, 2.015, 1.943, 1.895, 1.860, 1.833, 1.812,
-                1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
-                1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697,
-            ];
+            1.796, 1.782, 1.771, 1.761, 1.753, 1.746, 1.740, 1.734, 1.729, 1.725,
+            1.721, 1.717, 1.714, 1.711, 1.708, 1.706, 1.703, 1.701, 1.699, 1.697,
+        ];
             if (degreesOfFreedom <= exact.Length)
                 return exact[degreesOfFreedom - 1];
             if (legacyInterval)
@@ -280,6 +322,117 @@ public static class BenchmarkReportQuartet
             var inverse = 1.0 / degreesOfFreedom;
             return z + (((z * z) + 1.0) * z) / 4.0 * inverse + ((((5.0 * z * z) + 16.0) * z * z * z) + (3.0 * z)) / 96.0 * inverse * inverse;
         }
+
+        return (Math.Exp(mean), Math.Exp(mean + Quantile(count - 1, legacyInterval) * error));
+    }
+
+    private static JsonObject DiagnosticCensusCase(
+        string fixtureHash,
+        string name,
+        string physicalType,
+        int valueWidthBytes,
+        bool nullable,
+        string consumer,
+        long rowCount,
+        int columnCount,
+        long utf8PayloadBytes,
+        long? rangeStart,
+        long? rangeCount,
+        long peakPerPass,
+        (int[] Projection, int Target)[] passes,
+        long utf8Copied,
+        long binaryPayload)
+    {
+        var slotWidth = physicalType switch
+        {
+            "boolean" => 1L,
+            "int32" => 4L,
+            "int64" => 8L,
+            "float" => 4L,
+            "double" => 8L,
+            "fixed" => valueWidthBytes,
+            "utf8" => 0L,
+            "binary" => 0L,
+            _ => throw new InvalidOperationException("The synthetic diagnostic layout is unknown."),
+        };
+        var logical = physicalType switch
+        {
+            "utf8" => utf8PayloadBytes + columnCount * (rowCount + 1) * 4,
+            "binary" => binaryPayload + columnCount * (rowCount + 1) * 4 + (nullable ? columnCount * ((rowCount + 7) / 8) : 0),
+            _ => rowCount * columnCount * slotWidth + (nullable ? columnCount * ((rowCount + 7) / 8) : 0),
+        };
+        var poolCapacity = Math.Max(200000L, peakPerPass);
+        var retainedIdle = Math.Min(1000L, peakPerPass);
+        var peaks = new JsonArray();
+        var roleIndex = 0;
+        foreach (var (projection, target) in passes)
+        {
+            var passLogical = physicalType switch
+            {
+                "utf8" => utf8PayloadBytes + projection.Length * (rowCount + 1) * 4,
+                "binary" => binaryPayload + projection.Length * (rowCount + 1) * 4 + (nullable ? projection.Length * ((rowCount + 7) / 8) : 0),
+                _ => rowCount * projection.Length * slotWidth + (nullable ? projection.Length * ((rowCount + 7) / 8) : 0),
+            };
+            peaks.Add(new JsonObject
+            {
+                ["peakPooledBytes"] = peakPerPass,
+                ["logicalOutputBytes"] = passLogical,
+                ["elapsedMilliseconds"] = 0.5 + roleIndex,
+                ["batchCount"] = 5,
+                ["allocatedBytes"] = 1000,
+                ["gen0Collections"] = 0,
+                ["gen1Collections"] = 0,
+                ["gen2Collections"] = 0,
+                ["projection"] = new JsonArray(projection.Select(static ordinal => (JsonNode)ordinal).ToArray()),
+                ["target"] = target,
+                ["role"] = roleIndex == 0 ? "cold-instrumented" : "warm-instrumented",
+            });
+            roleIndex++;
+        }
+
+        var entry = new JsonObject
+        {
+            ["name"] = name,
+            ["fixtureHash"] = fixtureHash,
+            ["fixtureBytes"] = 100000,
+            ["rowCount"] = rowCount,
+            ["columnCount"] = columnCount,
+            ["utf8PayloadBytes"] = utf8PayloadBytes,
+            ["sourceReadCalls"] = 4,
+            ["sourceBytesRead"] = 100000,
+            ["maximumConcurrentReads"] = 1,
+            ["publicBatches"] = 5,
+            ["decodedColumnBatches"] = 5,
+            ["totalMoves"] = 6,
+            ["synchronousMoves"] = 6,
+            ["poolRents"] = 4,
+            ["poolReturns"] = 4,
+            ["requestedPoolBytes"] = poolCapacity,
+            ["rentedPoolCapacityBytes"] = poolCapacity,
+            ["peakPooledBytes"] = peakPerPass,
+            ["returnedPoolCapacityBytes"] = poolCapacity,
+            ["logicalOutputBytes"] = logical,
+            ["sourceCopiedBytes"] = 100000,
+            ["endOfScanRetainedPoolBytes"] = retainedIdle,
+            ["consumerUtf8CopiedBytes"] = utf8Copied,
+            ["binaryPayloadBytes"] = binaryPayload,
+            ["pooledBytesCleared"] = poolCapacity,
+            ["retainedPoolBytes"] = 0,
+            ["physicalType"] = physicalType,
+            ["valueWidthBytes"] = valueWidthBytes,
+            ["nullable"] = nullable,
+            ["consumer"] = consumer,
+            ["lokadLiveOwnedBytes"] = 300000,
+            ["baselineLiveOwnedBytes"] = 400000,
+            ["passPeaks"] = peaks,
+        };
+        if (rangeStart.HasValue && rangeCount.HasValue)
+        {
+            entry["rowRangeStart"] = rangeStart.Value;
+            entry["rowRangeCount"] = rangeCount.Value;
+        }
+
+        return entry;
     }
 
     public static (int ExitCode, string Output) InvokeReport(string root, bool verify)
@@ -829,4 +982,333 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
             Directory.Delete(root, true);
         }
     }
+
+    [Fact]
+    public void CensusMissingPassPeaksIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0]).Remove("passPeaks");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("expected pass set", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusPassRemovedIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var peaks = Assert.IsType<JsonArray>(Assert.IsType<JsonObject>(cases[0])["passPeaks"]);
+            peaks.RemoveAt(1);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("expected pass set", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusDiagnosticCaseRemovedIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            cases.RemoveAt(cases.Count - 1);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("frozen case set", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusUnknownExtraCaseIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var clone = Assert.IsType<JsonObject>(JsonNode.Parse(Assert.IsType<JsonObject>(cases[0]).ToJsonString()));
+            clone["name"] = "UnknownExtraLane";
+            cases.Add(clone);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("frozen case set", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusZeroReadsIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var entry = Assert.IsType<JsonObject>(cases[0]);
+            entry["sourceReadCalls"] = 0;
+            entry["sourceBytesRead"] = 0;
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("source read evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusZeroReadsFailsGeneration()
+    {
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            var path = Path.Combine(root, "census.json");
+            var census = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var entry = Assert.IsType<JsonObject>(Assert.IsType<JsonArray>(census["cases"])[0]);
+            entry["sourceReadCalls"] = 0;
+            entry["sourceBytesRead"] = 0;
+            File.WriteAllText(path, census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("source read evidence", outcome.Output);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void CensusNegativeCounterIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0])["requestedPoolBytes"] = -1;
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("invalid requestedPoolBytes evidence", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusLayoutIdentityChangedIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0])["physicalType"] = "boolean";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("census layout", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusConsumerChangedIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0])["consumer"] = "int33";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("unknown consumer identity", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusPassProjectionMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var peaks = Assert.IsType<JsonArray>(Assert.IsType<JsonObject>(cases[0])["passPeaks"]);
+            Assert.IsType<JsonObject>(peaks[0]).Remove("projection");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its projection", outcome.Output);
+    }
+
+    [Fact]
+    public void CatalogIdentityMismatchIsRejected()
+    {
+        var outcome = VerifyAfterCatalogMutation(_quartets.V9Root, static catalog =>
+        {
+            catalog["sourceRevision"] = "different-revision";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("catalog has a different source revision", outcome.Output);
+    }
+
+    [Fact]
+    public void CatalogIdentityMissingIsRejected()
+    {
+        var outcome = VerifyAfterCatalogMutation(_quartets.V9Root, static catalog =>
+        {
+            catalog.Remove("sourceRevision");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("does not record its source identity", outcome.Output);
+    }
+
+    [Fact]
+    public void FailedScanLaneRendersTruthfullyAndFailsGeneration()
+    {
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            FailScanLane(root, "PreopenedScan/RequiredInt32Plain", 1.2);
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("parity claim fails on PreopenedScan/RequiredInt32Plain", outcome.Output);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| FAIL |", document);
+            Assert.Contains("Parity claim (upper 95% bound no greater than 1.05 on every pre-opened scan lane): FAIL (PreopenedScan/RequiredInt32Plain)", document);
+            Assert.Contains("| pass |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailedScanLaneVerifyFailsWithoutWriting()
+    {
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            FailScanLane(root, "PreopenedScan/RequiredInt32Plain", 1.2);
+            var generated = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, generated.ExitCode);
+            var before = File.ReadAllBytes(Path.Combine(root, "BENCHMARKS.md"));
+            var outcome = RunVerify(root);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("parity claim fails", outcome.Output);
+            Assert.Equal(before, File.ReadAllBytes(Path.Combine(root, "BENCHMARKS.md")));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailedWarmLaneDoesNotFailClaim()
+    {
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            FailScanLane(root, "WarmMetadataOpen", 1.3);
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.Equal(0, outcome.ExitCode);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("Parity claim (upper 95% bound no greater than 1.05 on every pre-opened scan lane): PASS", document);
+            Assert.Contains("accepted parity limitation", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void TamperedEvidenceRejectedInGenerationMode()
+    {
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            var path = Path.Combine(root, "paired-0.json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            var target = Assert.IsType<JsonObject>(cases[0]);
+            var observations = Assert.IsType<JsonArray>(target["observations"]);
+            var first = Assert.IsType<JsonObject>(observations[0]);
+            var stored = Assert.IsAssignableFrom<JsonValue>(first["logRatio"]).GetValue<double>();
+            first["logRatio"] = stored + 0.5;
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var before = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("does not match its raw timings", outcome.Output);
+            Assert.Equal(before, File.ReadAllText(Path.Combine(root, "BENCHMARKS.md")));
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void ReportTablesRenderRecordedFields()
+    {
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.Equal(0, outcome.ExitCode);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| Workload | Lokad mean B/obs | Parquet.NET mean B/obs | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 |", document);
+            Assert.Contains("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output |", document);
+            Assert.Contains("| Case | Layout | Nullable | Consumer | Range | Lokad live B | Baseline live B | Lokad retained | Baseline retained | End-scan retained | Retained |", document);
+            Assert.Contains("cold-instrumented", document);
+            Assert.Contains("int32/4", document);
+            Assert.Contains("300000", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    private static void FailScanLane(string root, string caseName, double factor)
+    {
+        for (var index = 0; index < 4; index++)
+        {
+            var path = Path.Combine(root, "paired-" + index + ".json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            JsonObject? found = null;
+            foreach (var entry in cases)
+            {
+                var candidate = Assert.IsType<JsonObject>(entry);
+                if (string.Equals(candidate["name"]?.GetValue<string>(), caseName, StringComparison.Ordinal))
+                    found = candidate;
+            }
+
+            var target = Assert.IsType<JsonObject>(found);
+            var observations = Assert.IsType<JsonArray>(target["observations"]);
+            var first = Assert.IsType<JsonObject>(observations[0]);
+            var second = Assert.IsType<JsonObject>(observations[1]);
+            var firstLokad = Assert.IsAssignableFrom<JsonValue>(first["lokadNanoseconds"]).GetValue<double>() * factor;
+            var secondLokad = Assert.IsAssignableFrom<JsonValue>(second["lokadNanoseconds"]).GetValue<double>() * factor;
+            var baseline = Assert.IsAssignableFrom<JsonValue>(first["parquetNetNanoseconds"]).GetValue<double>();
+            foreach (var entry in observations)
+            {
+                var observation = Assert.IsType<JsonObject>(entry);
+                var scaled = Assert.IsAssignableFrom<JsonValue>(observation["lokadNanoseconds"]).GetValue<double>() * factor;
+                var reference = Assert.IsAssignableFrom<JsonValue>(observation["parquetNetNanoseconds"]).GetValue<double>();
+                observation["lokadNanoseconds"] = scaled;
+                observation["logRatio"] = Math.Log(scaled / reference);
+            }
+
+            var summary = BenchmarkReportQuartet.Summarize(firstLokad, secondLokad, baseline, false);
+            target["pointRatio"] = summary.Point;
+            target["upper95Ratio"] = summary.Upper;
+            target["passed"] = summary.Upper <= 1.05;
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+
+
+    private static (int ExitCode, string Output) VerifyAfterCatalogMutation(string source, Action<JsonObject> mutate)
+    {
+        var root = CopyQuartet(source);
+        try
+        {
+            var path = Path.Combine(root, "catalog.json");
+            var catalog = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            mutate(catalog);
+            File.WriteAllText(path, catalog.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            return RunVerify(root);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+
 }
+
+

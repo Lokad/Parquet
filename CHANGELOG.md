@@ -73,7 +73,7 @@
 - Bind every benchmark worker to one logical processor from an explicit
   affinity handoff, resolve workspace links against the Linux mount table
   instead of /mnt prefixes, and persist host tuning plus output storage in
-  schema-9 paired and schema-3 census snapshots.
+  schema-9 paired and schema-4 census snapshots.
 - Freeze explicit benchmark endpoints: equivalent bulk consumers for engine
   comparisons with a labeled public-accessor diagnostic, a custom-source
   source-I/O lane, labeled consumer-only probes, and a pinned endpoint catalog
@@ -86,8 +86,8 @@
 - Extend the work census with narrow-projection, small-row-range, many-row-group,
   low-cardinality dictionary, compressible Snappy, and nullable-boolean lanes,
   recording per-pass time, batch counts, managed allocation, and GC counts in
-  schema-4 snapshots. CRC-bearing pages remain unmeasured: no available
-  producer emits them.
+  schema-4 snapshots. CRC-bearing pages are measured through committed producer
+  fixtures and dedicated dictionary lanes with page-CRC validation.
 
 ## 0.1.0 - 2026-09-02
 

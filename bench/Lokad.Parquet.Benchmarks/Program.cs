@@ -80,7 +80,13 @@ if (args.Contains("--catalog", StringComparer.Ordinal))
         .Select(static workload => new { name = "PreopenedScan/" + workload.ToString(), label = ScanWorkloadCatalog.Labels[workload] })
         .Append(new { name = "WarmMetadataOpen", label = "Warm metadata open" })
         .ToArray();
-    var catalog = new { pairedSchemaVersion = PairedParityRunner.SnapshotSchemaVersion, cases = catalogCases };
+    var catalog = new
+    {
+        pairedSchemaVersion = PairedParityRunner.SnapshotSchemaVersion,
+        sourceRevision = Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+        packageLockHash = Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+        cases = catalogCases,
+    };
     Directory.CreateDirectory(Path.Combine("artifacts", "benchmarks"));
     var catalogPath = Path.Combine("artifacts", "benchmarks", "parity-catalog.json");
     await using (var catalogOutput = File.Create(catalogPath))

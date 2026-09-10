@@ -5,18 +5,6 @@ using System.Reflection;
 
 public sealed class ScanCancellationTests
 {
-    private static readonly Type PoolType =
-        (typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetArrayPool") ??
-        throw new InvalidOperationException("The internal pool facade was not found."));
-
-    private static readonly PropertyInfo RentObserverProperty =
-        (PoolType.GetProperty("RentObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool rent observer was not found."));
-
-    private static readonly PropertyInfo ReturnObserverProperty =
-        (PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool return observer was not found."));
-
     [Theory]
     [InlineData((int)ParquetPhysicalType.Int32)]
     [InlineData((int)ParquetPhysicalType.ByteArray)]
@@ -87,33 +75,28 @@ public sealed class ScanCancellationTests
     {
         // Cancelling when the decoded definition-level buffer is returned must surface
         // at the pre-publication boundary instead of yielding an already cancelled batch.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         Array? levelArray = null;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
+        PoolTracker.SetObservers(
+            (array, requested) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
+            outstanding.NoteRent(array);
 
             if (array is int[] && requested == 3)
             {
                 levelArray = array;
             }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
+        },
+        (array, _) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
+            outstanding.NoteReturn(array);
 
             if (ReferenceEquals(array, levelArray))
             {
                 cancellation.Cancel();
             }
-        }));
+        });
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateInt32(new()
@@ -130,11 +113,10 @@ public sealed class ScanCancellationTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]
@@ -144,28 +126,23 @@ public sealed class ScanCancellationTests
         // rents on this path are the second cursor emission and then the two projected
         // copies, so cancelling on the third lands inside the last copy, after every
         // earlier check on that path, and only the pre-publication boundary observes it.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         var copyRents = 0;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
+        PoolTracker.SetObservers(
+            (array, requested) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
+            outstanding.NoteRent(array);
 
             if (array is int[] && requested == 2 && ++copyRents == 3)
             {
                 cancellation.Cancel();
             }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
+        },
+        (array, _) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            outstanding.NoteReturn(array);
+        });
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
@@ -182,11 +159,10 @@ public sealed class ScanCancellationTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]
@@ -213,29 +189,24 @@ public sealed class ScanCancellationTests
         // Disposing the file from inside the last projected copy rent means the
         // resulting cancellation surfaces after every earlier check on that path.
         // It must surface as a file-disposal error rather than a user cancellation.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         var copyRents = 0;
         ParquetFile? file = null;
         Task disposeTask = Task.CompletedTask;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
+        PoolTracker.SetObservers(
+            (array, requested) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
+            outstanding.NoteRent(array);
 
             if (array is int[] && requested == 2 && ++copyRents == 3 && file is not null)
             {
                 disposeTask = file.DisposeAsync().AsTask();
             }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
+        },
+        (array, _) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            outstanding.NoteReturn(array);
+        });
         try
         {
             byte[] bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
@@ -254,11 +225,10 @@ public sealed class ScanCancellationTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]
@@ -321,29 +291,24 @@ public sealed class ScanCancellationTests
         // through the dictionary, data, emission, or publication checks, and every
         // rented array is still released. The exact firing point is an implementation
         // detail; this guards mid-decode injection for dictionary work.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         var fired = false;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
+        PoolTracker.SetObservers(
+            (array, requested) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
+            outstanding.NoteRent(array);
 
             if (array is int[] && requested == 2001 && !fired)
             {
                 fired = true;
                 cancellation.Cancel();
             }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
+        },
+        (array, _) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            outstanding.NoteReturn(array);
+        });
         try
         {
             var entries = new byte[2000][];
@@ -370,11 +335,10 @@ public sealed class ScanCancellationTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     [Fact]
@@ -384,29 +348,24 @@ public sealed class ScanCancellationTests
         // level, value, bitmap, emission, or publication checks with every rented
         // array released. The exact firing point is an implementation detail; this
         // guards mid-decode injection for binary work.
-        var outstanding = new Dictionary<Array, int>(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         var fired = false;
-        RentObserverProperty.SetValue(null, (Action<Array, int>)((array, requested) =>
+        PoolTracker.SetObservers(
+            (array, requested) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Add(array, array.Length);
-            }
+            outstanding.NoteRent(array);
 
             if (array is int[] && requested == 20000 && !fired)
             {
                 fired = true;
                 cancellation.Cancel();
             }
-        }));
-        ReturnObserverProperty.SetValue(null, (Action<Array, int>)((array, _) =>
+        },
+        (array, _) =>
         {
-            lock (outstanding)
-            {
-                outstanding.Remove(array);
-            }
-        }));
+            outstanding.NoteReturn(array);
+        });
         try
         {
             var physical = new byte[20000][];
@@ -426,11 +385,10 @@ public sealed class ScanCancellationTests
         }
         finally
         {
-            RentObserverProperty.SetValue(null, null);
-            ReturnObserverProperty.SetValue(null, null);
+            PoolTracker.ClearObservers();
         }
 
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
     }
 
     private static readonly Func<ReadOnlySpan<byte>, CancellationToken, uint> ComputeCrc32 = GetCrc32Method();

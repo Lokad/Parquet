@@ -15,7 +15,8 @@ public sealed class ParquetFile : IAsyncDisposable
     private readonly ParquetSourceOwnership _sourceOwnership;
     private readonly ParquetScanMemoryBudget _scanMemoryBudget;
     private readonly PooledArrayOwnerCache<byte> _pagePayloadCache;
-    private readonly IDisposable?[] _columnValueCaches;
+    private readonly ColumnCacheProvider _cacheProvider;
+    private readonly IColumnValueCache?[] _columnValueCaches;
     private readonly object _lifetimeLock = new();
     private CancellationTokenSource? _disposeCancellation;
     private Action? _activeScan;
@@ -34,7 +35,8 @@ public sealed class ParquetFile : IAsyncDisposable
         _sourceOwnership = sourceOwnership;
         _scanMemoryBudget = new ParquetScanMemoryBudget(options.MaximumScanPooledBytes);
         _pagePayloadCache = new PooledArrayOwnerCache<byte>(_scanMemoryBudget);
-        _columnValueCaches = new IDisposable?[metadata.Schema.Columns.Count];
+        _cacheProvider = new ColumnCacheProvider(this);
+        _columnValueCaches = new IColumnValueCache?[metadata.Schema.Columns.Count];
         Options = options;
         Metadata = metadata;
         Length = source.Length;
@@ -49,13 +51,13 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <summary>Gets the reader options captured while opening.</summary>
     public ParquetReaderOptions Options { get; }
 
-    /// <summary>Creates the file's single active asynchronous projected scan.</summary>
+    /// <summary>Describes the file's single asynchronous projected scan; the lane is acquired at enumeration, not here.</summary>
     /// <param name="options">Projection, row selection, and batching options.</param>
     /// <returns>An asynchronous sequence whose current batch must be disposed before advancing.</returns>
     public IAsyncEnumerable<ParquetBatch> ScanAsync(ParquetScanOptions options) =>
         ScanAsync(options, CancellationToken.None);
 
-    /// <summary>Creates the file's single active asynchronous projected scan.</summary>
+    /// <summary>Describes the file's single asynchronous projected scan; the lane is acquired at enumeration, not here.</summary>
     /// <param name="options">Projection, row selection, and batching options.</param>
     /// <param name="cancellationToken">Cancellation observed throughout the scan.</param>
     /// <returns>An asynchronous sequence whose current batch must be disposed before advancing.</returns>
@@ -411,9 +413,15 @@ public sealed class ParquetFile : IAsyncDisposable
             _columnValueCaches[column.Ordinal] = created;
             return created.Rent(length);
         }
-        if (existing is not PooledArrayOwnerCache<T> cache)
-            throw new InvalidOperationException("A column value cache has an inconsistent physical type.");
-        return cache.Rent(length);
+        return existing.Rent<T>(length);
+    }
+
+    internal IColumnValueCacheProvider CacheProvider => _cacheProvider;
+
+    private sealed class ColumnCacheProvider(ParquetFile file) : IColumnValueCacheProvider
+    {
+        public PooledArrayOwner<T> RentColumnValues<T>(ParquetColumn column, int length) =>
+            file.RentColumnValues<T>(column, length);
     }
 
     // Releases idle arrays retained by file-owned caches for columns outside the
@@ -432,8 +440,7 @@ public sealed class ParquetFile : IAsyncDisposable
         {
             if (IsKept(keepOrdinals, sorted, ordinal))
                 continue;
-            if (_columnValueCaches[ordinal] is IEvictableArrayCache cache)
-                cache.EvictIdle();
+            _columnValueCaches[ordinal]?.EvictIdle();
         }
 
         static bool IsKept(ReadOnlySpan<int> keepOrdinals, int[]? sorted, int ordinal)
@@ -569,16 +576,33 @@ public sealed class ParquetFile : IAsyncDisposable
             {
                 return await pendingOpening.ConfigureAwait(false);
             }
-            catch
+            catch (Exception openFailure)
             {
-                await source.DisposeAsync().ConfigureAwait(false);
-                throw;
+                try
+                {
+                    await source.DisposeAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best-effort cleanup preserves the primary open failure.
+                }
+
+                ExceptionDispatchInfo.Capture(openFailure).Throw();
+                throw new UnreachableException();
             }
         }
 
         async ValueTask<ParquetFile> DisposeAfterSynchronousFailureAsync(Exception exception)
         {
-            await source.DisposeAsync().ConfigureAwait(false);
+            try
+            {
+                await source.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort cleanup preserves the primary open failure.
+            }
+
             ExceptionDispatchInfo.Capture(exception).Throw();
             throw new UnreachableException();
         }
@@ -598,45 +622,14 @@ public sealed class ParquetFile : IAsyncDisposable
 
         ValueTask ReadInputExactlyAsync(
             long offset,
-            ArraySegment<byte> destination)
-        {
-            ValueTask read;
-            try
-            {
-                read = source.ReadExactlyAsync(offset, destination, cancellationToken);
-            }
-            catch (EndOfStreamException exception)
-            {
-                throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
-            }
-            if (read.IsCompletedSuccessfully)
-            {
-                try
-                {
-                    read.GetAwaiter().GetResult();
-                }
-                catch (EndOfStreamException exception)
-                {
-                    throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
-                }
-
-                return ValueTask.CompletedTask;
-            }
-
-            return AwaitReadAsync(read);
-
-            async ValueTask AwaitReadAsync(ValueTask pendingRead)
-            {
-                try
-                {
-                    await pendingRead.ConfigureAwait(false);
-                }
-                catch (EndOfStreamException exception)
-                {
-                    throw new ParquetFormatException("The immutable input ended during an exact read.", exception, ParquetErrorLocation.AtOffset(offset));
-                }
-            }
-        }
+            ArraySegment<byte> destination) =>
+            ScanPageReader.ReadExactlyAsync(
+                source,
+                cancellationToken,
+                offset,
+                destination,
+                "The immutable input ended during an exact read.",
+                ParquetErrorLocation.AtOffset(offset));
 
         var boundaries = new byte[12];
         var leading = new ArraySegment<byte>(boundaries, 0, 4);
@@ -717,3 +710,7 @@ public sealed class ParquetFile : IAsyncDisposable
     }
 
 }
+
+
+
+

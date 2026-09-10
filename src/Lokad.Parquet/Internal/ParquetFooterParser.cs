@@ -971,7 +971,7 @@ internal static class ParquetFooterParser
             var elements = new ParquetSchemaElement[wire.Length];
             var columnStorage = new ParquetColumn[wire.Length - 1];
             var columnCount = 0;
-            var stack = new SchemaFrame[wire.Length];
+            var stack = new SchemaFrame[Math.Min(wire.Length, options.MaximumThriftDepth + 1)];
             var stackCount = 0;
             var rootAnnotation = ResolveAnnotation(root);
             elements[0] = BuildElement(root, 0, null, [], rootAnnotation, 0, 0);
@@ -1010,6 +1010,11 @@ internal static class ParquetFooterParser
                 var annotation = ResolveAnnotation(current);
                 var element = BuildElement(current, i, parent.ElementOrdinal, path, annotation, definitionLevel, repetitionLevel);
                 elements[i] = element;
+
+                if (isLeaf &&
+                    element.PhysicalType == ParquetPhysicalType.FixedLengthByteArray &&
+                    element.TypeLength is null or <= 0)
+                    throw new ParquetFormatException("A FIXED_LEN_BYTE_ARRAY schema element has a missing or invalid type length.", ParquetErrorLocation.AtOffset(footerOffset));
 
                 if (isLeaf)
                 {

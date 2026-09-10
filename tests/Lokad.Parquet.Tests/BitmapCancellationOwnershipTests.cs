@@ -4,18 +4,6 @@ using System.Reflection;
 
 public sealed class BitmapCancellationOwnershipTests
 {
-    private static readonly Type PoolType =
-        typeof(ParquetFile).Assembly.GetType("Lokad.Parquet.Internal.ParquetArrayPool") ??
-        throw new InvalidOperationException("The internal pool facade was not found.");
-
-    private static readonly PropertyInfo RentObserverProperty =
-        PoolType.GetProperty("RentObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool rent observer was not found.");
-
-    private static readonly PropertyInfo ReturnObserverProperty =
-        PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static) ??
-        throw new InvalidOperationException("The internal pool return observer was not found.");
-
     private static readonly PropertyInfo ScanBudgetProperty =
         typeof(ParquetFile).GetProperty("ScanMemoryBudget", BindingFlags.NonPublic | BindingFlags.Instance) ??
         throw new InvalidOperationException("The scan memory budget was not found.");
@@ -73,23 +61,17 @@ public sealed class BitmapCancellationOwnershipTests
     {
         // A pre-cancelled token must surface before any rent, so the pool stays balanced.
         object budget = CreateBudget(1024L * 1024L);
-        Dictionary<Array, int> outstanding = new(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         int rents = 0;
-        SetObservers(
+        PoolTracker.SetObservers(
             (array, _) =>
             {
                 rents++;
-                lock (outstanding)
-                {
-                    outstanding.Add(array, array.Length);
-                }
+                outstanding.NoteRent(array);
             },
             (array, _) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Remove(array);
-                }
+                outstanding.NoteReturn(array);
             });
         try
         {
@@ -101,12 +83,12 @@ public sealed class BitmapCancellationOwnershipTests
             });
             Assert.IsType<OperationCanceledException>(exception.InnerException);
             Assert.Equal(0, rents);
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
             AssertBudgetBalanced(budget);
         }
         finally
         {
-            ClearObservers();
+            PoolTracker.ClearObservers();
         }
     }
 
@@ -115,16 +97,13 @@ public sealed class BitmapCancellationOwnershipTests
     {
         // Cancelling from the rent observer lands between the rent and the first periodic check.
         object budget = CreateBudget(1024L * 1024L);
-        Dictionary<Array, int> outstanding = new(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using CancellationTokenSource cancellation = new();
         bool triggered = false;
-        SetObservers(
+        PoolTracker.SetObservers(
             (array, requested) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Add(array, array.Length);
-                }
+                outstanding.NoteRent(array);
 
                 if (array is byte[] && requested == 375)
                 {
@@ -134,10 +113,7 @@ public sealed class BitmapCancellationOwnershipTests
             },
             (array, _) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Remove(array);
-                }
+                outstanding.NoteReturn(array);
             });
         try
         {
@@ -147,12 +123,12 @@ public sealed class BitmapCancellationOwnershipTests
             });
             Assert.IsType<OperationCanceledException>(exception.InnerException);
             Assert.True(triggered);
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
             AssertBudgetBalanced(budget);
         }
         finally
         {
-            ClearObservers();
+            PoolTracker.ClearObservers();
         }
     }
 
@@ -161,21 +137,15 @@ public sealed class BitmapCancellationOwnershipTests
     {
         // An over range slice must still release the rented destination.
         object budget = CreateBudget(1024L * 1024L);
-        Dictionary<Array, int> outstanding = new(ReferenceEqualityComparer.Instance);
-        SetObservers(
+        var outstanding = new PoolOutstandingArrays();
+        PoolTracker.SetObservers(
             (array, _) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Add(array, array.Length);
-                }
+                outstanding.NoteRent(array);
             },
             (array, _) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Remove(array);
-                }
+                outstanding.NoteReturn(array);
             });
         try
         {
@@ -183,27 +153,24 @@ public sealed class BitmapCancellationOwnershipTests
             {
                 InvokeCopySlice(new byte[1], 0, 16, budget, CancellationToken.None);
             });
-            Assert.Empty(outstanding);
+            Assert.True(outstanding.IsEmpty);
             AssertBudgetBalanced(budget);
         }
         finally
         {
-            ClearObservers();
+            PoolTracker.ClearObservers();
         }
     }
 
     private static async Task AssertDecodeCancellationBalancedAsync(byte[] bytes, int cancelAtSmallRent, int targetBatchRowCount)
     {
-        Dictionary<Array, int> outstanding = new(ReferenceEqualityComparer.Instance);
+        var outstanding = new PoolOutstandingArrays();
         using CancellationTokenSource cancellation = new();
         int smallRents = 0;
-        SetObservers(
+        PoolTracker.SetObservers(
             (array, requested) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Add(array, array.Length);
-                }
+                outstanding.NoteRent(array);
 
                 if (array is byte[] && requested == 1)
                 {
@@ -216,10 +183,7 @@ public sealed class BitmapCancellationOwnershipTests
             },
             (array, _) =>
             {
-                lock (outstanding)
-                {
-                    outstanding.Remove(array);
-                }
+                outstanding.NoteReturn(array);
             });
         object? budget = null;
         try
@@ -232,11 +196,11 @@ public sealed class BitmapCancellationOwnershipTests
         }
         finally
         {
-            ClearObservers();
+            PoolTracker.ClearObservers();
         }
 
         Assert.Equal(cancelAtSmallRent, smallRents);
-        Assert.Empty(outstanding);
+        Assert.True(outstanding.IsEmpty);
         AssertBudgetBalanced(budget ?? throw new InvalidOperationException("The scan budget was not captured."));
     }
 
@@ -286,15 +250,4 @@ public sealed class BitmapCancellationOwnershipTests
         Assert.Equal(0L, Assert.IsType<long>(retainedField.GetValue(budget)));
     }
 
-    private static void SetObservers(Action<Array, int> onRent, Action<Array, int> onReturn)
-    {
-        RentObserverProperty.SetValue(null, onRent);
-        ReturnObserverProperty.SetValue(null, onReturn);
-    }
-
-    private static void ClearObservers()
-    {
-        RentObserverProperty.SetValue(null, null);
-        ReturnObserverProperty.SetValue(null, null);
-    }
 }

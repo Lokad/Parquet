@@ -1,6 +1,6 @@
 namespace Lokad.Parquet.Benchmarks;
 
-// Frozen benchmark-endpoint catalog (B05). Every BenchmarkDotNet benchmark
+// Frozen benchmark-endpoint catalog: every BenchmarkDotNet benchmark
 // method belongs to exactly one endpoint, and BenchmarkEndpointTests pins that
 // coverage in both directions, so a new or relabeled benchmark cannot silently
 // join a claim. PipelineEvidence marks full read pipelines; checksum-only
@@ -40,6 +40,8 @@ public static class BenchmarkEndpoints
         new("source-io", "Open and scan from a source", nameof(SourceScanBenchmarks), nameof(SourceScanBenchmarks.MemoryStream), true),
         new("source-io", "Open and scan from a source", nameof(SourceScanBenchmarks), nameof(SourceScanBenchmarks.LocalFile), true),
         new("source-io", "Open and scan from a source", nameof(SourceScanBenchmarks), nameof(SourceScanBenchmarks.CustomSource), true),
+        new("source-io", "Baseline open and scan from a source", nameof(SourceScanBenchmarks), nameof(SourceScanBenchmarks.BaselineFile), true),
+        new("source-io", "Baseline open and scan from a source", nameof(SourceScanBenchmarks), nameof(SourceScanBenchmarks.BaselineStream), true),
         new("decoder-codec", "Decoder and codec kernels", nameof(PlainInt32KernelBenchmarks), nameof(PlainInt32KernelBenchmarks.Decode), false),
         new("decoder-codec", "Decoder and codec kernels", nameof(SnappyCodecBenchmarks), nameof(SnappyCodecBenchmarks.Decode), false),
     ];
