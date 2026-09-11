@@ -451,6 +451,19 @@ if ($censusSchema -eq 4) {
         "The work census does not match the frozen case set."
     Assert-ReportCondition (@(Compare-Object $expectedCensusNames $actualCensusNames).Count -eq 0) `
         "The work census does not match the frozen case set."
+    Assert-ReportCondition ((-not [string]::IsNullOrEmpty($census.packageLockHash)) -and ($census.packageLockHash -ne "unrecorded")) `
+        "The work census does not record its package identity."
+    Assert-ReportCondition ($census.packageLockHash -eq $packageLocks[0]) `
+        "The work census has a different package-lock hash."
+    Assert-ReportCondition (-not [string]::IsNullOrEmpty($census.runnerFingerprint)) `
+        "The work census is missing its runner fingerprint."
+    if ($census.operatingSystem -like "*Windows*") { $censusPeerRuns = $windowsRuns }
+    elseif ($census.operatingSystem -like "*Linux*") { $censusPeerRuns = $linuxRuns }
+    else { $censusPeerRuns = @() }
+    Assert-ReportCondition ($censusPeerRuns.Count -gt 0) `
+        "The work census runs on an unknown operating system."
+    Assert-ReportCondition ($census.runnerFingerprint -eq $censusPeerRuns[0].runnerFingerprint) `
+        "The work census runner fingerprint does not match its paired sessions."
 }
 
 $censusBudgetFailures = @()

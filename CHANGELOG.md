@@ -117,6 +117,9 @@
   expected passes; the census run reconciles every measured case against it, the parity catalog
   exports it, and the report reconciles snapshots against the export while unfamiliar workloads
   fail instead of defaulting.
+- Fingerprint every benchmark build input including the linked fixture builder and committed
+  fixtures, record the census package lock and both-assemblies runner fingerprint, restore
+  locked for qualification, and reconcile all identities in the report.
 
 ## 0.1.0 - 2026-09-02
 

@@ -74,8 +74,10 @@ public static class BenchmarkReportQuartet
             ["recordedAtUtc"] = recorded.ToString("o"),
             ["sourceRevision"] = sourceRevision,
             ["runtime"] = "synthetic-runtime",
-            ["operatingSystem"] = "synthetic-os",
+            ["operatingSystem"] = "Microsoft Windows 10.0.26100",
             ["architecture"] = "X64",
+            ["packageLockHash"] = packageLockHash,
+            ["runnerFingerprint"] = "synthetic-windows-fingerprint",
             ["cases"] = new JsonArray
             {
                 new JsonObject
@@ -1205,6 +1207,61 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
         });
         Assert.NotEqual(0, outcome.ExitCode);
         Assert.Contains("unknown consumer identity", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusLockMismatchIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            census["packageLockHash"] = "different-lock";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("has a different package-lock hash", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusLockMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            Assert.IsType<JsonObject>(census).Remove("packageLockHash");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("does not record its package identity", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusFingerprintMismatchIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            census["runnerFingerprint"] = "different-runner";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("runner fingerprint does not match its paired sessions", outcome.Output);
+    }
+
+    [Fact]
+    public void CensusFingerprintMissingIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            Assert.IsType<JsonObject>(census).Remove("runnerFingerprint");
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("missing its runner fingerprint", outcome.Output);
+    }
+
+    [Fact]
+    public void PairedFingerprintMismatchIsRejected()
+    {
+        var outcome = VerifyAfterRunMutation(_quartets.V9Root, 1, static target =>
+        {
+            target["runnerFingerprint"] = "different-runner";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("different runner fingerprints", outcome.Output);
     }
     [Fact]
     public void CensusZeroReadsIsRejected()

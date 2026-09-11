@@ -767,6 +767,8 @@ internal static class WorkCensusRunner
             BenchmarkHostPolicy.GetTieredPgo(),
             outputEvidence.ResolvedPath,
             outputEvidence.FileSystem,
+            PairedParityRunner.GetRunnerFingerprint(),
+            Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
             results);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ??
             throw new InvalidOperationException("The work-census output has no directory."));
@@ -1795,6 +1797,8 @@ internal sealed record WorkCensusSnapshot(
     string TieredPgo,
     string ResolvedOutputPath,
     string OutputFileSystem,
+    string RunnerFingerprint,
+    string PackageLockHash,
     IReadOnlyList<WorkCensusCase> Cases);
 
 

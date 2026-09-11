@@ -11,6 +11,7 @@ $project = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/Lokad.Parquet
 $benchmarkDll = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/bin/Release/net10.0/Lokad.Parquet.Benchmarks.dll"
 
 Push-Location $PSScriptRoot
+. (Join-Path $PSScriptRoot "bench/benchmark-identity.ps1")
 try {
     $headRevision = (& git rev-parse --verify HEAD 2>$null)
     $hasHeadRevision = $LASTEXITCODE -eq 0 -and $headRevision
@@ -19,37 +20,7 @@ try {
         $sourceRevision = $headRevision
     }
     else {
-        $identityPaths = @(& git ls-files --cached --others --exclude-standard 2>$null) |
-            Where-Object {
-                $_ -eq "Directory.Build.props" -or
-                $_ -eq "global.json" -or
-                $_ -eq "bench.ps1" -or
-                $_.StartsWith("src/", [StringComparison]::Ordinal) -or
-                $_.StartsWith("bench/", [StringComparison]::Ordinal)
-            } |
-            Sort-Object
-        $hasher = [Security.Cryptography.IncrementalHash]::CreateHash(
-            [Security.Cryptography.HashAlgorithmName]::SHA256)
-        try {
-            foreach ($relativePath in $identityPaths) {
-                $normalizedPath = $relativePath.Replace('\', '/')
-                $hasher.AppendData([Text.Encoding]::UTF8.GetBytes($normalizedPath))
-                $hasher.AppendData([byte[]] @(0))
-                $fullPath = Join-Path $PSScriptRoot $relativePath
-                if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
-                    $hasher.AppendData([byte[]] @(1))
-                    $hasher.AppendData([IO.File]::ReadAllBytes($fullPath))
-                }
-                else {
-                    $hasher.AppendData([byte[]] @(0))
-                }
-                $hasher.AppendData([byte[]] @(0))
-            }
-            $fingerprint = [Convert]::ToHexString($hasher.GetHashAndReset()).ToLowerInvariant()
-        }
-        finally {
-            $hasher.Dispose()
-        }
+        $fingerprint = Get-BenchmarkSourceFingerprint -RepositoryRoot $PSScriptRoot
         $sourceRevision = if ($hasHeadRevision) {
             "$headRevision-dirty-$fingerprint"
         }
@@ -87,7 +58,7 @@ try {
         }
     }
 
-    & dotnet restore $project --tl:off -v minimal
+    & dotnet restore $project --locked-mode --tl:off -v minimal
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

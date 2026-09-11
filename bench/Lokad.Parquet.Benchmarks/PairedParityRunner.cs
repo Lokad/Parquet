@@ -87,6 +87,16 @@ internal static class PairedParityRunner
         Console.WriteLine($"Parity catalog: {Path.GetFullPath(catalogPath)}");
         return 0;
     }
+    // The runner fingerprint binds the measured executable bytes: the benchmark
+    // assembly together with the measured library assembly, so two assemblies
+    // built from different inputs never share an identity.
+    internal static string GetRunnerFingerprint()
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        hash.AppendData(File.ReadAllBytes(Assembly.GetExecutingAssembly().Location));
+        hash.AppendData(File.ReadAllBytes(typeof(ParquetFile).Assembly.Location));
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
     public static async Task<int> RunAsync(string[] arguments)
     {
         var enforce = arguments.Contains("--paired-enforce", StringComparer.Ordinal);
@@ -298,11 +308,7 @@ internal static class PairedParityRunner
                 $"paired-{platform}-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json");
         }
 
-        static string GetRunnerFingerprint()
-        {
-            var path = Assembly.GetExecutingAssembly().Location;
-            return Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(path)));
-        }
+
 
         void WriteSessionMetadata(string status, string? failure, int? exitStatus, DateTimeOffset? finishedAt)
         {
