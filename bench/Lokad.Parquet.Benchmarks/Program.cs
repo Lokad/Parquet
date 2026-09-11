@@ -83,6 +83,8 @@ if (args.Contains("--paired", StringComparer.Ordinal))
     return await PairedParityRunner.RunAsync(args);
 if (args.Contains("--census", StringComparer.Ordinal))
     return await WorkCensusRunner.RunAsync();
+if (args.Contains("--census-smoke", StringComparer.Ordinal))
+    return await WorkCensusRunner.RunSmokeAsync();
 var hasExplicitJob = args.Any(static argument =>
     string.Equals(argument, "--job", StringComparison.Ordinal) ||
     argument.StartsWith("--job=", StringComparison.Ordinal));

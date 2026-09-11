@@ -47,6 +47,13 @@ jobs:
         shell: pwsh
         run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --tl:off --no-launch-profile -- --verify-truth
 
+      # Q01: the full census orchestration (every case, retention probe and
+      # catalog reconciliation) with one retention repetition and no timing
+      # gates; the smoke snapshot lands in temp and never qualifies.
+      - name: Census smoke orchestration
+        shell: pwsh
+        run: ./bench.ps1 -Suite CensusSmoke
+
       - name: Package
         shell: pwsh
         run: ./pack.ps1

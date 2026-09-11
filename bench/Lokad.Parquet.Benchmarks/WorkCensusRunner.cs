@@ -28,15 +28,29 @@ internal static class WorkCensusRunner
         PoolType.GetProperty("ReturnObserver", BindingFlags.Public | BindingFlags.Static)
         ?? throw new InvalidOperationException("The internal pool return observer is unavailable.");
 
-    public static async Task<int> RunAsync()
+    public static Task<int> RunAsync() => RunCensusAsync(16, CensusOutputPath(false));
+
+    // Q01 public-validation smoke: the same orchestration with one retention
+    // repetition instead of sixteen. Truth, pool-balance and catalog checks are
+    // unchanged; only repeat timing is reduced, and the snapshot lands in an
+    // isolated temp directory so smoke evidence can never qualify as a campaign.
+    public static Task<int> RunSmokeAsync() => RunCensusAsync(1, CensusOutputPath(true));
+
+    private static string CensusOutputPath(bool smoke)
     {
+        var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
+        var leaf = "work-census-" + platform + "-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + ".json";
+        if (smoke)
+            return Path.Combine(Path.GetTempPath(), "lokad-census-smoke-" + Guid.NewGuid().ToString("N"), leaf);
+        return Path.Combine("artifacts", "benchmarks", leaf);
+    }
+
+    private static async Task<int> RunCensusAsync(int retentionRepetitions, string outputPath)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(retentionRepetitions);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
         var sessionId = Guid.NewGuid();
         var sessionStartedAt = DateTimeOffset.UtcNow;
-        var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
-        var outputPath = Path.Combine(
-            "artifacts",
-            "benchmarks",
-            "work-census-" + platform + "-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + ".json");
         var session = BeginCensusSession(outputPath, sessionId, sessionStartedAt);
         var snapshotParent = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ??
             throw new InvalidOperationException("The work-census output has no directory.");
@@ -60,7 +74,7 @@ internal static class WorkCensusRunner
         try
         {
             foreach (var workload in ScanWorkloadCatalog.ParityWorkloads)
-                await RunCensusCaseAsync(() => MeasureAsync(workload));
+                await RunCensusCaseAsync(() => MeasureAsync(workload, retentionRepetitions));
             {
                 // Uneven multi-row-group case: the catalog writer emits one page per
                 // column chunk, so uneven batch partitioning is covered here with a
@@ -82,7 +96,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
                     [new CensusPassSpec([0, 1], firstGroupRows + secondGroupRows),
                      new CensusPassSpec([1], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Narrow projection in a wide schema: one column of eight at the
@@ -102,7 +116,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                     [new CensusPassSpec([0], RowCount),
                      new CensusPassSpec([1], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Caller-selected small row range: the oracle covers exactly the
@@ -128,7 +142,7 @@ internal static class WorkCensusRunner
                     ScanWorkload.RequiredInt32Plain,
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                     [new CensusPassSpec([0], rangeCount)],
-                    new ParquetRowRange(rangeStart, rangeCount)));
+                    new ParquetRowRange(rangeStart, rangeCount), retentionRepetitions));
             }
             {
                 // Many small row groups stand in for many small pages, with page
@@ -150,7 +164,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                     [new CensusPassSpec([0], smallGroups * smallGroupRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Highly compressible Snappy lane: zeros exercise copy-heavy
@@ -181,7 +195,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                     [new CensusPassSpec([0], RowCount),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Optional non-INT32 lane: nullable booleans carry their own workload
@@ -202,7 +216,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Boolean, 1, true, CensusConsumer.Boolean),
                     [new CensusPassSpec([0], booleanRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Minimal dictionary cardinality with maximal reuse: two values
@@ -223,7 +237,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
                     [new CensusPassSpec([0], dictionaryRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
 
             {
@@ -264,7 +278,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
                     [new CensusPassSpec([0], wideRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 const int wideRows = 65536;
@@ -302,7 +316,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Float, sizeof(float), false, CensusConsumer.Float),
                     [new CensusPassSpec([0], wideRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 const int wideRows = 65536;
@@ -340,7 +354,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Double, sizeof(double), false, CensusConsumer.Double),
                     [new CensusPassSpec([0], wideRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
 
             {
@@ -392,7 +406,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), true, CensusConsumer.NullableInt64),
                     [new CensusPassSpec([0], nullableInt64Rows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Dense nulls: every other row is null, stressing definition-level
@@ -444,7 +458,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
                     [new CensusPassSpec([0], denseRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // High dictionary cardinality: 16,384 distinct values over the full
@@ -502,7 +516,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
                     [new CensusPassSpec([0], highCardRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
 
             {
@@ -531,7 +545,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                     [new CensusPassSpec([0], v2Rows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 const int nullableV2Rows = 65536;
@@ -573,7 +587,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
                     [new CensusPassSpec([0], nullableV2Rows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Nullable variable-width binary: optional BYTE_ARRAY pages with null
@@ -625,7 +639,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, true, CensusConsumer.NullableBinary),
                     [new CensusPassSpec([0], binaryRows),
                      new CensusPassSpec([0], 4096)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // Real multi-page misalignment within one row group: the two columns
@@ -666,7 +680,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
                     [new CensusPassSpec([0, 1], misalignedRows),
                      new CensusPassSpec([0, 1], 128)],
-                    null));
+                    null, retentionRepetitions));
             }
 
             {
@@ -695,7 +709,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
                     [new CensusPassSpec([0], plainTruth.RowCount),
                      new CensusPassSpec([0], 256)],
-                    null));
+                    null, retentionRepetitions));
                 var snappyChecksumBytes = await File.ReadAllBytesAsync(Path.Combine(
                     repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "rle-dict-snappy-checksum.parquet"));
                 var snappyTruth = await EstablishCommittedTruthAsync(
@@ -714,7 +728,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, false, CensusConsumer.Binary),
                     [new CensusPassSpec([1], snappyTruth.RowCount),
                      new CensusPassSpec([1], 256)],
-                    null));
+                    null, retentionRepetitions));
                 var fixedBytes = await File.ReadAllBytesAsync(Path.Combine(
                     repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "fixed_length_byte_array.parquet"));
                 var fixedTruth = await EstablishCommittedTruthAsync(
@@ -739,7 +753,7 @@ internal static class WorkCensusRunner
                     new CensusCaseLayout(CensusPhysicalType.FixedLengthByteArray, 4, true, CensusConsumer.Fixed),
                     [new CensusPassSpec([0], fixedTruth.RowCount),
                      new CensusPassSpec([0], 256)],
-                    null));
+                    null, retentionRepetitions));
             }
             {
                 // The static catalog is load-bearing: every measured case resolves
@@ -816,7 +830,7 @@ internal static class WorkCensusRunner
             return 1;
         }
 
-        static async Task<WorkCensusCase> MeasureAsync(ScanWorkload workload)
+        static async Task<WorkCensusCase> MeasureAsync(ScanWorkload workload, int retentionRepetitions)
         {
             var fixture = await ScanFixture.CreateAsync(workload, RowCount);
             return await MeasureCustomAsync(
@@ -833,7 +847,7 @@ internal static class WorkCensusRunner
                 CensusCaseLayout.ForCatalogLane(workload),
                 [new CensusPassSpec(Enumerable.Range(0, fixture.ColumnCount).ToArray(), RowCount),
                  new CensusPassSpec(Enumerable.Range(fixture.ColumnCount / 2, fixture.ColumnCount - fixture.ColumnCount / 2).ToArray(), 4096)],
-                null);
+                null, retentionRepetitions);
         }
 
         // Two-value dictionary over the full row count: minimal cardinality with
@@ -945,7 +959,8 @@ internal static class WorkCensusRunner
             ScanWorkload workload,
             CensusCaseLayout layout,
             IReadOnlyList<CensusPassSpec> passSpecs,
-            ParquetRowRange? rowRange)
+            ParquetRowRange? rowRange,
+            int retentionRepetitions)
         {
             using var stream = new CountingMemoryStream(fixtureBytes);
             await using var file = await ParquetFile.OpenAsync(stream);
@@ -1091,11 +1106,11 @@ internal static class WorkCensusRunner
             var lokadLive = await LiveSessionRetention.MeasureLokadAsync(
                 fixtureBytes, retentionOrdinals, passSpecs[0].Target,
                 rowRange?.Start, rowRange?.Count, rowCount, utf8PayloadBytes, workload,
-                retentionExpected, columnHashes, nullCounts, 16, name);
+                retentionExpected, columnHashes, nullCounts, retentionRepetitions, name);
             var baselineLive = await LiveSessionRetention.MeasureBaselineAsync(
                 fixtureBytes, retentionOrdinals,
                 rowRange?.Start, rowRange?.Count, rowCount, utf8PayloadBytes, workload,
-                retentionExpected, 16, name);
+                retentionExpected, retentionRepetitions, name);
             return new WorkCensusCase(
                     name,
                     Convert.ToHexStringLower(SHA256.HashData(fixtureBytes)),

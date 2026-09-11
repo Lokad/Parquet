@@ -248,6 +248,8 @@ public sealed class SafetyPolicyTests
                 "independent Parquet.NET materialization benchmark operation",
             ["Lokad.Parquet.Benchmarks.WorkCensusRunner.RunAsync"] =
                 "command-line runner entry point",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.RunSmokeAsync"] =
+                "command-line smoke-runner entry point for public validation",
             ["Lokad.Parquet.Benchmarks.WorkCensusRunner+CountingMemoryStream.Reset"] =
                 "explicit source-measurement boundary",
             ["Lokad.Parquet.Internal.ParquetScanEnumerable.PreflightSelectedChunks"] =

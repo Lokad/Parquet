@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Core", "Utf8", "Parity", "Paired", "Census", "Catalog", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
+    [ValidateSet("Core", "Utf8", "Parity", "Paired", "Census", "CensusSmoke", "Catalog", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
     [string] $Suite = "Core",
     [string] $Filter = "",
     [string] $PairedCase = "",
@@ -105,6 +105,14 @@ try {
 
     if ($Suite -eq "Census") {
         & dotnet $benchmarkDll --census @scalarArguments
+        exit $LASTEXITCODE
+    }
+
+    # Q01 public-validation smoke: the full census orchestration with one
+    # retention repetition. Truth, pool-balance and catalog checks are unchanged;
+    # the snapshot lands in an isolated temp directory and never qualifies.
+    if ($Suite -eq "CensusSmoke") {
+        & dotnet $benchmarkDll --census-smoke
         exit $LASTEXITCODE
     }
 
