@@ -40,7 +40,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 throw new ParquetUnsupportedFeatureException(
                     column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(column.Ordinal));
             ValidateTargetBatchRowCount(_file, _options);
-            return new ScanPlan(column, BuildRowGroups(_file, _options));
+            var rowGroups = BuildRowGroups(_file, _options);
+            // Same upfront policy as the projected coordinator: metadata-known
+            // chunk failures surface here, before any rows or payload reads.
+            PreflightSelectedChunks(_file, rowGroups, [columnOrdinal]);
+            return new ScanPlan(column, rowGroups);
         }
 
         var plan = BuildPlan();
@@ -131,6 +135,10 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         return plans;
     }
 
+    // Metadata-only support check for one selected column chunk: external and
+    // encrypted chunks plus codecs outside uncompressed/Snappy are rejected.
+    // No payload is read; corruption discovered during decoding still surfaces
+    // mid-scan with page identity.
     internal static void PreflightChunk(ParquetFile file, ParquetRowGroup rowGroup, int columnOrdinal)
     {
         var chunk = rowGroup.Columns[columnOrdinal];
@@ -145,6 +153,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 "This scan path currently requires an uncompressed or Snappy column chunk.", ParquetErrorLocation.AtRowGroupColumn(rowGroup.Ordinal, columnOrdinal));
     }
 
+    // Runs once at enumeration start, before any cursor, registration, or cache
+    // work: the projected coordinator calls it from its enumerator constructor
+    // and the single-column plan calls it from BuildPlan. Only selected chunks
+    // of selected row groups are checked, so excluded groups, empty selections,
+    // and unselected columns never fail here.
     internal static void PreflightSelectedChunks(ParquetFile file, ScanRowGroup[] rowGroups, int[] ordinalsInProjectionOrder)
     {
         foreach (var plan in rowGroups)

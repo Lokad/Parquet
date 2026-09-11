@@ -119,6 +119,13 @@ internal sealed class FixtureBinaryColumn
     public ParquetCompressionCodec FooterCodec { get; init; } = ParquetCompressionCodec.Uncompressed;
 }
 
+internal sealed class FixtureRowGroupFooter
+{
+    public ParquetCompressionCodec Codec { get; init; } = ParquetCompressionCodec.Uncompressed;
+    public string? ExternalFilePath { get; init; }
+    public bool HasCryptoMetadata { get; init; }
+}
+
 internal static class ParquetFixtureBuilder
 {
     private static ReadOnlySpan<byte> Magic => "PAR1"u8;
@@ -550,8 +557,16 @@ internal static class ParquetFixtureBuilder
         });
     }
 
-    public static byte[] CreateRequiredInt32RowGroups(int[][] rowGroups)
+    public static byte[] CreateRequiredInt32RowGroups(int[][] rowGroups) =>
+        CreateRequiredInt32RowGroupsCore(rowGroups, null);
+
+    public static byte[] CreateRequiredInt32RowGroups(int[][] rowGroups, FixtureRowGroupFooter[] footers) =>
+        CreateRequiredInt32RowGroupsCore(rowGroups, footers);
+
+    private static byte[] CreateRequiredInt32RowGroupsCore(int[][] rowGroups, FixtureRowGroupFooter[]? footers)
     {
+        if (footers is not null && footers.Length != rowGroups.Length)
+            throw new ArgumentException("Per-group footer overrides must cover every row group.", nameof(footers));
         if (rowGroups.Length == 0)
             throw new ArgumentException("A generated fixture needs at least one row group.", nameof(rowGroups));
 
@@ -612,6 +627,8 @@ internal static class ParquetFixtureBuilder
                 footer.ListField(ref rowGroup, 1, CompactTestType.Struct, 1, () =>
                 {
                     short chunk = 0;
+                    if (footers?[capturedOrdinal]?.ExternalFilePath is string externalPath)
+                        footer.StringField(ref chunk, 1, externalPath);
                     footer.Int64Field(ref chunk, 2, chunkOffsets[capturedOrdinal]);
                     footer.StructField(ref chunk, 3, () =>
                     {
@@ -619,13 +636,15 @@ internal static class ParquetFixtureBuilder
                         footer.Int32Field(ref metadata, 1, (int)ParquetPhysicalType.Int32);
                         footer.Int32ListField(ref metadata, 2, [(int)ParquetEncoding.Plain]);
                         footer.StringListField(ref metadata, 3, ["value"]);
-                        footer.Int32Field(ref metadata, 4, (int)ParquetCompressionCodec.Uncompressed);
+                        footer.Int32Field(ref metadata, 4, (int)(footers?[capturedOrdinal]?.Codec ?? ParquetCompressionCodec.Uncompressed));
                         footer.Int64Field(ref metadata, 5, rowGroups[capturedOrdinal].Length);
                         footer.Int64Field(ref metadata, 6, chunks[capturedOrdinal].Length);
                         footer.Int64Field(ref metadata, 7, chunks[capturedOrdinal].Length);
                         footer.Int64Field(ref metadata, 9, chunkOffsets[capturedOrdinal]);
                         footer.Stop();
                     });
+                    if (footers?[capturedOrdinal]?.HasCryptoMetadata is true)
+                        footer.StructField(ref chunk, 8, footer.Stop);
                     footer.Stop();
                 });
                 footer.Int64Field(ref rowGroup, 2, chunks[capturedOrdinal].Length);

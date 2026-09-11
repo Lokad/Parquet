@@ -225,6 +225,90 @@ public sealed class ScanPreflightTests
     }
 
     [Fact]
+    public async Task SingleColumnLaterGroupUnsupportedCodecRejectedBeforeAnyPayloadRead()
+    {
+        var rejected = await RejectSingleColumnLaterGroupAsync(new FixtureRowGroupFooter { Codec = ParquetCompressionCodec.Gzip });
+        Assert.Equal(1, rejected.Exception.RowGroupOrdinal);
+        Assert.Equal(0, rejected.Exception.ColumnOrdinal);
+        Assert.Equal(rejected.ReadsAfterOpen, rejected.ReadsAfterScan);
+    }
+
+    [Fact]
+    public async Task SingleColumnLaterGroupExternalChunkRejectedBeforeAnyPayloadRead()
+    {
+        var rejected = await RejectSingleColumnLaterGroupAsync(new FixtureRowGroupFooter { ExternalFilePath = "external.parquet" });
+        Assert.Equal(1, rejected.Exception.RowGroupOrdinal);
+        Assert.Equal(0, rejected.Exception.ColumnOrdinal);
+        Assert.Equal(rejected.ReadsAfterOpen, rejected.ReadsAfterScan);
+    }
+
+    [Fact]
+    public async Task SingleColumnLaterGroupEncryptedChunkRejectedBeforeAnyPayloadRead()
+    {
+        var rejected = await RejectSingleColumnLaterGroupAsync(new FixtureRowGroupFooter { HasCryptoMetadata = true });
+        Assert.Equal(1, rejected.Exception.RowGroupOrdinal);
+        Assert.Equal(0, rejected.Exception.ColumnOrdinal);
+        Assert.Equal(rejected.ReadsAfterOpen, rejected.ReadsAfterScan);
+    }
+    private static async Task<(ParquetUnsupportedFeatureException Exception, int ReadsAfterOpen, int ReadsAfterScan)> RejectSingleColumnLaterGroupAsync(
+        FixtureRowGroupFooter second)
+    {
+        using var tracker = new PoolTracker();
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32RowGroups(
+            [[1, 2], [3, 4]],
+            [new FixtureRowGroupFooter(), second]);
+        var source = new SizedCountingSource(bytes);
+        await using var file = await ParquetFile.OpenAsync(source);
+        var readsAfterOpen = source.Sizes.Count;
+        var exception = Assert.Throws<ParquetUnsupportedFeatureException>(() =>
+            file.ScanAsync(new([file.Metadata.Schema.Columns[0]])).GetAsyncEnumerator());
+        return (exception, readsAfterOpen, source.Sizes.Count);
+    }
+    [Fact]
+    public async Task SingleColumnExcludedGroupScansExactly()
+    {
+        using var tracker = new PoolTracker();
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32RowGroups(
+            [[1, 2], [3, 4]],
+            [new FixtureRowGroupFooter(), new FixtureRowGroupFooter { Codec = ParquetCompressionCodec.Gzip }]);
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        await using var enumerator = file.ScanAsync(new(
+            [file.Metadata.Schema.Columns[0]],
+            [file.Metadata.RowGroups[0]],
+            null,
+            64)).GetAsyncEnumerator();
+        var collected = new List<int>();
+        while (await enumerator.MoveNextAsync())
+        {
+            using var batch = enumerator.Current;
+            collected.AddRange(Assert.IsType<ParquetPrimitiveColumnBatch<int>>(batch.Columns[0]).Values.ToArray());
+        }
+
+        Assert.Equal([1, 2], collected);
+    }
+
+    [Fact]
+    public async Task SingleColumnEmptySelectionIgnoresUnsupportedGroup()
+    {
+        using var tracker = new PoolTracker();
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32RowGroups(
+            [[1, 2], [3, 4]],
+            [new FixtureRowGroupFooter(), new FixtureRowGroupFooter { Codec = ParquetCompressionCodec.Gzip }]);
+        await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
+        await using var emptyGroups = file.ScanAsync(new(
+            [file.Metadata.Schema.Columns[0]],
+            [],
+            null,
+            64)).GetAsyncEnumerator();
+        Assert.False(await emptyGroups.MoveNextAsync());
+        await using var emptyRange = file.ScanAsync(new(
+            [file.Metadata.Schema.Columns[0]],
+            null,
+            new ParquetRowRange(0, 0),
+            64)).GetAsyncEnumerator();
+        Assert.False(await emptyRange.MoveNextAsync());
+    }
+    [Fact]
     public async Task CancelledPreflightBalancesPools()
     {
         using var tracker = new PoolTracker();

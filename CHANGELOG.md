@@ -6,6 +6,8 @@
 
 - Correct slicing of all-valid optional INT32 pages and validate batch-size
   limits consistently for single-column and multi-column scans.
+- Reject metadata-known unsupported column chunks during scan planning instead of
+  mid-scan, for single-column as well as projected scans.
 - Dispose owned streams exactly once when adapter construction fails, preserving
   the primary error; caller-owned streams stay untouched. Ownership transfers after
   argument validation.
