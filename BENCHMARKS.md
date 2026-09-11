@@ -124,9 +124,11 @@ Stage attribution on the required-INT32 fixture (203-byte footer) puts the cost
 in footer parsing: byte-range reads about 0.6 microseconds, Thrift decode with
 validation and immutable metadata construction about 3.2 microseconds, file
 teardown about 0.3 microseconds (in-process medians; the `MetadataOpenBenchmarks`
-stage benchmarks keep each stage reproducible). The gap is fixed validation
-overhead, not scaling: the eight-column open already favors Lokad.Parquet over
-the baseline in the same suite. All validation is preserved; closing the
+stage benchmarks keep each stage reproducible). These medians locate cost but do
+not establish the gap: both readers validate, and allocation-reducing variants
+have left the paired WarmMetadataOpen endpoint unchanged or regressed it, so
+neither a validation-overhead nor a scaling story is established. All validation
+is preserved; closing the
 remaining gap would mean micro-optimizing validated parsing, which stays open
 as future work rather than a silent relaxation. The B08 campaign re-measures
 this lane from fresh sessions on both platforms.
@@ -241,11 +243,12 @@ vector path.
   encodings, object serialization, or broad Parquet compatibility.
 - Windows and Linux results remain separate; no cross-machine average is used.
 - Every qualifying process is restricted to one logical processor. Linux
-  sessions run from a WSL-native ext4 workspace, never a Windows-mounted path
-  such as `/mnt/c`, so host-filesystem mediation cannot distort the result. On
-  Linux the benchmark entry point rejects `/mnt/`-prefixed workspace paths outright, the
-  CPU model is collected from `/proc/cpuinfo`, and `bench.ps1` records the CPU
-  scaling governor instead of a Windows power scheme.
+  sessions run from a WSL-native ext4 workspace, never a Windows-backed mount,
+  so host-filesystem mediation cannot distort the result. On Linux the benchmark
+  entry point resolves links to a final path and rejects Windows-backed mounts
+  wherever they appear (mount-table verdict, longest-prefix match); a native mount
+  is accepted even under `/mnt`. The CPU model is collected from `/proc/cpuinfo`,
+  and `bench.ps1` records the CPU scaling governor instead of a Windows power scheme.
 
 ## Scope difference
 
@@ -276,10 +279,11 @@ chosen paired snapshots and one census into this file, or verify an existing
 reconciliation, without measuring:
 
 The reconciler takes the workload catalog exported by the benchmark binary, so
-the catalog lives in exactly one place. It recomputes each point estimate from
-the retained observations, re-derives the gate outcomes, and checks fixture and
-dimension identity across sessions and the census; only the interval width
-itself stays with the runner. Every session must report Windows or Linux.
+the catalog lives in exactly one place. It recomputes each point estimate and each
+upper 95% bound from the retained raw observations and rejects any stored value
+that differs bit-for-bit, re-derives the gate outcomes, and checks fixture and
+dimension identity across sessions and the census; only the raw observations
+themselves stay with the runner. Every session must report Windows or Linux.
 
 ```powershell
 .\bench.ps1 -Suite Catalog
