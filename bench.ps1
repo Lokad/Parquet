@@ -121,12 +121,14 @@ try {
         exit $LASTEXITCODE
     }
 
-    # Space-separated patterns become one --filter flag each so suites like
-    # ColdOpen can exclude diagnostic benchmarks while sharing the class.
-    $filterArguments = @()
-    foreach ($pattern in $Filter.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) { $filterArguments += @('--filter', $pattern) }
-    & dotnet $benchmarkDll @filterArguments @scalarArguments
-    exit $LASTEXITCODE
+    # The entry point accepts one --filter flag per invocation, so
+    # multi-pattern suites like ColdOpen run once per pattern and keep
+    # excluding diagnostic benchmarks while sharing the class.
+    foreach ($pattern in $Filter.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) {
+        & dotnet $benchmarkDll --filter $pattern @scalarArguments
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    exit 0
 }
 finally {
     Pop-Location
