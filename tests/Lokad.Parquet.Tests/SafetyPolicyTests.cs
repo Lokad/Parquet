@@ -314,6 +314,14 @@ public sealed class SafetyPolicyTests
                 "primitive dictionary expansion shared by the five fixed-width layouts",
             ["Lokad.Parquet.Internal.RleBitPackedHybridDecoder.Decode"] =
                 "RLE/bit-packed hybrid index decoder behind the dictionary expansion boundary",
+            ["Lokad.Parquet.Internal.ParquetArrayPool.Rent"] =
+                "shared pooled array rent behind the reservation boundary",
+            ["Lokad.Parquet.Internal.ParquetScanMemoryBudget.NoteTransientAttempt"] =
+                "transient pool attempt accounting behind the reservation boundary",
+            ["Lokad.Parquet.Internal.ParquetScanMemoryBudget.ThrowIfMinimumExceedsRemaining"] =
+                "minimum rent footprint check behind the reservation boundary",
+            ["Lokad.Parquet.Internal.ParquetScanMemoryBudget.Reserve"] =
+                "pooled byte reservation behind the reservation boundary",
             ["Lokad.Parquet.Internal.ParquetScanEnumerable+ColumnCursor.DecodePagePayloadAsync"] =
                 "page payload acquisition behind the cursor progression boundary",
             ["Lokad.Parquet.Internal.ParquetScanEnumerable+ColumnCursor.DecodeCompressedV2Payload"] =

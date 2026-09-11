@@ -140,6 +140,8 @@
   integer levels, eliding all-valid bitmaps and removing the int-level pipeline.
 - Validate each page header once into an explicit checked plan consumed by post-payload
   dispatch instead of re-deriving and re-validating it.
+- Share one pooled-rent reservation policy between direct and cached rents, rejecting
+  unmeasurable element layouts before renting.
 - Separate page payload acquisition (borrow or rent, CRC, decompression) from cursor
   progression behind an explicit ownership-transferring decode method.
 

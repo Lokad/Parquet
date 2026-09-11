@@ -23,20 +23,23 @@ internal sealed class PooledArrayOwner<T> : IDisposable
 
     internal static readonly int ElementByteSize;
 
+    private static readonly bool HasMeasurableLayout;
+
     static PooledArrayOwner()
     {
         // Safe managed element measurement without Unsafe or Marshal: one short-lived
-        // single-element array, computed once per element type. Shipped rents use
-        // primitive element types; any other layout falls back to one byte, which keeps
-        // the pre-rent check a sound lower bound while actual bucket capacity remains
-        // enforced after the rent.
+        // single-element array, computed once per element type. Layouts that
+        // Buffer.ByteLength cannot measure are rejected before renting instead of
+        // failing after the rent with a leaked array.
         try
         {
             ElementByteSize = Math.Max(Buffer.ByteLength(System.Array.CreateInstance(typeof(T), 1)), 1);
+            HasMeasurableLayout = true;
         }
         catch (ArgumentException)
         {
             ElementByteSize = 1;
+            HasMeasurableLayout = false;
         }
     }
 
@@ -48,6 +51,25 @@ internal sealed class PooledArrayOwner<T> : IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfNegative(length);
         var minimumLength = Math.Max(length, 1);
+        var (array, retainedBytes) = AcquireReserved(minimumLength, budget);
+        try
+        {
+            return new PooledArrayOwner<T>(array, length, budget, retainedBytes, null);
+        }
+        catch
+        {
+            ReturnAndRelease(array, budget, retainedBytes);
+            throw;
+        }
+    }
+
+    // Shared new-array acquisition behind both rent paths: minimum-capacity
+    // check, pooled rent, capacity measurement, transient accounting, reservation
+    // and rollback. Unsupported element layouts fail here before renting.
+    internal static (T[] Array, int RetainedBytes) AcquireReserved(int minimumLength, ParquetScanMemoryBudget budget)
+    {
+        if (!HasMeasurableLayout)
+            throw new InvalidOperationException($"Pooled arrays of {typeof(T)} have no measurable byte layout.");
         budget.ThrowIfMinimumExceedsRemaining(checked((long)minimumLength * ElementByteSize));
         var array = ParquetArrayPool.Rent<T>(minimumLength);
         var retainedBytes = Buffer.ByteLength(array);
@@ -62,7 +84,7 @@ internal sealed class PooledArrayOwner<T> : IDisposable
         {
             budget.Reserve(retainedBytes);
             reserved = true;
-            return new PooledArrayOwner<T>(array, length, budget, retainedBytes, null);
+            return (array, retainedBytes);
         }
         catch
         {
@@ -169,20 +191,9 @@ internal sealed class PooledArrayOwnerCache<T> : IColumnValueCache
         if (undersized is not null)
             PooledArrayOwner<T>.ReturnAndRelease(undersized, _budget, undersizedBytes);
 
-        _budget.ThrowIfMinimumExceedsRemaining(checked((long)minimumLength * PooledArrayOwner<T>.ElementByteSize));
-        var array = ParquetArrayPool.Rent<T>(minimumLength);
-        var bytes = Buffer.ByteLength(array);
-        _budget.NoteTransientAttempt(bytes);
-        if (bytes > _budget.MaximumBytes)
-        {
-            ParquetArrayPool.Return(array);
-            throw new ParquetLimitExceededException("A scan exceeds its configured pooled-memory limit.");
-        }
-        var reserved = false;
+        var (array, bytes) = PooledArrayOwner<T>.AcquireReserved(minimumLength, _budget);
         try
         {
-            _budget.Reserve(bytes);
-            reserved = true;
             lock (_lock)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
@@ -191,10 +202,7 @@ internal sealed class PooledArrayOwnerCache<T> : IColumnValueCache
         }
         catch
         {
-            if (reserved)
-                PooledArrayOwner<T>.ReturnAndRelease(array, _budget, bytes);
-            else
-                ParquetArrayPool.Return(array);
+            PooledArrayOwner<T>.ReturnAndRelease(array, _budget, bytes);
             throw;
         }
     }

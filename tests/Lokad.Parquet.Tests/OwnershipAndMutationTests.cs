@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 
 namespace Lokad.Parquet.Tests;
 
@@ -109,6 +110,26 @@ public sealed class OwnershipAndMutationTests
         // Open no longer rents: the footer buffer is directly allocated, so only
         // the scan page buffers trip this observation guard.
         Assert.True(tracker.RentCount >= 2);
+    }
+
+    [Fact]
+    public void RentRejectsUnmeasurableElementLayoutBeforeRenting()
+    {
+        var assembly = typeof(ParquetFile).Assembly;
+        var ownerType = assembly.GetType("Lokad.Parquet.Internal.PooledArrayOwner`1") ??
+            throw new InvalidOperationException("The pooled array owner is unavailable.");
+        var objectOwner = ownerType.MakeGenericType(typeof(object));
+        var budgetType = assembly.GetType("Lokad.Parquet.Internal.ParquetScanMemoryBudget") ??
+            throw new InvalidOperationException("The scan memory budget is unavailable.");
+        var budget = Activator.CreateInstance(budgetType, 1024L) ??
+            throw new InvalidOperationException("The scan memory budget cannot be created.");
+        var rent = objectOwner.GetMethod("Rent", BindingFlags.Public | BindingFlags.Static) ??
+            throw new InvalidOperationException("The pooled rent entry point is unavailable.");
+        var failure = Assert.Throws<TargetInvocationException>(() =>
+        {
+            rent.Invoke(null, [1, budget]);
+        });
+        Assert.IsType<InvalidOperationException>(failure.InnerException);
     }
 
     [Fact]
