@@ -451,6 +451,10 @@ function Get-CensusLogicalBytes([object] $Entry, [int] $ColumnCount, [string] $C
     }
     return $total
 }
+function Get-PoolBudgetOutcome([object] $PeakBytes, [object] $LogicalBytes) {
+    if ([long]$PeakBytes -le (6 * [long]$LogicalBytes)) { return "pass" }
+    return "FAIL"
+}
 function Assert-ReportCounter([object] $Value, [string] $Message) {
     Assert-ReportCondition (($null -ne $Value) -and ($Value -ge 0)) $Message
 }
@@ -464,6 +468,7 @@ if ($censusSchema -eq 4) {
         "The work census does not match the frozen case set."
 }
 
+$censusBudgetFailures = @()
 foreach ($entry in $census.cases) {
     Assert-ReportCondition ($entry.poolRents -eq $entry.poolReturns) `
         "The $($entry.name) work census has unbalanced pool activity."
@@ -472,12 +477,18 @@ foreach ($entry in $census.cases) {
 
     Assert-ReportCondition ($entry.maximumConcurrentReads -eq 1) `
         "The $($entry.name) work census overlapped source reads."
-    Assert-ReportCondition ($entry.peakPooledBytes -le (6 * $entry.logicalOutputBytes)) `
-        "The $($entry.name) work census exceeds the 6x pooled-memory gate."
+    $caseBudget = Get-PoolBudgetOutcome $entry.peakPooledBytes $entry.logicalOutputBytes
+    if ($caseBudget -eq "FAIL") {
+        $censusBudgetFailures += "$($entry.name) case peaks at $($entry.peakPooledBytes) B against $($entry.logicalOutputBytes) B layout"
+    }
     if ($null -ne $entry.passPeaks) {
+        $passBudgetNumber = 0
         foreach ($pass in $entry.passPeaks) {
-            Assert-ReportCondition ($pass.peakPooledBytes -le (6 * $pass.logicalOutputBytes)) `
-                "The $($entry.name) work census exceeds the 6x pooled-memory gate in one pass."
+            $passBudgetNumber++
+            $passBudget = Get-PoolBudgetOutcome $pass.peakPooledBytes $pass.logicalOutputBytes
+            if ($passBudget -eq "FAIL") {
+                $censusBudgetFailures += "$($entry.name) pass $passBudgetNumber peaks at $($pass.peakPooledBytes) B against $($pass.logicalOutputBytes) B layout"
+            }
             if ($censusSchema -eq 4) {
                 Assert-ReportCondition (($null -ne $pass.elapsedMilliseconds) -and (-not ([double]::IsNaN($pass.elapsedMilliseconds) -or [double]::IsInfinity($pass.elapsedMilliseconds))) -and ($pass.elapsedMilliseconds -ge 0)) `
                     "The $($entry.name) work census is missing its pass timing evidence."
@@ -607,47 +618,79 @@ if ($failedScanLanes.Count -gt 0) { $parityClaim = "FAIL ($($failedScanLanes -jo
 $lines.Add("- Parity claim (upper 95% bound no greater than 1.05 on every pre-opened scan lane): $parityClaim")
 $lines.Add("- Warm metadata open is an accepted parity limitation for small footers and does not join the parity claim.")
 $lines.Add("")
-$lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | End-scan retained | Retained |")
-$lines.Add("|---|---:|---:|---:|---:|---:|---:|")
+$lines.Add("| Workload | Reads / bytes | Pool rents | Peak / output | Bytes cleared | End-scan retained | Retained | Budget |")
+$lines.Add("|---|---:|---:|---:|---:|---:|---:|---:|")
 foreach ($entry in $census.cases) {
     $peakRatio = $entry.peakPooledBytes / $entry.logicalOutputBytes
     $label = $caseLabels["PreopenedScan/$($entry.name)"]
     if ($null -eq $label) { $label = $entry.name }
-    $lines.Add("| $label | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) |")
+    $lines.Add("| $label | $($entry.sourceReadCalls) / $($entry.sourceBytesRead) | $($entry.poolRents) | $($entry.peakPooledBytes) B / $($entry.logicalOutputBytes) B ($($peakRatio.ToString('F3', [Globalization.CultureInfo]::InvariantCulture))x) | $($entry.pooledBytesCleared) | $(if ($null -eq $entry.endOfScanRetainedPoolBytes) { 'unrecorded' } else { $entry.endOfScanRetainedPoolBytes }) | $($entry.retainedPoolBytes) | $(Get-PoolBudgetOutcome $entry.peakPooledBytes $entry.logicalOutputBytes) |")
 }
 
 $lines.Add("")
-$lines.Add("Per-observation allocation and GC totals pool the four sessions (1,600 observations per workload).")
+$lines.Add("Per-session allocation normalizes each session by its own operation, row and column counts: operations per block vary across sessions, so pooled bytes per observation would mix denominators. The allocation, GC and CPU budgets below gate only the Lokad scan lanes; string lanes report variable-width bytes without a fixed-width cell gate, and the parity claim stays a separate gate on the paired ratios.")
 $lines.Add("")
-$lines.Add("| Workload | Lokad mean B/obs | Parquet.NET mean B/obs | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 |")
-$lines.Add("|---|---:|---:|---:|---:|")
+$lines.Add("| Workload | Session | Lokad B/op | Lokad B/cell | Parquet.NET B/op | Parquet.NET B/cell | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 | Alloc | GC | CPU |")
+$lines.Add("|---|---|---|---|---|---|---|---|---|---|---|")
+$pairedBudgetFailures = @()
 foreach ($caseName in $caseNames) {
-    $lokadBytes = 0.0
-    $baselineBytes = 0.0
-    $lokadGc = @(0, 0, 0)
-    $baselineGc = @(0, 0, 0)
-    $observationCount = 0
-    foreach ($run in @($windowsRuns + $linuxRuns)) {
-        $allocationCase = $run.cases | Where-Object name -EQ $caseName
-        foreach ($observation in $allocationCase.observations) {
-            $lokadBytes += $observation.lokadAllocatedBytes
-            $baselineBytes += $observation.parquetNetAllocatedBytes
-            $lokadGc[0] += $observation.lokadGen0Collections
-            $lokadGc[1] += $observation.lokadGen1Collections
-            $lokadGc[2] += $observation.lokadGen2Collections
-            $baselineGc[0] += $observation.parquetNetGen0Collections
-            $baselineGc[1] += $observation.parquetNetGen1Collections
-            $baselineGc[2] += $observation.parquetNetGen2Collections
-            $observationCount++
+    if ($caseName -notlike "PreopenedScan/*") { continue }
+    $isFixedWidth = $caseName -notlike "PreopenedScan/RequiredString*"
+    foreach ($osSessions in @(@{ Label = "Windows"; Runs = $windowsRuns }, @{ Label = "Linux"; Runs = $linuxRuns })) {
+        $sessionNumber = 0
+        foreach ($run in $osSessions.Runs) {
+            $sessionNumber++
+            $session = "$($osSessions.Label) $sessionNumber"
+            $allocationCase = $run.cases | Where-Object name -EQ $caseName
+            Assert-ReportCondition (($allocationCase.rowCount -gt 0) -and ($allocationCase.columnCount -gt 0)) `
+                "$caseName has no decoded cells in one session."
+            $sessionOperations = [long]$allocationCase.operationsPerBlock * $allocationCase.observations.Count
+            $sessionCells = [long]$allocationCase.rowCount * [long]$allocationCase.columnCount
+            $lokadBytes = 0.0
+            $baselineBytes = 0.0
+            $lokadGc = @(0, 0, 0)
+            $baselineGc = @(0, 0, 0)
+            foreach ($observation in $allocationCase.observations) {
+                $lokadBytes += $observation.lokadAllocatedBytes
+                $baselineBytes += $observation.parquetNetAllocatedBytes
+                $lokadGc[0] += $observation.lokadGen0Collections
+                $lokadGc[1] += $observation.lokadGen1Collections
+                $lokadGc[2] += $observation.lokadGen2Collections
+                $baselineGc[0] += $observation.parquetNetGen0Collections
+                $baselineGc[1] += $observation.parquetNetGen1Collections
+                $baselineGc[2] += $observation.parquetNetGen2Collections
+            }
+            $lokadBOp = $lokadBytes / $sessionOperations
+            $baselineBOp = $baselineBytes / $sessionOperations
+            $lokadBCell = ($lokadBytes / $allocationCase.observations.Count) / $sessionCells
+            $baselineBCell = ($baselineBytes / $allocationCase.observations.Count) / $sessionCells
+            $allocOutcome = "n/a"
+            if ($isFixedWidth) {
+                $allocOutcome = "pass"
+                if (-not ($lokadBCell -lt 0.10)) {
+                    $allocOutcome = "FAIL"
+                    $pairedBudgetFailures += "$caseName ($session) allocates $($lokadBCell.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)) fixed-width B/cell, above the 0.10 budget"
+                }
+            }
+            $gcOutcome = "pass"
+            if (($lokadGc[0] + $lokadGc[1] + $lokadGc[2]) -gt 0) {
+                $gcOutcome = "FAIL"
+                $pairedBudgetFailures += "$caseName ($session) collects $($lokadGc[0])/$($lokadGc[1])/$($lokadGc[2]) against the zero-GC budget"
+            }
+            $cpuOutcome = "pass"
+            if (-not ($allocationCase.pointRatio -le 3)) {
+                $cpuOutcome = "FAIL"
+                $pairedBudgetFailures += "$caseName ($session) runs at $($allocationCase.pointRatio) against the 3x CPU budget"
+            }
+            $lines.Add("| $($caseLabels[$caseName]) | $session | $($lokadBOp.ToString('F3', [Globalization.CultureInfo]::InvariantCulture)) | $($lokadBCell.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)) | $($baselineBOp.ToString('F3', [Globalization.CultureInfo]::InvariantCulture)) | $($baselineBCell.ToString('F4', [Globalization.CultureInfo]::InvariantCulture)) | $($lokadGc[0])/$($lokadGc[1])/$($lokadGc[2]) | $($baselineGc[0])/$($baselineGc[1])/$($baselineGc[2]) | $allocOutcome | $gcOutcome | $cpuOutcome |")
         }
     }
-    $lines.Add("| $($caseLabels[$caseName]) | $(($lokadBytes / $observationCount).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)) | $(($baselineBytes / $observationCount).ToString('F1', [Globalization.CultureInfo]::InvariantCulture)) | $($lokadGc[0])/$($lokadGc[1])/$($lokadGc[2]) | $($baselineGc[0])/$($baselineGc[1])/$($baselineGc[2]) |")
 }
 $lines.Add("")
 $lines.Add("Census pass dimensions record the projection, target, role and budget envelope of every pass; roles distinguish cold-instrumented first passes from warm-instrumented later passes.")
 $lines.Add("")
-$lines.Add("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output |")
-$lines.Add("|---|---|---|---|---|---|---:|---:|---:|---:|")
+$lines.Add("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output | Budget |")
+$lines.Add("|---|---|---|---|---|---|---:|---:|---:|---:|---:|")
 foreach ($entry in $census.cases) {
     $label = $caseLabels["PreopenedScan/$($entry.name)"]
     if ($null -eq $label) { $label = $entry.name }
@@ -663,7 +706,7 @@ foreach ($entry in $census.cases) {
         if ($null -ne $pass.projection) { $projectionText = ($pass.projection -join ",") }
         $elapsedText = "unrecorded"
         if ($null -ne $pass.elapsedMilliseconds) { $elapsedText = $pass.elapsedMilliseconds.ToString('F3', [Globalization.CultureInfo]::InvariantCulture) }
-        $lines.Add("| $label | $passNumber | $projectionText | $($pass.target) | $($pass.role) | $($pass.batchCount) | $elapsedText | $($pass.allocatedBytes) | $($pass.gen0Collections)/$($pass.gen1Collections)/$($pass.gen2Collections) | $passDenominator |")
+        $lines.Add("| $label | $passNumber | $projectionText | $($pass.target) | $($pass.role) | $($pass.batchCount) | $elapsedText | $($pass.allocatedBytes) | $($pass.gen0Collections)/$($pass.gen1Collections)/$($pass.gen2Collections) | $passDenominator | $(Get-PoolBudgetOutcome $pass.peakPooledBytes $pass.logicalOutputBytes) |")
     }
 }
 $lines.Add("")
@@ -696,13 +739,31 @@ if ($Verify) {
     Assert-ReportCondition ($documentText -eq $expected) `
         "BENCHMARKS.md does not match the supplied snapshots."
     Write-Output "BENCHMARKS.md matches the supplied snapshots."
-    Assert-ReportCondition ($failedScanLanes.Count -eq 0) `
-        "The parity claim fails on $($failedScanLanes -join ", ")."
+    $gateFailures = @()
+    if ($failedScanLanes.Count -gt 0) {
+        $gateFailures += "The parity claim fails on $($failedScanLanes -join ", ")."
+    }
+    if ($pairedBudgetFailures.Count -gt 0) {
+        $gateFailures += "The paired scan budget fails on " + ($pairedBudgetFailures -join "; ") + "."
+    }
+    if ($censusBudgetFailures.Count -gt 0) {
+        $gateFailures += "The work census fails its 6x pooled-memory budget on " + ($censusBudgetFailures -join "; ") + "."
+    }
+    Assert-ReportCondition ($gateFailures.Count -eq 0) ($gateFailures -join " ")
 }
 else {
     [IO.File]::WriteAllText($Document, $expected, [Text.UTF8Encoding]::new($false))
     Write-Output "Rewrote the generated parity report in $Document."
-    Assert-ReportCondition ($failedScanLanes.Count -eq 0) `
-        "The parity claim fails on $($failedScanLanes -join ", ")."
+    $gateFailures = @()
+    if ($failedScanLanes.Count -gt 0) {
+        $gateFailures += "The parity claim fails on $($failedScanLanes -join ", ")."
+    }
+    if ($pairedBudgetFailures.Count -gt 0) {
+        $gateFailures += "The paired scan budget fails on " + ($pairedBudgetFailures -join "; ") + "."
+    }
+    if ($censusBudgetFailures.Count -gt 0) {
+        $gateFailures += "The work census fails its 6x pooled-memory budget on " + ($censusBudgetFailures -join "; ") + "."
+    }
+    Assert-ReportCondition ($gateFailures.Count -eq 0) ($gateFailures -join " ")
 }
 

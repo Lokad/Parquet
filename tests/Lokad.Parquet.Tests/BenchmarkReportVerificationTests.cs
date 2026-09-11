@@ -1212,6 +1212,205 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
     }
 
     [Fact]
+    public void UnequalBlockCountsNormalizePerSession()
+    {
+        // B03: operations per block vary across sessions, so bytes normalize by
+        // each session's own operation count instead of pooling per observation.
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            foreach (var index in new[] { 2, 3 })
+            {
+                var path = Path.Combine(root, "paired-" + index + ".json");
+                var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+                var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+                var target = Assert.IsType<JsonObject>(cases[0]);
+                target["operationsPerBlock"] = 32;
+                foreach (var entry in Assert.IsType<JsonArray>(target["observations"]))
+                {
+                    var observation = Assert.IsType<JsonObject>(entry);
+                    observation["lokadAllocatedBytes"] = 1600;
+                    observation["parquetNetAllocatedBytes"] = 3200;
+                }
+                File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.Equal(0, outcome.ExitCode);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.DoesNotContain("Lokad mean B/obs", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Linux 1 | 50.000 | 0.0244 | 100.000 | 0.0488 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Linux 2 | 50.000 | 0.0244 | 100.000 | 0.0488 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailingAllocationBudgetRendersAndFails()
+    {
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            var path = Path.Combine(root, "paired-0.json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            var observations = Assert.IsType<JsonArray>(Assert.IsType<JsonObject>(cases[0])["observations"]);
+            foreach (var entry in observations)
+                Assert.IsType<JsonObject>(entry)["lokadAllocatedBytes"] = 16000;
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("PreopenedScan/RequiredInt32Plain (Windows 1) allocates 0.2441 fixed-width B/cell, above the 0.10 budget", outcome.Output);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 1000.000 | 0.2441 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | FAIL | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailingGcBudgetRendersAndFails()
+    {
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            var path = Path.Combine(root, "paired-1.json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            var observations = Assert.IsType<JsonArray>(Assert.IsType<JsonObject>(cases[0])["observations"]);
+            Assert.IsType<JsonObject>(observations[0])["lokadGen0Collections"] = 1;
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("PreopenedScan/RequiredInt32Plain (Windows 2) collects 1/0/0 against the zero-GC budget", outcome.Output);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| FAIL |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailingCpuBudgetRendersAndFails()
+    {
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            ScaleSingleSession(root, 2, "PreopenedScan/RequiredInt32Plain", 4.0);
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("PreopenedScan/RequiredInt32Plain (Linux 1)", outcome.Output);
+            Assert.Contains("against the 3x CPU budget", outcome.Output);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| FAIL |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+
+        static void ScaleSingleSession(string root, int snapshotIndex, string caseName, double factor)
+        {
+            var path = Path.Combine(root, "paired-" + snapshotIndex + ".json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            JsonObject? found = null;
+            foreach (var entry in cases)
+            {
+                var candidate = Assert.IsType<JsonObject>(entry);
+                if (string.Equals(candidate["name"]?.GetValue<string>(), caseName, StringComparison.Ordinal))
+                    found = candidate;
+            }
+
+            var target = Assert.IsType<JsonObject>(found);
+            var observations = Assert.IsType<JsonArray>(target["observations"]);
+            var firstLokad = 0.0;
+            var secondLokad = 0.0;
+            var baseline = 0.0;
+            var seen = 0;
+            foreach (var entry in observations)
+            {
+                var observation = Assert.IsType<JsonObject>(entry);
+                var scaled = Assert.IsAssignableFrom<JsonValue>(observation["lokadNanoseconds"]).GetValue<double>() * factor;
+                var reference = Assert.IsAssignableFrom<JsonValue>(observation["parquetNetNanoseconds"]).GetValue<double>();
+                observation["lokadNanoseconds"] = scaled;
+                observation["logRatio"] = Math.Log(scaled / reference);
+                if (seen == 0)
+                {
+                    firstLokad = scaled;
+                    baseline = reference;
+                }
+                if (seen == 1)
+                    secondLokad = scaled;
+                seen++;
+            }
+
+            var summary = BenchmarkReportQuartet.Summarize(firstLokad, secondLokad, baseline, false);
+            target["pointRatio"] = summary.Point;
+            target["upper95Ratio"] = summary.Upper;
+            target["passed"] = summary.Upper <= 1.05;
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+    }
+
+    [Fact]
+    public void FailingCensusPoolBudgetRendersAndFails()
+    {
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            var path = Path.Combine(root, "census.json");
+            var census = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0])["peakPooledBytes"] = 2000000;
+            File.WriteAllText(path, census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("fails its 6x pooled-memory budget", outcome.Output);
+            Assert.Contains("RequiredInt32Plain case peaks at 2000000 B against 262144 B layout", outcome.Output);
+            var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
+            Assert.Contains("| FAIL |", document);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void FailingCensusPoolBudgetVerifyFailsAfterMatch()
+    {
+        // Valid failing evidence round-trips: generation renders the FAIL markers
+        // and verification then fails on the budget outcome, not on a mismatch.
+        var root = CopyQuartet(_quartets.V8Root);
+        try
+        {
+            var path = Path.Combine(root, "census.json");
+            var census = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            Assert.IsType<JsonObject>(cases[0])["peakPooledBytes"] = 2000000;
+            File.WriteAllText(path, census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var generated = BenchmarkReportQuartet.InvokeReport(root, false);
+            Assert.NotEqual(0, generated.ExitCode);
+            var outcome = RunVerify(root);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("fails its 6x pooled-memory budget", outcome.Output);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+    [Fact]
     public void TamperedEvidenceRejectedInGenerationMode()
     {
         var root = CopyQuartet(_quartets.V8Root);
@@ -1247,8 +1446,8 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
             var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
             Assert.Equal(0, outcome.ExitCode);
             var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
-            Assert.Contains("| Workload | Lokad mean B/obs | Parquet.NET mean B/obs | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 |", document);
-            Assert.Contains("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output |", document);
+            Assert.Contains("| Workload | Session | Lokad B/op | Lokad B/cell | Parquet.NET B/op | Parquet.NET B/cell | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 | Alloc | GC | CPU |", document);
+            Assert.Contains("| Case | Pass | Projection | Target | Role | Batches | ms | Allocated B | GC 0/1/2 | Peak / output | Budget |", document);
             Assert.Contains("| Case | Layout | Nullable | Consumer | Range | Lokad live B | Baseline live B | Lokad retained | Baseline retained | End-scan retained | Retained |", document);
             Assert.Contains("cold-instrumented", document);
             Assert.Contains("int32/4", document);

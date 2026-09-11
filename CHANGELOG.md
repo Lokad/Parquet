@@ -109,6 +109,10 @@
   both readers mutually verify.
 - Retain one baseline live-session destination buffer per projected column, selected from
   the field type and nullability, instead of twelve parallel layouts per column.
+- Report paired allocation per session normalized by that session's own operation, row and
+  column counts, with explicit allocation, GC and 3x CPU budget outcomes beside the separate
+  1.05 parity gate; the 6x census pool budget renders as a failing outcome instead of an
+  early rejection, keeping malformed evidence as a hard rejection.
 
 ## 0.1.0 - 2026-09-02
 
