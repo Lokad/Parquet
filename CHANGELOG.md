@@ -138,6 +138,8 @@
   all-valid transfer between the primitive page paths and dictionary expansion.
 - Decode nullable PLAIN binary pages through the shared bitmap section instead of
   integer levels, eliding all-valid bitmaps and removing the int-level pipeline.
+- Validate each page header once into an explicit checked plan consumed by post-payload
+  dispatch instead of re-deriving and re-validating it.
 
 ## 0.1.0 - 2026-09-02
 

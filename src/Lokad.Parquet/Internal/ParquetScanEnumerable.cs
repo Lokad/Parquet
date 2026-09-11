@@ -210,6 +210,19 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
     // Concrete internal cursor: disposal is synchronous, so coordinators release it directly without blocking fallback waits.
     internal sealed class ColumnCursor
     {
+        // One explicit checked page plan per page: PreflightPageHeader validates the
+        // header once and records the classification, so post-payload dispatch consumes
+        // checked values instead of re-deriving and re-validating them. Raw wire codes
+        // stay raw; resolved schema kinds are non-nullable after the support check.
+        private readonly record struct CheckedPagePlan(
+            ValidatedPageType PageType,
+            int ValueCount,
+            int EncodingCode,
+            bool DictionaryEncoded,
+            ParquetPhysicalType PhysicalType,
+            ParquetRepetition Repetition,
+            ParquetCompressionCodec? CompressionCodec);
+
         private readonly ParquetFile _file;
         private readonly ParquetScanOptions _options;
         private readonly ScanRowGroup[] _rowGroups;
@@ -426,7 +439,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     throw new ParquetFormatException("Decoded pages exceed the column-chunk uncompressed total.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
             }
 
-            void PreflightPageHeader(ValidatedPageHeader preflightHeader, int preflightHeaderByteCount)
+            CheckedPagePlan PreflightPageHeader(ValidatedPageHeader preflightHeader, int preflightHeaderByteCount)
             {
                 if (preflightHeader.PageType is not ValidatedPageType.DataV1 and not ValidatedPageType.Dictionary and not ValidatedPageType.DataV2)
                     throw new ParquetUnsupportedFeatureException("This scan path requires Data Page V1 or V2.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
@@ -440,6 +453,9 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     not ParquetPhysicalType.FixedLengthByteArray ||
                     _column.SchemaElement.Repetition is not ParquetRepetition.Required and not ParquetRepetition.Optional)
                     throw new ParquetUnsupportedFeatureException("This scan path currently supports only required or optional flat Core 0.1 leaves.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+                var physicalType = preflightPhysicalType.Value;
+                var repetition = _column.SchemaElement.Repetition.Value;
+                var preflightCodec = _plan.RowGroup.Columns[_column.Ordinal].CompressionCodec;
                 var preflightChunk = _plan.RowGroup.Columns[_column.Ordinal];
                 var preflightDictionaryOffset = preflightChunk.DictionaryPageOffset;
                 var preflightDataOffset = preflightChunk.DataPageOffset;
@@ -471,7 +487,14 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         preflightHeader.UncompressedSize > _file.Options.MaximumDictionaryBytes)
                         throw new ParquetLimitExceededException("A dictionary exceeds the configured entry or byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
                     AccumulateUncompressed(preflightHeader, preflightHeaderByteCount);
-                    return;
+                    return new CheckedPagePlan(
+                        ValidatedPageType.Dictionary,
+                        0,
+                        preflightHeader.Dictionary.EncodingCode,
+                        false,
+                        physicalType,
+                        repetition,
+                        preflightCodec);
                 }
                 var preflightValueCount = preflightHeader.PageType switch
                 {
@@ -520,7 +543,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 if (preflightHeader.PageType == ValidatedPageType.DataV2)
                 {
                     var preflightV2 = preflightHeader.DataV2;
-                    var preflightCodec = _plan.RowGroup.Columns[_column.Ordinal].CompressionCodec;
                     if (_column.SchemaElement.Repetition == ParquetRepetition.Required)
                     {
                         DefinitionLevelCodec.ValidateRequiredV2(preflightV2, preflightValueCount, CurrentPageLocation());
@@ -543,13 +565,20 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 }
                 else
                 {
-                    var preflightCodec = _plan.RowGroup.Columns[_column.Ordinal].CompressionCodec;
                     if (preflightCodec == ParquetCompressionCodec.Uncompressed &&
                         preflightHeader.UncompressedSize != preflightHeader.CompressedSize)
                         throw new ParquetFormatException(
                             "An uncompressed page declares different compressed and uncompressed sizes.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
                 }
                 AccumulateUncompressed(preflightHeader, preflightHeaderByteCount);
+                return new CheckedPagePlan(
+                    preflightHeader.PageType,
+                    preflightValueCount,
+                    preflightEncodingCode,
+                    preflightDictionaryEncoded,
+                    physicalType,
+                    repetition,
+                    preflightCodec);
             }
 
             async ValueTask LoadNextPageAsync()
@@ -570,14 +599,9 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 if (nextPageOffset > _chunkEnd)
                     throw new ParquetFormatException(
                         "A page payload exceeds its enclosing column chunk.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-                PreflightPageHeader(header, parsed.HeaderByteCount);
+                var plan = PreflightPageHeader(header, parsed.HeaderByteCount);
 
-                var pageValueCount = header.PageType switch
-                {
-                    ValidatedPageType.DataV1 => header.DataV1.ValueCount,
-                    ValidatedPageType.DataV2 => header.DataV2.ValueCount,
-                    _ => 0,
-                };
+                var pageValueCount = plan.ValueCount;
                 var selectedStart = _plan.StartInGroup;
                 var selectedEnd = checked(selectedStart + _plan.Count);
                 var pageStartInGroup = _rowsSeenInGroup;
@@ -698,10 +722,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         throw new ParquetFormatException(
                             "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-                    if (header.PageType is not ValidatedPageType.DataV1 and not ValidatedPageType.Dictionary and not ValidatedPageType.DataV2)
-                        throw new ParquetUnsupportedFeatureException("This scan path requires Data Page V1 or V2.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                    var codec = _plan.RowGroup.Columns[_column.Ordinal].CompressionCodec;
+                    var codec = plan.CompressionCodec;
                     ReadOnlyMemory<byte> decodedMemory;
                     if (header.PageType == ValidatedPageType.DataV2)
                     {
@@ -770,79 +791,28 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                                 throw new ParquetUnsupportedFeatureException("The page compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
                         }
-                    var physicalType = _column.SchemaElement.PhysicalType;
-                    if (physicalType is not ParquetPhysicalType.Boolean and
-                        not ParquetPhysicalType.Int32 and
-                        not ParquetPhysicalType.Int64 and
-                        not ParquetPhysicalType.Float and
-                        not ParquetPhysicalType.Double and
-                        not ParquetPhysicalType.ByteArray and
-                        not ParquetPhysicalType.FixedLengthByteArray ||
-                        _column.SchemaElement.Repetition is not ParquetRepetition.Required and not ParquetRepetition.Optional)
-                        throw new ParquetUnsupportedFeatureException("This scan path currently supports only required or optional flat Core 0.1 leaves.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-
-                    if (header.PageType == ValidatedPageType.Dictionary)
+                    if (plan.PageType == ValidatedPageType.Dictionary)
                     {
-                        if (_seenDataPage || _dictionaryDecoder.HasDictionary)
-                            throw PageFormat("A dictionary page is duplicated or appears after data pages.");
-                        if (header.Dictionary.EncodingCode is not (int)ParquetEncoding.Plain and
-                            not (int)ParquetEncoding.PlainDictionary)
-                            throw new ParquetUnsupportedFeatureException("Dictionary values require the PLAIN or legacy PLAIN_DICTIONARY marker.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                        if (header.Dictionary.ValueCount > _file.Options.MaximumDictionaryEntries ||
-                            header.UncompressedSize > _file.Options.MaximumDictionaryBytes)
-                            throw new ParquetLimitExceededException("A dictionary exceeds the configured entry or byte limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                        _dictionaryDecoder.DecodePage(decodedMemory.Span, header.Dictionary.ValueCount, physicalType.Value, _file.Options, _memoryBudget, CurrentPageLocation(), _cancellationToken);
+                        _dictionaryDecoder.DecodePage(decodedMemory.Span, header.Dictionary.ValueCount, plan.PhysicalType, _file.Options, _memoryBudget, CurrentPageLocation(), _cancellationToken);
                         _pageOffset = nextPageOffset;
                         _pageOrdinal++;
                     }
                     else
                     {
                         _seenDataPage = true;
-                        var valueCount = header.PageType switch
+                        var valueCount = plan.ValueCount;
+                        if (plan.DictionaryEncoded)
                         {
-                            ValidatedPageType.DataV1 => header.DataV1.ValueCount,
-                            ValidatedPageType.DataV2 => header.DataV2.ValueCount,
-                            _ => throw new InvalidOperationException("A validated data page has no data header."),
-                        };
-                        var encodingCode = header.PageType switch
-                        {
-                            ValidatedPageType.DataV1 => header.DataV1.EncodingCode,
-                            ValidatedPageType.DataV2 => header.DataV2.EncodingCode,
-                            _ => throw new InvalidOperationException("A validated data page has no data header."),
-                        };
-                        if (encodingCode is not (int)ParquetEncoding.Plain and
-                            not (int)ParquetEncoding.PlainDictionary and
-                            not (int)ParquetEncoding.RunLengthDictionary)
-                            throw new ParquetUnsupportedFeatureException("The data-page value encoding is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                        if (valueCount > _file.Options.MaximumValuesPerPage)
-                            throw new ParquetLimitExceededException("A data page exceeds the configured value-count limit.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-                        if (valueCount > _plan.RowGroup.RowCount - _rowsSeenInGroup)
-                            throw new ParquetFormatException(
-                                "Data pages contain more rows than the row group declares.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                        var dictionaryEncoded = encodingCode is (int)ParquetEncoding.PlainDictionary or
-                            (int)ParquetEncoding.RunLengthDictionary;
-                        if (dictionaryEncoded && !_dictionaryDecoder.HasDictionary)
-                            throw PageFormat("A dictionary-encoded data page has no preceding dictionary page.");
-
-                        if (dictionaryEncoded)
-                        {
-                            _dictionaryDecoder.ExpandDataPage(header, decodedMemory.Span, valueCount, physicalType.Value, _file.Options, _memoryBudget, ref _pageValues, ref _pageValidity, ref _pageBinaryOffsets, ref _pageBinaryPayload, ref _pageFixedPayload, ref _pageFixedWidth, CurrentPageLocation(), _cancellationToken);
+                            _dictionaryDecoder.ExpandDataPage(header, decodedMemory.Span, valueCount, plan.PhysicalType, _file.Options, _memoryBudget, ref _pageValues, ref _pageValidity, ref _pageBinaryOffsets, ref _pageBinaryPayload, ref _pageFixedPayload, ref _pageFixedWidth, CurrentPageLocation(), _cancellationToken);
                         }
-                        else if (physicalType == ParquetPhysicalType.ByteArray)
+                        else if (plan.PhysicalType == ParquetPhysicalType.ByteArray)
                         {
                             DecodeBinaryPage(header, decodedMemory.Span, valueCount);
                         }
-                        else if (physicalType == ParquetPhysicalType.FixedLengthByteArray)
+                        else if (plan.PhysicalType == ParquetPhysicalType.FixedLengthByteArray)
                         {
                             if (slicedPage)
                             {
-                                if (header.PageType == ValidatedPageType.DataV2)
-                                    DefinitionLevelCodec.ValidateRequiredV2(header.DataV2, valueCount, CurrentPageLocation());
                                 DecodeSlicedFixedLengthByteArrayPage(decodedMemory.Span, sliceRowCount, _column.SchemaElement.TypeLength ?? 0);
                                 slicedFixedPage = true;
                             }
@@ -851,18 +821,16 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                                 DecodeFixedLengthByteArrayPage(header, decodedMemory.Span, valueCount);
                             }
                         }
-                        else if (_column.SchemaElement.Repetition == ParquetRepetition.Required)
+                        else if (plan.Repetition == ParquetRepetition.Required)
                         {
                             var valueOffset = header.PageType == ValidatedPageType.DataV2 ? DefinitionLevelCodec.GetV2LevelByteCount(header.DataV2, CurrentPageLocation()) : 0;
-                            if (header.PageType == ValidatedPageType.DataV2)
-                                DefinitionLevelCodec.ValidateRequiredV2(header.DataV2, valueCount, CurrentPageLocation());
-                            var expectedBytes = PlainDecoder.GetPlainByteCount(physicalType.Value, valueCount, CurrentPageLocation());
+                            var expectedBytes = PlainDecoder.GetPlainByteCount(plan.PhysicalType, valueCount, CurrentPageLocation());
                             var storedValuesLength = codec == ParquetCompressionCodec.Uncompressed ? header.CompressedSize : decodedMemory.Length;
                             if (storedValuesLength - valueOffset != expectedBytes)
                                 throw new ParquetFormatException(
                                     "A PLAIN fixed-width page payload length does not match its value count.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
-                            if (physicalType == ParquetPhysicalType.Boolean)
+                            if (plan.PhysicalType == ParquetPhysicalType.Boolean)
                             {
                                 DecodeRequiredBooleanPage(decodedMemory.Span[valueOffset..], valueCount);
                             }
@@ -893,26 +861,17 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         }
                         else
                         {
-                            if (header.PageType == ValidatedPageType.DataV1 && header.DataV1.DefinitionEncodingCode != (int)ParquetEncoding.RunLength)
-                                throw new ParquetUnsupportedFeatureException("Optional definition levels require RLE/bit-packed hybrid encoding.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
                             if (header.PageType == ValidatedPageType.DataV1)
                             {
-                                DecodeOptionalPrimitivePageV1(decodedMemory.Span, valueCount, physicalType.Value);
+                                DecodeOptionalPrimitivePageV1(decodedMemory.Span, valueCount, plan.PhysicalType);
                             }
                             else
                             {
-                                if (header.PageType != ValidatedPageType.DataV2)
-                                    throw new InvalidOperationException("A validated V2 page has no V2 header.");
                                 var v2 = header.DataV2;
-                                if (v2.RowCount != valueCount)
-                                    throw PageFormat("A flat V2 page has different row and value counts.");
-                                if (v2.RepetitionLevelsByteLength != 0)
-                                    throw PageFormat("A flat V2 page contains repetition-level bytes.");
                                 DecodeOptionalPrimitivePage(
                                     decodedMemory.Span,
                                     valueCount,
-                                    physicalType.Value,
+                                    plan.PhysicalType,
                                     0,
                                     v2.DefinitionLevelsByteLength,
                                     v2.DefinitionLevelsByteLength,
