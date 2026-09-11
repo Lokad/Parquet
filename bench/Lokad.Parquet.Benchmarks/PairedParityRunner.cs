@@ -43,6 +43,50 @@ internal static class PairedParityRunner
         return z + (((z * z) + 1.0) * z) / 4.0 * inverse + ((((5.0 * z * z) + 16.0) * z * z * z) + (3.0 * z)) / 96.0 * inverse * inverse;
     }
 
+    /// <summary>Writes the parity catalog with the frozen census catalog for report reconciliation.</summary>
+    /// <param name="catalogPath">The destination catalog file path.</param>
+    /// <returns>Zero on success.</returns>
+    internal static async Task<int> WriteCatalogAsync(string catalogPath)
+    {
+        var catalogCases = ScanWorkloadCatalog.ParityWorkloads
+            .Select(static workload => new { name = "PreopenedScan/" + workload.ToString(), label = ScanWorkloadCatalog.Labels[workload] })
+            .Append(new { name = "WarmMetadataOpen", label = "Warm metadata open" })
+            .ToArray();
+        var censusCases = CensusCatalog.Cases
+            .Select(static entry => new
+            {
+                name = entry.Name,
+                workload = entry.Workload.ToString(),
+                consumer = CensusConsumerNames.SnapshotName(entry.Consumer),
+                physicalType = CensusLayout.NameOf(entry.PhysicalType),
+                typeWidthBytes = entry.TypeWidthBytes,
+                nullable = entry.Nullable,
+                passes = entry.PassProjections.Select(static projection => new { ordinals = projection }).ToArray(),
+            })
+            .ToArray();
+        var catalog = new
+        {
+            pairedSchemaVersion = SnapshotSchemaVersion,
+            sourceRevision = Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+            packageLockHash = Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+            cases = catalogCases,
+            censusCases = censusCases,
+        };
+        var directory = Path.GetDirectoryName(catalogPath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+        await using (var catalogOutput = File.Create(catalogPath))
+        {
+            await JsonSerializer.SerializeAsync(catalogOutput, catalog, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = true,
+            });
+        }
+
+        Console.WriteLine($"Parity catalog: {Path.GetFullPath(catalogPath)}");
+        return 0;
+    }
     public static async Task<int> RunAsync(string[] arguments)
     {
         var enforce = arguments.Contains("--paired-enforce", StringComparer.Ordinal);

@@ -113,6 +113,10 @@
   column counts, with explicit allocation, GC and 3x CPU budget outcomes beside the separate
   1.05 parity gate; the 6x census pool budget renders as a failing outcome instead of an
   early rejection, keeping malformed evidence as a hard rejection.
+- Define the work-census catalog once with typed consumers, explicit projections, layouts and
+  expected passes; the census run reconciles every measured case against it, the parity catalog
+  exports it, and the report reconciles snapshots against the export while unfamiliar workloads
+  fail instead of defaulting.
 
 ## 0.1.0 - 2026-09-02
 

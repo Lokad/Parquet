@@ -238,6 +238,8 @@ public sealed class SafetyPolicyTests
                 "explicit measurement boundary on a sequential-I/O test double",
             ["Lokad.Parquet.Benchmarks.PairedParityRunner.RunAsync"] =
                 "command-line runner entry point",
+            ["Lokad.Parquet.Benchmarks.PairedParityRunner.WriteCatalogAsync"] =
+                "parity catalog export behind the command-line boundary",
             ["Lokad.Parquet.Benchmarks.PairedParityRunner.MeasureAsync"] =
                 "cohesive randomized paired-measurement pipeline",
             ["Lokad.Parquet.Benchmarks.ParityScanCase.MaterializeLokadAsync"] =

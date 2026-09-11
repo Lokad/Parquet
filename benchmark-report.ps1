@@ -342,55 +342,13 @@ foreach ($caseName in $caseNames) {
     if ($caseName -like "PreopenedScan/*") {
         $workload = $caseName.Substring(14)
         $censusEntry = @($census.cases | Where-Object name -EQ $workload)
-        Assert-ReportCondition ($censusEntry.Count -eq 1) `
+        Assert-ReportCondition ($censusEntry.Count -ge 1) `
             "The work census is missing $workload."
+        Assert-ReportCondition ($censusEntry.Count -le 1) `
+            "The work census duplicates $workload."
         Assert-ReportCondition ($censusEntry[0].fixtureHash -eq $hashes[0]) `
             "The $workload census fixture differs from the paired sessions."
     }
-}
-$frozenDiagnosticCensusCases = @(
-    "UnevenInt32Plain",
-    "NarrowInt32Plain",
-    "RequiredInt32RowRange",
-    "SmallRowGroupsInt32Plain",
-    "CompressibleInt32Snappy",
-    "NullableBooleanPlain",
-    "LowCardinalityStringDictionary",
-    "RequiredInt64Plain",
-    "RequiredFloatPlain",
-    "RequiredDoublePlain",
-    "NullableInt64Plain",
-    "NullableFixedByteArrayPlain",
-    "NullableBinaryPlain",
-    "RequiredInt32V2",
-    "NullableInt32V2",
-    "HighCardinalityStringDictionary",
-    "NullableInt32DenseNulls",
-    "CrcInt64Dictionary",
-    "CrcBinaryDictionarySnappy",
-    "MisalignedMultiPage"
-)
-$frozenDiagnosticPassCounts = @{
-    "UnevenInt32Plain" = 2
-    "NarrowInt32Plain" = 2
-    "RequiredInt32RowRange" = 1
-    "SmallRowGroupsInt32Plain" = 2
-    "CompressibleInt32Snappy" = 2
-    "NullableBooleanPlain" = 2
-    "LowCardinalityStringDictionary" = 2
-    "RequiredInt64Plain" = 2
-    "RequiredFloatPlain" = 2
-    "RequiredDoublePlain" = 2
-    "NullableInt64Plain" = 2
-    "NullableFixedByteArrayPlain" = 2
-    "NullableBinaryPlain" = 2
-    "RequiredInt32V2" = 2
-    "NullableInt32V2" = 2
-    "HighCardinalityStringDictionary" = 2
-    "NullableInt32DenseNulls" = 2
-    "CrcInt64Dictionary" = 2
-    "CrcBinaryDictionarySnappy" = 2
-    "MisalignedMultiPage" = 2
 }
 $frozenCensusPhysicalTypes = @("boolean", "int32", "int64", "float", "double", "fixed", "utf8", "binary")
 $frozenCensusConsumers = @("int32", "nullable-int32", "multi-int32", "boolean", "utf8", "int64", "float", "double", "fixed", "nullable-int64", "binary", "nullable-binary")
@@ -458,9 +416,36 @@ function Get-PoolBudgetOutcome([object] $PeakBytes, [object] $LogicalBytes) {
 function Assert-ReportCounter([object] $Value, [string] $Message) {
     Assert-ReportCondition (($null -ne $Value) -and ($Value -ge 0)) $Message
 }
+$catalogCensusEntries = @{}
+$catalogCensusPassCounts = @{}
 if ($censusSchema -eq 4) {
     $mappedCensusNames = @($caseNames | Where-Object { $_ -like "PreopenedScan/*" } | ForEach-Object { $_.Substring(14) })
-    $expectedCensusNames = @($mappedCensusNames + $frozenDiagnosticCensusCases | Sort-Object -Unique)
+    Assert-ReportCondition ($null -ne $catalogDoc.censusCases) `
+        "The catalog does not record its census cases."
+    foreach ($catalogEntry in $catalogDoc.censusCases) {
+        Assert-ReportCondition (-not [string]::IsNullOrEmpty($catalogEntry.name)) `
+            "The catalog carries an unnamed census case."
+        Assert-ReportCondition (-not $catalogCensusEntries.ContainsKey($catalogEntry.name)) `
+            "The catalog duplicates census case $($catalogEntry.name)."
+        Assert-ReportCondition ($frozenCensusConsumers -contains $catalogEntry.consumer) `
+            "The catalog census case $($catalogEntry.name) carries an unknown consumer identity."
+        $catalogSlotWidth = Get-CensusSlotWidth $catalogEntry.physicalType $catalogEntry.typeWidthBytes $catalogEntry.name
+        Assert-ReportCondition ($null -ne $catalogEntry.nullable) `
+            "The catalog census case $($catalogEntry.name) is missing its nullability evidence."
+        Assert-ReportCondition (($null -ne $catalogEntry.passes) -and (@($catalogEntry.passes).Count -gt 0)) `
+            "The catalog census case $($catalogEntry.name) carries no expected passes."
+        foreach ($catalogPass in $catalogEntry.passes) {
+            Assert-ReportCondition (($null -ne $catalogPass.ordinals) -and (@($catalogPass.ordinals).Count -gt 0)) `
+                "The catalog census case $($catalogEntry.name) carries an empty expected projection."
+            foreach ($ordinal in $catalogPass.ordinals) {
+                Assert-ReportCondition (($null -ne $ordinal) -and ($ordinal -ge 0)) `
+                    "The catalog census case $($catalogEntry.name) carries an invalid ordinal."
+            }
+        }
+        $catalogCensusEntries[$catalogEntry.name] = $catalogEntry
+        $catalogCensusPassCounts[$catalogEntry.name] = @($catalogEntry.passes).Count
+    }
+    $expectedCensusNames = @($mappedCensusNames + @($catalogCensusEntries.Keys) | Sort-Object -Unique)
     $actualCensusNames = @($census.cases | ForEach-Object { $_.name } | Sort-Object -Unique)
     Assert-ReportCondition ($census.cases.Count -eq $expectedCensusNames.Count) `
         "The work census does not match the frozen case set."
@@ -548,8 +533,13 @@ foreach ($entry in $census.cases) {
                 "The $($entry.name) work census is missing its $field evidence."
         }
         $expectedPassCount = 2
-        if ($frozenDiagnosticPassCounts.ContainsKey($entry.name)) {
-            $expectedPassCount = $frozenDiagnosticPassCounts[$entry.name]
+        if ($catalogCensusPassCounts.ContainsKey($entry.name)) {
+            $expectedPassCount = $catalogCensusPassCounts[$entry.name]
+        }
+        if ($catalogCensusEntries.ContainsKey($entry.name)) {
+            $catalogEntry = $catalogCensusEntries[$entry.name]
+            Assert-ReportCondition (($entry.physicalType -eq $catalogEntry.physicalType) -and ($entry.valueWidthBytes -eq $catalogEntry.typeWidthBytes) -and ($entry.nullable -eq $catalogEntry.nullable) -and ($entry.consumer -eq $catalogEntry.consumer)) `
+                "The $($entry.name) work census case does not match its catalog layout."
         }
         Assert-ReportCondition (($null -ne $entry.passPeaks) -and (@($entry.passPeaks).Count -eq $expectedPassCount)) `
             "The $($entry.name) work census does not carry its expected pass set."
@@ -569,6 +559,11 @@ foreach ($entry in $census.cases) {
                 "The $($entry.name) work census pass carries an unexpected role."
             Assert-ReportCondition ((Get-CensusLogicalBytes $entry @($pass.projection).Count $entry.name) -eq $pass.logicalOutputBytes) `
                 "The $($entry.name) work census pass denominator does not match its recorded layout."
+            if ($catalogCensusEntries.ContainsKey($entry.name)) {
+                $catalogOrdinals = @($catalogCensusEntries[$entry.name].passes[$passIndex].ordinals)
+                Assert-ReportCondition ((@($pass.projection) -join ",") -eq ($catalogOrdinals -join ",")) `
+                    "The $($entry.name) work census pass does not match its catalog passes."
+            }
             $passIndex++
         }
     }

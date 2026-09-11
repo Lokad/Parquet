@@ -94,6 +94,78 @@ public sealed class CensusLayoutTests
 
 
     [Fact]
+    public void UnknownWorkloadHasNoCatalogLane()
+    {
+        // B04: unfamiliar workloads fail instead of silently defaulting to
+        // required INT32, where a wrong denominator could hide.
+        var assembly = BenchmarkAssembly();
+        var layoutType = assembly.GetType("Lokad.Parquet.Benchmarks.CensusCaseLayout") ??
+            throw new InvalidOperationException("The benchmark case layout is unavailable.");
+        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ??
+            throw new InvalidOperationException("The benchmark workload token is unavailable.");
+        var derive = layoutType.GetMethod("ForCatalogLane", BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("The benchmark layout derivation is unavailable.");
+        var bogus = Enum.ToObject(workloadType, 999);
+        var thrown = Assert.Throws<TargetInvocationException>(() => derive.Invoke(null, [bogus]));
+        Assert.IsType<InvalidOperationException>(thrown.InnerException);
+    }
+    [Fact]
+    public void StaticCatalogMatchesVerifierCensusShapes()
+    {
+        // B04: the single C# catalog agrees with the independently authored
+        // verifier shapes on names, workloads, consumers, layouts and passes.
+        var assembly = BenchmarkAssembly();
+        var catalogType = assembly.GetType("Lokad.Parquet.Benchmarks.CensusCatalog") ??
+            throw new InvalidOperationException("The benchmark census catalog is unavailable.");
+        var cases = catalogType.GetProperty("Cases", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as System.Collections.IEnumerable ??
+            throw new InvalidOperationException("The benchmark census catalog is empty.");
+        var namesType = assembly.GetType("Lokad.Parquet.Benchmarks.CensusConsumerNames") ??
+            throw new InvalidOperationException("The benchmark consumer names are unavailable.");
+        var snapshotName = namesType.GetMethod("SnapshotName", BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("The benchmark consumer naming is unavailable.");
+        var layoutType = assembly.GetType("Lokad.Parquet.Benchmarks.CensusLayout") ??
+            throw new InvalidOperationException("The benchmark layout helper is unavailable.");
+        var nameOf = layoutType.GetMethod("NameOf", BindingFlags.Public | BindingFlags.Static) ??
+            throw new InvalidOperationException("The benchmark physical naming is unavailable.");
+        var matched = 0;
+        foreach (var entry in cases)
+        {
+            var entryType = entry.GetType();
+            var name = Assert.IsType<string>(entryType.GetProperty("Name")?.GetValue(entry));
+            var expected = FindDescriptor(name);
+            Assert.Equal(expected.Workload, entryType.GetProperty("Workload")?.GetValue(entry)?.ToString());
+            var consumer = entryType.GetProperty("Consumer")?.GetValue(entry) ??
+                throw new InvalidOperationException($"The static catalog case '{name}' has no consumer.");
+            Assert.Equal(expected.Consumer, Assert.IsType<string>(snapshotName.Invoke(null, [consumer])));
+            var physical = entryType.GetProperty("PhysicalType")?.GetValue(entry) ??
+                throw new InvalidOperationException($"The static catalog case '{name}' has no physical type.");
+            Assert.Equal(expected.PhysicalType, Assert.IsType<string>(nameOf.Invoke(null, [physical])));
+            Assert.Equal(expected.ValueWidthBytes, Assert.IsType<int>(entryType.GetProperty("TypeWidthBytes")?.GetValue(entry)));
+            Assert.Equal(expected.Nullable, Assert.IsType<bool>(entryType.GetProperty("Nullable")?.GetValue(entry)));
+            var projections = Assert.IsAssignableFrom<System.Collections.Generic.IEnumerable<object>>(entryType.GetProperty("PassProjections")?.GetValue(entry));
+            var actual = projections.Select(static projection => Assert.IsAssignableFrom<System.Collections.Generic.IEnumerable<int>>(projection).ToArray()).ToArray();
+            Assert.Equal(expected.Passes.Length, actual.Length);
+            for (var pass = 0; pass < actual.Length; pass++)
+                Assert.Equal(expected.Passes[pass].Projection, actual[pass]);
+            matched++;
+        }
+
+        Assert.Equal(BenchmarkReportQuartet.CensusDiagnosticDescriptors.Length + 1, matched);
+
+        static (string Workload, string Consumer, string PhysicalType, int ValueWidthBytes, bool Nullable, (int[] Projection, int Target)[] Passes) FindDescriptor(string name)
+        {
+            foreach (var descriptor in BenchmarkReportQuartet.CensusDiagnosticDescriptors)
+            {
+                if (descriptor.Name == name)
+                    return (descriptor.Workload, descriptor.Consumer, descriptor.PhysicalType, descriptor.ValueWidthBytes, descriptor.Nullable, descriptor.Passes);
+            }
+
+            if (name == "RequiredInt32Plain")
+                return ("RequiredInt32Plain", "int32", "int32", 4, false, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)]);
+            throw new InvalidOperationException($"The static catalog carries an unexpected case '{name}'.");
+        }
+    }
+    [Fact]
     public void CatalogLaneLayoutsDeriveFromWorkloadTokens()
     {
         var assembly = BenchmarkAssembly();
@@ -110,7 +182,13 @@ public sealed class CensusLayoutTests
         var requiredInt32 = derive.Invoke(null, [Enum.Parse(workloadType, "RequiredInt32Plain")]) ??
             throw new InvalidOperationException("The benchmark layout derivation returned nothing.");
         Assert.False(Assert.IsType<bool>(layoutType.GetProperty("Nullable")?.GetValue(requiredInt32)));
-        Assert.Equal("int32", layoutType.GetProperty("Consumer")?.GetValue(requiredInt32) as string);
+        var consumer = layoutType.GetProperty("Consumer")?.GetValue(requiredInt32) ?? throw new InvalidOperationException("The benchmark layout derivation returned nothing.");
+        Assert.Equal("Int32", consumer.ToString());
+        var names = assembly.GetType("Lokad.Parquet.Benchmarks.CensusConsumerNames") ??
+            throw new InvalidOperationException("The benchmark consumer names are unavailable.");
+        var snapshot = names.GetMethod("SnapshotName", BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("The benchmark consumer naming is unavailable.");
+        Assert.Equal("int32", Assert.IsType<string>(snapshot.Invoke(null, [consumer])));
     }
 
     [Fact]

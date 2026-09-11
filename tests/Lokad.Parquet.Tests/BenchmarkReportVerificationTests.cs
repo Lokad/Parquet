@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Reflection;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -40,6 +41,28 @@ public static class BenchmarkReportQuartet
                 },
             },
         };
+        if (schemaVersion == 9)
+        {
+            var censusCatalogCases = new JsonArray();
+            foreach (var descriptor in CensusDiagnosticDescriptors)
+            {
+                var passArray = new JsonArray();
+                foreach (var (projection, _) in descriptor.Passes)
+                    passArray.Add(new JsonObject { ["ordinals"] = new JsonArray(projection.Select(static ordinal => (JsonNode)ordinal).ToArray()) });
+                censusCatalogCases.Add(new JsonObject
+                {
+                    ["name"] = descriptor.Name,
+                    ["workload"] = descriptor.Workload,
+                    ["consumer"] = descriptor.Consumer,
+                    ["physicalType"] = descriptor.PhysicalType,
+                    ["typeWidthBytes"] = descriptor.ValueWidthBytes,
+                    ["nullable"] = descriptor.Nullable,
+                    ["passes"] = passArray,
+                });
+            }
+
+            catalog["censusCases"] = censusCatalogCases;
+        }
         File.WriteAllText(Path.Combine(root, "catalog.json"), catalog.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         var recorded = new DateTimeOffset(2026, 9, 9, 12, 0, 0, TimeSpan.Zero);
         WritePaired(0, "Microsoft Windows 10.0.26100", "synthetic-windows-fingerprint", "0x1", recorded.AddMinutes(0));
@@ -147,26 +170,8 @@ public static class BenchmarkReportQuartet
             // The schema-4 diagnostic case set is frozen alongside the paired
             // catalog cases: every extra below carries fully consistent
             // dimensions, denominators, pool accounting and pass evidence.
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "UnevenInt32Plain", "int32", 4, false, "multi-int32", 8192, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 8192), (new[] { 1 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NarrowInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt32RowRange", "int32", 4, false, "int32", 4096, 1, 0, 0, 4096, 15000, [(new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "SmallRowGroupsInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CompressibleInt32Snappy", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableBooleanPlain", "boolean", 1, true, "boolean", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "LowCardinalityStringDictionary", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt64Plain", "int64", 8, false, "int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredFloatPlain", "float", 4, false, "float", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredDoublePlain", "double", 8, false, "double", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt64Plain", "int64", 8, true, "nullable-int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableFixedByteArrayPlain", "fixed", 4, true, "fixed", 1000, 1, 0, null, null, 20000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableBinaryPlain", "binary", 0, true, "nullable-binary", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 10922));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "RequiredInt32V2", "int32", 4, false, "int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt32V2", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "HighCardinalityStringDictionary", "utf8", 0, false, "utf8", 65536, 1, 388776, null, null, 500000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 777552, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "NullableInt32DenseNulls", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CrcInt64Dictionary", "int64", 8, false, "int64", 1000, 1, 0, null, null, 30000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "CrcBinaryDictionarySnappy", "binary", 0, false, "binary", 1000, 1, 0, null, null, 30000, [(new[] { 1 }, 1000), (new[] { 1 }, 256)], 0, 8000));
-            schema9Cases.Add(DiagnosticCensusCase(scanFixture, "MisalignedMultiPage", "int32", 4, false, "multi-int32", 2000, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 2000), (new[] { 0, 1 }, 128)], 0, 0));
+            foreach (var descriptor in CensusDiagnosticDescriptors)
+                schema9Cases.Add(DiagnosticCensusCase(scanFixture, descriptor.Name, descriptor.PhysicalType, descriptor.ValueWidthBytes, descriptor.Nullable, descriptor.Consumer, descriptor.RowCount, descriptor.ColumnCount, descriptor.Utf8PayloadBytes, descriptor.RangeStart, descriptor.RangeCount, descriptor.PeakPerPass, descriptor.Passes, descriptor.Utf8Copied, descriptor.BinaryPayload));
         }
         File.WriteAllText(Path.Combine(root, "census.json"), census.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(
@@ -326,6 +331,54 @@ public static class BenchmarkReportQuartet
         return (Math.Exp(mean), Math.Exp(mean + Quantile(count - 1, legacyInterval) * error));
     }
 
+    internal sealed record CensusDiagnosticDescriptor(
+        string Name,
+        string Workload,
+        string PhysicalType,
+        int ValueWidthBytes,
+        bool Nullable,
+        string Consumer,
+        long RowCount,
+        int ColumnCount,
+        long Utf8PayloadBytes,
+        long? RangeStart,
+        long? RangeCount,
+        long PeakPerPass,
+        (int[] Projection, int Target)[] Passes,
+        long Utf8Copied,
+        long BinaryPayload);
+
+    internal static readonly CensusDiagnosticDescriptor[] CensusDiagnosticDescriptors =
+    [
+        new("UnevenInt32Plain", "TwoRequiredInt32Plain", "int32", 4, false, "multi-int32", 8192, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 8192), (new[] { 1 }, 4096)], 0, 0),
+        new("NarrowInt32Plain", "EightRequiredInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 1 }, 4096)], 0, 0),
+        new("RequiredInt32RowRange", "RequiredInt32Plain", "int32", 4, false, "int32", 4096, 1, 0, 0, 4096, 15000, [(new[] { 0 }, 4096)], 0, 0),
+        new("SmallRowGroupsInt32Plain", "RequiredInt32Plain", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("CompressibleInt32Snappy", "RequiredInt32Snappy", "int32", 4, false, "int32", 65536, 1, 0, null, null, 200000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("NullableBooleanPlain", "NullableBooleanPlain", "boolean", 1, true, "boolean", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 0),
+        new("LowCardinalityStringDictionary", "RequiredStringDictionary", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0),
+        new("RequiredInt64Plain", "RequiredInt64Plain", "int64", 8, false, "int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("RequiredFloatPlain", "RequiredFloatPlain", "float", 4, false, "float", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("RequiredDoublePlain", "RequiredDoublePlain", "double", 8, false, "double", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("NullableInt64Plain", "NullableInt64Plain", "int64", 8, true, "nullable-int64", 65536, 1, 0, null, null, 600000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("NullableFixedByteArrayPlain", "NullableFixedByteArrayPlain", "fixed", 4, true, "fixed", 1000, 1, 0, null, null, 20000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0),
+        new("NullableBinaryPlain", "NullableBinaryPlain", "binary", 0, true, "nullable-binary", 8192, 1, 0, null, null, 50000, [(new[] { 0 }, 8192), (new[] { 0 }, 4096)], 0, 10922),
+        new("RequiredInt32V2", "RequiredInt32V2", "int32", 4, false, "int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("NullableInt32V2", "NullableInt32V2", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("HighCardinalityStringDictionary", "RequiredStringDictionary", "utf8", 0, false, "utf8", 65536, 1, 388776, null, null, 500000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 777552, 0),
+        new("NullableInt32DenseNulls", "NullableInt32Plain", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("CrcInt64Dictionary", "CrcInt64Dictionary", "int64", 8, false, "int64", 1000, 1, 0, null, null, 30000, [(new[] { 0 }, 1000), (new[] { 0 }, 256)], 0, 0),
+        new("CrcBinaryDictionarySnappy", "CrcBinaryDictionarySnappy", "binary", 0, false, "binary", 1000, 1, 0, null, null, 30000, [(new[] { 1 }, 1000), (new[] { 1 }, 256)], 0, 8000),
+        new("MisalignedMultiPage", "TwoRequiredInt32Plain", "int32", 4, false, "multi-int32", 2000, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 2000), (new[] { 0, 1 }, 128)], 0, 0),
+        new("NullableInt32Plain", "NullableInt32Plain", "int32", 4, true, "nullable-int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("RequiredInt32Snappy", "RequiredInt32Snappy", "int32", 4, false, "int32", 65536, 1, 0, null, null, 300000, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)], 0, 0),
+        new("RequiredStringPlain", "RequiredStringPlain", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0),
+        new("RequiredStringSnappy", "RequiredStringSnappy", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0),
+        new("RequiredStringDictionary", "RequiredStringDictionary", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0),
+        new("RequiredStringDictionarySnappy", "RequiredStringDictionarySnappy", "utf8", 0, false, "utf8", 1024, 1, 2048, null, null, 6000, [(new[] { 0 }, 1024), (new[] { 0 }, 64)], 4096, 0),
+        new("TwoRequiredInt32Plain", "TwoRequiredInt32Plain", "int32", 4, false, "multi-int32", 8192, 2, 0, null, null, 60000, [(new[] { 0, 1 }, 8192), (new[] { 1 }, 4096)], 0, 0),
+        new("EightRequiredInt32Plain", "EightRequiredInt32Plain", "int32", 4, false, "multi-int32", 65536, 8, 0, null, null, 600000, [(new[] { 0, 1, 2, 3, 4, 5, 6, 7 }, 65536), (new[] { 4, 5, 6, 7 }, 4096)], 0, 0),
+    ];
     private static JsonObject DiagnosticCensusCase(
         string fixtureHash,
         string name,
@@ -1043,6 +1096,116 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
         Assert.Contains("frozen case set", outcome.Output);
     }
 
+    [Fact]
+    public async Task ExportedCatalogReconcilesVerifyingQuartet()
+    {
+        // B04: the real catalog export reconciles a valid quartet end to end.
+        var working = Path.Combine(Path.GetTempPath(), "lokad-catalog-export-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(working);
+        var previousRevision = Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION");
+        var previousLock = Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH");
+        Environment.SetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION", "synthetic-source-revision");
+        Environment.SetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH", "synthetic-package-lock");
+        try
+        {
+            var catalogPath = await ExportParityCatalogAsync(working);
+            var root = CopyQuartet(_quartets.V9Root);
+            try
+            {
+                ReconcilePairedCases(catalogPath, root);
+                var outcome = RunVerify(root);
+                Assert.Equal(0, outcome.ExitCode);
+                Assert.Contains("matches the supplied snapshots", outcome.Output);
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION", previousRevision);
+            Environment.SetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH", previousLock);
+            Directory.Delete(working, true);
+        }
+
+        static void ReconcilePairedCases(string exportedCatalogPath, string root)
+        {
+            // The synthetic quartet snapshots cover two paired cases, so the
+            // real export keeps its census section while borrowing the paired
+            // section the snapshots were built against.
+            var exported = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(exportedCatalogPath)));
+            var quartet = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(Path.Combine(root, "catalog.json"))));
+            exported["cases"] = Assert.IsType<JsonArray>(quartet["cases"]).DeepClone();
+            File.WriteAllText(Path.Combine(root, "catalog.json"), exported.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        }
+        static async Task<string> ExportParityCatalogAsync(string workingDirectory)
+        {
+            var testOutput = Path.GetDirectoryName(typeof(BenchmarkReportVerificationTests).Assembly.Location) ??
+                throw new InvalidOperationException("The test assembly has no output directory.");
+            var framework = Path.GetFileName(testOutput);
+            var configuration = Directory.GetParent(testOutput)?.Name ??
+                throw new InvalidOperationException("The test assembly has no configuration directory.");
+            var assembly = Assembly.LoadFrom(Path.Combine(RepositoryTestPaths.Root, "bench", "Lokad.Parquet.Benchmarks", "bin", configuration, framework, "Lokad.Parquet.Benchmarks.dll"));
+            var runner = assembly.GetType("Lokad.Parquet.Benchmarks.PairedParityRunner") ??
+                throw new InvalidOperationException("The benchmark parity runner is unavailable.");
+            var export = runner.GetMethod("WriteCatalogAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
+                throw new InvalidOperationException("The benchmark catalog export is unavailable.");
+            var catalogPath = Path.Combine(workingDirectory, "artifacts", "benchmarks", "parity-catalog.json");
+            await (Task)(export.Invoke(null, [catalogPath]) ?? throw new InvalidOperationException("The benchmark catalog export returned nothing."));
+            return catalogPath;
+        }
+    }
+
+    [Fact]
+    public void CatalogMissingCaseIsRejected()
+    {
+        var outcome = VerifyAfterCatalogMutation(_quartets.V9Root, static catalog =>
+        {
+            var cases = Assert.IsType<JsonArray>(catalog["censusCases"]);
+            cases.RemoveAt(0);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("does not match the frozen case set", outcome.Output);
+    }
+
+    [Fact]
+    public void DuplicateSnapshotCaseIsRejected()
+    {
+        var outcome = VerifyAfterCensusMutation(_quartets.V9Root, static census =>
+        {
+            var cases = Assert.IsType<JsonArray>(census["cases"]);
+            var clone = Assert.IsType<JsonObject>(JsonNode.Parse(Assert.IsType<JsonObject>(cases[0]).ToJsonString()));
+            cases.Add(clone);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("duplicates RequiredInt32Plain", outcome.Output);
+    }
+
+    [Fact]
+    public void DuplicateCatalogCaseIsRejected()
+    {
+        var outcome = VerifyAfterCatalogMutation(_quartets.V9Root, static catalog =>
+        {
+            var cases = Assert.IsType<JsonArray>(catalog["censusCases"]);
+            var clone = Assert.IsType<JsonObject>(JsonNode.Parse(Assert.IsType<JsonObject>(cases[0]).ToJsonString()));
+            cases.Add(clone);
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("duplicates census case", outcome.Output);
+    }
+
+    [Fact]
+    public void UnknownCatalogConsumerIsRejected()
+    {
+        var outcome = VerifyAfterCatalogMutation(_quartets.V9Root, static catalog =>
+        {
+            var cases = Assert.IsType<JsonArray>(catalog["censusCases"]);
+            Assert.IsType<JsonObject>(cases[0])["consumer"] = "int33";
+        });
+        Assert.NotEqual(0, outcome.ExitCode);
+        Assert.Contains("unknown consumer identity", outcome.Output);
+    }
     [Fact]
     public void CensusZeroReadsIsRejected()
     {

@@ -75,31 +75,7 @@ if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
     Environment.SetEnvironmentVariable(BenchmarkHostPolicy.AffinityEnvironmentVariable, launcherAffinity);
 Console.WriteLine($"Source revision: {Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded"}");
 if (args.Contains("--catalog", StringComparer.Ordinal))
-{
-    var catalogCases = ScanWorkloadCatalog.ParityWorkloads
-        .Select(static workload => new { name = "PreopenedScan/" + workload.ToString(), label = ScanWorkloadCatalog.Labels[workload] })
-        .Append(new { name = "WarmMetadataOpen", label = "Warm metadata open" })
-        .ToArray();
-    var catalog = new
-    {
-        pairedSchemaVersion = PairedParityRunner.SnapshotSchemaVersion,
-        sourceRevision = Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
-        packageLockHash = Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
-        cases = catalogCases,
-    };
-    Directory.CreateDirectory(Path.Combine("artifacts", "benchmarks"));
-    var catalogPath = Path.Combine("artifacts", "benchmarks", "parity-catalog.json");
-    await using (var catalogOutput = File.Create(catalogPath))
-    {
-        await JsonSerializer.SerializeAsync(catalogOutput, catalog, new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = true,
-        });
-    }
-    Console.WriteLine($"Parity catalog: {Path.GetFullPath(catalogPath)}");
-    return 0;
-}
+    return await PairedParityRunner.WriteCatalogAsync(Path.Combine("artifacts", "benchmarks", "parity-catalog.json"));
 if (args.Contains("--paired", StringComparer.Ordinal))
     return await PairedParityRunner.RunAsync(args);
 if (args.Contains("--census", StringComparer.Ordinal))

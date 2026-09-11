@@ -51,7 +51,7 @@ internal static class WorkCensusRunner
                 unevenFolded,
                 [0, 0],
                 ScanWorkload.TwoRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "multi-int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
                 [new CensusPassSpec([0, 1], firstGroupRows + secondGroupRows),
                  new CensusPassSpec([1], 4096)],
                 null));
@@ -71,7 +71,7 @@ internal static class WorkCensusRunner
                 wide.ColumnChecksums,
                 wide.NullCounts,
                 ScanWorkload.EightRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                 [new CensusPassSpec([0], RowCount),
                  new CensusPassSpec([1], 4096)],
                 null));
@@ -98,7 +98,7 @@ internal static class WorkCensusRunner
                 [folded],
                 [0],
                 ScanWorkload.RequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                 [new CensusPassSpec([0], rangeCount)],
                 new ParquetRowRange(rangeStart, rangeCount)));
         }
@@ -119,7 +119,7 @@ internal static class WorkCensusRunner
                 [smallFolded],
                 [0],
                 ScanWorkload.RequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                 [new CensusPassSpec([0], smallGroups * smallGroupRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -150,7 +150,7 @@ internal static class WorkCensusRunner
                 [compressibleFolded],
                 [0],
                 ScanWorkload.RequiredInt32Snappy,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                 [new CensusPassSpec([0], RowCount),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -171,7 +171,7 @@ internal static class WorkCensusRunner
                 [booleanFolded],
                 [booleanNulls],
                 ScanWorkload.NullableBooleanPlain,
-                new CensusCaseLayout(CensusPhysicalType.Boolean, 1, true, "boolean"),
+                new CensusCaseLayout(CensusPhysicalType.Boolean, 1, true, CensusConsumer.Boolean),
                 [new CensusPassSpec([0], booleanRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -192,7 +192,7 @@ internal static class WorkCensusRunner
                 [dictionaryChecksum],
                 [0],
                 ScanWorkload.RequiredStringDictionary,
-                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, "utf8"),
+                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
                 [new CensusPassSpec([0], dictionaryRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -233,7 +233,7 @@ internal static class WorkCensusRunner
                 [int64Folded],
                 [0],
                 ScanWorkload.RequiredInt64Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, "int64"),
+                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
                 [new CensusPassSpec([0], wideRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -271,7 +271,7 @@ internal static class WorkCensusRunner
                 [floatFolded],
                 [0],
                 ScanWorkload.RequiredFloatPlain,
-                new CensusCaseLayout(CensusPhysicalType.Float, sizeof(float), false, "float"),
+                new CensusCaseLayout(CensusPhysicalType.Float, sizeof(float), false, CensusConsumer.Float),
                 [new CensusPassSpec([0], wideRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -309,7 +309,7 @@ internal static class WorkCensusRunner
                 [doubleFolded],
                 [0],
                 ScanWorkload.RequiredDoublePlain,
-                new CensusCaseLayout(CensusPhysicalType.Double, sizeof(double), false, "double"),
+                new CensusCaseLayout(CensusPhysicalType.Double, sizeof(double), false, CensusConsumer.Double),
                 [new CensusPassSpec([0], wideRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -361,7 +361,7 @@ internal static class WorkCensusRunner
                 [nullableInt64Folded],
                 [nullableInt64NullCount],
                 ScanWorkload.NullableInt64Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), true, "nullable-int64"),
+                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), true, CensusConsumer.NullableInt64),
                 [new CensusPassSpec([0], nullableInt64Rows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -413,7 +413,7 @@ internal static class WorkCensusRunner
                 [denseFolded],
                 [denseNullCount],
                 ScanWorkload.NullableInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, "nullable-int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
                 [new CensusPassSpec([0], denseRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -471,7 +471,7 @@ internal static class WorkCensusRunner
                 [highCardChain],
                 [0],
                 ScanWorkload.RequiredStringDictionary,
-                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, "utf8"),
+                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
                 [new CensusPassSpec([0], highCardRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -500,7 +500,7 @@ internal static class WorkCensusRunner
                 [v2Folded],
                 [0],
                 ScanWorkload.RequiredInt32V2,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
                 [new CensusPassSpec([0], v2Rows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -542,7 +542,7 @@ internal static class WorkCensusRunner
                 [nullableV2Folded],
                 [nullableV2NullCount],
                 ScanWorkload.NullableInt32V2,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, "nullable-int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
                 [new CensusPassSpec([0], nullableV2Rows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -594,7 +594,7 @@ internal static class WorkCensusRunner
                 [binaryFolded],
                 [binaryNullCount],
                 ScanWorkload.NullableBinaryPlain,
-                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, true, "nullable-binary"),
+                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, true, CensusConsumer.NullableBinary),
                 [new CensusPassSpec([0], binaryRows),
                  new CensusPassSpec([0], 4096)],
                 null));
@@ -635,7 +635,7 @@ internal static class WorkCensusRunner
                 [leftFolded, rightFolded],
                 [0, 0],
                 ScanWorkload.TwoRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, "multi-int32"),
+                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
                 [new CensusPassSpec([0, 1], misalignedRows),
                  new CensusPassSpec([0, 1], 128)],
                 null));
@@ -664,7 +664,7 @@ internal static class WorkCensusRunner
                 plainTruth.ColumnHashes,
                 plainTruth.NullCounts,
                 ScanWorkload.CrcInt64Dictionary,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, "int64"),
+                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
                 [new CensusPassSpec([0], plainTruth.RowCount),
                  new CensusPassSpec([0], 256)],
                 null));
@@ -683,7 +683,7 @@ internal static class WorkCensusRunner
                 snappyTruth.ColumnHashes,
                 snappyTruth.NullCounts,
                 ScanWorkload.CrcBinaryDictionarySnappy,
-                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, false, "binary"),
+                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, false, CensusConsumer.Binary),
                 [new CensusPassSpec([1], snappyTruth.RowCount),
                  new CensusPassSpec([1], 256)],
                 null));
@@ -708,10 +708,41 @@ internal static class WorkCensusRunner
                 fixedTruth.ColumnHashes,
                 fixedTruth.NullCounts,
                 ScanWorkload.NullableFixedByteArrayPlain,
-                new CensusCaseLayout(CensusPhysicalType.FixedLengthByteArray, 4, true, "fixed"),
+                new CensusCaseLayout(CensusPhysicalType.FixedLengthByteArray, 4, true, CensusConsumer.Fixed),
                 [new CensusPassSpec([0], fixedTruth.RowCount),
                  new CensusPassSpec([0], 256)],
                 null));
+        }
+        {
+            // The static catalog is load-bearing: every measured case resolves
+            // to exactly one entry with a matching layout and pass set, so a
+            // renamed, added, or reshaped case fails here instead of silently
+            // drifting from the exported and reconciled catalog.
+            var catalogByName = new Dictionary<string, CensusCatalogCase>(StringComparer.Ordinal);
+            foreach (var catalogEntry in CensusCatalog.Cases)
+                catalogByName.Add(catalogEntry.Name, catalogEntry);
+            var reconciled = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var result in results)
+            {
+                if (!catalogByName.TryGetValue(result.Name, out var catalogEntry))
+                    throw new InvalidOperationException($"The work census measured an unknown case '{result.Name}'.");
+                if (!reconciled.Add(result.Name))
+                    throw new InvalidOperationException($"The work census measured a duplicate case '{result.Name}'.");
+                if (!string.Equals(result.PhysicalType, CensusLayout.NameOf(catalogEntry.PhysicalType), StringComparison.Ordinal) ||
+                    result.ValueWidthBytes != catalogEntry.TypeWidthBytes ||
+                    result.Nullable != catalogEntry.Nullable ||
+                    !string.Equals(result.Consumer, CensusConsumerNames.SnapshotName(catalogEntry.Consumer), StringComparison.Ordinal))
+                    throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog layout.");
+                if (result.PassPeaks.Count != catalogEntry.PassProjections.Count)
+                    throw new InvalidOperationException($"The work census case '{result.Name}' does not carry its catalog passes.");
+                for (var pass = 0; pass < result.PassPeaks.Count; pass++)
+                {
+                    if (!result.PassPeaks[pass].Projection.SequenceEqual(catalogEntry.PassProjections[pass]))
+                        throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog passes.");
+                }
+            }
+            if (reconciled.Count != CensusCatalog.Cases.Count)
+                throw new InvalidOperationException("The work census is missing catalog cases.");
         }
         var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
         var outputPath = Path.Combine(
@@ -1074,7 +1105,7 @@ internal static class WorkCensusRunner
                     CensusLayout.NameOf(layout.PhysicalType),
                     layout.TypeWidthBytes,
                     layout.Nullable,
-                    layout.Consumer,
+                    CensusConsumerNames.SnapshotName(layout.Consumer),
                     rowRange?.Start,
                     rowRange?.Count,
                     lokadLive.LiveOwnedBytes,
