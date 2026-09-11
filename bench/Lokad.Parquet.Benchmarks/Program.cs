@@ -62,13 +62,16 @@ if (string.IsNullOrEmpty(repositoryRoot))
     Environment.SetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT", repositoryRoot);
 }
 
+// The lane switch precedes every early return so truth verification and all
+// measured lanes observe the requested mode. Benchmark workers establish their
+// own lane in-process; the paired and census lanes run here and read this switch.
+if (args.Contains("--force-scalar", StringComparer.Ordinal))
+    AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
 if (args.Contains("--check-path", StringComparer.Ordinal))
     return CheckPath(args);
 if (args.Contains("--verify-truth", StringComparer.Ordinal))
     return await ScanTruthVerification.RunAsync();
 BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
-if (args.Contains("--force-scalar", StringComparer.Ordinal))
-    AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
 var launcherAffinity = BindToOneLogicalProcessor();
 Console.WriteLine($"Processor affinity: {launcherAffinity}");
 if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())

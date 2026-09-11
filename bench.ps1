@@ -3,7 +3,8 @@ param(
     [string] $Suite = "Core",
     [string] $Filter = "",
     [string] $PairedCase = "",
-    [switch] $EnforceParity
+    [switch] $EnforceParity,
+    [switch] $ForceScalar
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,6 +83,14 @@ try {
         }
     }
 
+    # The scalar lane is an explicit host switch: the paired and census lanes
+    # run in this process and read it, while BenchmarkDotNet workers establish
+    # their own lane in-process.
+    $scalarArguments = @()
+    if ($ForceScalar) {
+        $scalarArguments += "--force-scalar"
+    }
+
     if ($Suite -eq "Paired") {
         $pairedArguments = @("--paired")
         if ($PairedCase) {
@@ -90,12 +99,12 @@ try {
         if ($EnforceParity) {
             $pairedArguments += "--paired-enforce"
         }
-        & dotnet $benchmarkDll @pairedArguments
+        & dotnet $benchmarkDll @pairedArguments @scalarArguments
         exit $LASTEXITCODE
     }
 
     if ($Suite -eq "Census") {
-        & dotnet $benchmarkDll --census
+        & dotnet $benchmarkDll --census @scalarArguments
         exit $LASTEXITCODE
     }
 
@@ -108,7 +117,7 @@ try {
     # ColdOpen can exclude diagnostic benchmarks while sharing the class.
     $filterArguments = @()
     foreach ($pattern in $Filter.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) { $filterArguments += @('--filter', $pattern) }
-    & dotnet $benchmarkDll @filterArguments
+    & dotnet $benchmarkDll @filterArguments @scalarArguments
     exit $LASTEXITCODE
 }
 finally {

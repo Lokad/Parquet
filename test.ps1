@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $solution = Join-Path $PSScriptRoot "Lokad.Parquet.slnx"
+$scalarState = $env:LOKAD_PARQUET_FORCE_SCALAR
 
 Push-Location $PSScriptRoot
 try {
@@ -47,5 +48,11 @@ try {
     exit $LASTEXITCODE
 }
 finally {
+    if ($null -eq $scalarState) {
+        Remove-Item Env:\LOKAD_PARQUET_FORCE_SCALAR -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:LOKAD_PARQUET_FORCE_SCALAR = $scalarState
+    }
     Pop-Location
 }
