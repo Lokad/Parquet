@@ -185,6 +185,190 @@ public sealed class RequiredRangeScanTests
         });
     }
 
+    [Fact]
+    public async Task FixedBinaryRangeValuesRoundTrip()
+    {
+        // R01: partial required FIXED_LEN_BYTE_ARRAY pages decode their slice.
+        var values = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] };
+        foreach (var version in Enum.GetValues<FixturePageVersion>())
+            foreach (var crc in new[] { FixtureCrcMode.Absent, FixtureCrcMode.Valid })
+            {
+                var bytes = ParquetFixtureBuilder.CreateInt32(new()
+                {
+                    PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+                    TypeLength = 2,
+                    PhysicalValues = values,
+                    PageVersion = version,
+                    CrcMode = crc,
+                });
+                var label = version.ToString() + " crc=" + crc.ToString();
+                using var tracker = new PoolTracker();
+                Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 0));
+                Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 1));
+                Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 2));
+                Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 3));
+                Assert.Equal([1, 2, 3, 4, 5, 6, 7, 8], await ScanFixedBinaryRange(bytes, 0, 4, 64, 2));
+                Assert.Equal([7, 8], await ScanFixedBinaryRange(bytes, 3, 1, 64, 1));
+                Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 1, 3));
+                _output.WriteLine(label + ": fixed range selections round-tripped.");
+            }
+    }
+    [Fact]
+    public async Task FixedBinaryRangeReadsBoundedSourceBytes()
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+            TypeLength = 2,
+            PhysicalValues = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] },
+        });
+        var fullBytes = await ScanFixedRangeBytes(bytes, 0, 4, 64);
+        var shortBytes = await ScanFixedRangeBytes(bytes, 1, 2, 64);
+        _output.WriteLine("fixed source bytes full=" + fullBytes + " short=" + shortBytes + ".");
+        Assert.True(shortBytes < fullBytes);
+
+        async Task<long> ScanFixedRangeBytes(byte[] fixture, long start, long count, int target)
+        {
+            using var tracker = new PoolTracker();
+            var source = new CountingSource(fixture);
+            await using var file = await ParquetFile.OpenAsync(source, ParquetSourceOwnership.Caller, new ParquetReaderOptions(), CancellationToken.None);
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, new ParquetRowRange(start, count), target)))
+                batch.Dispose();
+            return source.BytesRead;
+        }
+    }
+    [Fact]
+    public async Task FixedBinaryRangeSnappyControlRoundTrips()
+    {
+        // Compressed pages bypass slicing and decode the whole page.
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+            TypeLength = 2,
+            PhysicalValues = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] },
+            CompressionCodec = ParquetCompressionCodec.Snappy,
+        });
+        using var tracker = new PoolTracker();
+        Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 0));
+        Assert.Equal([3, 4, 5, 6], await ScanFixedBinaryRange(bytes, 1, 2, 64, 3));
+    }
+
+    [Fact]
+    public async Task FixedBinaryRangeTruncatedDeclarationFailsBalanced()
+    {
+        // The bounded slice read never observes the whole page, so a truncated
+        // declared size must fail at validation with balanced pools.
+        foreach (var version in Enum.GetValues<FixturePageVersion>())
+        {
+            var bytes = ParquetFixtureBuilder.CreateInt32(new()
+            {
+                PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+                TypeLength = 2,
+                PhysicalValues = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] },
+                PageVersion = version,
+                PageHeaderOverrides = new ParquetPageHeaderOverrides { UncompressedSize = 4, CompressedSize = 4 },
+            });
+            using var tracker = new PoolTracker();
+            await using var file = await ParquetFile.OpenAsync(bytes, new ParquetReaderOptions(), CancellationToken.None);
+            await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+            {
+                await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, new ParquetRowRange(1, 2), 64)))
+                    batch.Dispose();
+            });
+        }
+    }
+    [Fact]
+    public async Task FixedBinaryRangeTruncatedSourceFailsBalanced()
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+            TypeLength = 2,
+            PhysicalValues = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] },
+        });
+        using var tracker = new PoolTracker();
+        long dataPageStart;
+        long footerStart;
+        await using (var probe = await ParquetFile.OpenAsync(bytes, new ParquetReaderOptions(), CancellationToken.None))
+        {
+            var chunk = probe.Metadata.RowGroups[0].Columns[0];
+            dataPageStart = chunk.DataPageOffset;
+            var footerLength = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(bytes.Length - 8));
+            footerStart = bytes.Length - 8 - footerLength;
+        }
+
+        var source = new TruncatingSource(bytes, dataPageStart, footerStart);
+        await using var file = await ParquetFile.OpenAsync(source, ParquetSourceOwnership.Caller, new ParquetReaderOptions(), CancellationToken.None);
+        await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, new ParquetRowRange(1, 2), 64)))
+                batch.Dispose();
+        });
+    }
+
+    [Fact]
+    public async Task FixedBinaryRangeCancellationBalancesPools()
+    {
+        var bytes = ParquetFixtureBuilder.CreateInt32(new()
+        {
+            PhysicalTypeCode = (int)ParquetPhysicalType.FixedLengthByteArray,
+            TypeLength = 2,
+            PhysicalValues = new byte[][] { [1, 2], [3, 4], [5, 6], [7, 8] },
+        });
+        using var tracker = new PoolTracker();
+        await using var file = await ParquetFile.OpenAsync(bytes, new ParquetReaderOptions(), CancellationToken.None);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, new ParquetRowRange(1, 2), 64), cancellation.Token))
+                batch.Dispose();
+        });
+    }
+
+    private static async Task<byte[]> ScanFixedBinaryRange(byte[] fixture, long start, long count, int target, int sourceKind)
+    {
+        // Source kinds: 0 direct memory, 1 exposed MemoryStream, 2 non-exposed
+        // MemoryStream subclass, 3 opaque custom source.
+        var collected = new List<byte>();
+        if (sourceKind == 3)
+        {
+            var source = new CountingSource(fixture);
+            await using var file = await ParquetFile.OpenAsync(source, ParquetSourceOwnership.Caller, new ParquetReaderOptions(), CancellationToken.None);
+            await CollectAsync(file);
+        }
+        else if (sourceKind == 0)
+        {
+            await using var file = await ParquetFile.OpenAsync(fixture, new ParquetReaderOptions(), CancellationToken.None);
+            await CollectAsync(file);
+        }
+        else
+        {
+            using MemoryStream stream = sourceKind == 1
+                ? new MemoryStream(fixture, 0, fixture.Length, false, true)
+                : new NonExposingStream(fixture);
+            await using var file = await ParquetFile.OpenAsync(stream, ParquetSourceOwnership.Caller, new ParquetReaderOptions(), CancellationToken.None);
+            await CollectAsync(file);
+        }
+
+        return [.. collected];
+
+        async Task CollectAsync(ParquetFile file)
+        {
+            await foreach (var batch in file.ScanAsync(new([file.Metadata.Schema.Columns[0]], null, new ParquetRowRange(start, count), target)))
+            {
+                var fixedBatch = Assert.IsType<ParquetFixedLengthByteArrayColumnBatch>(batch.Columns[0]);
+                Assert.Equal(2, fixedBatch.TypeWidth);
+                collected.AddRange(fixedBatch.Payload.ToArray());
+                batch.Dispose();
+            }
+        }
+    }
+
+    private sealed class NonExposingStream(byte[] bytes) : MemoryStream(bytes, false)
+    {
+    }
+
     private sealed class CountingSource(byte[] bytes) : IParquetRandomAccessSource
     {
         public long Length => bytes.Length;

@@ -6,6 +6,8 @@
 
 - Correct slicing of all-valid optional INT32 pages and validate batch-size
   limits consistently for single-column and multi-column scans.
+- Decode row-range slices of required FIXED_LEN_BYTE_ARRAY pages in slice
+  coordinates, validating the full declared page size before bounded reads.
 - Prevent disposal of a completed projected enumerator from unregistering a
   later scan.
 - Return page-header buffers after synchronous parsing failures and protect
