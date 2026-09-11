@@ -259,34 +259,27 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     levelByteCount > payload.Length - levelOffset ||
                     physicalOffset > payload.Length)
                     throw new ParquetFormatException("An optional page has invalid level or value boundaries.", location);
-                levelsBitmap = PooledArrayOwner<byte>.Rent(checked((rowCount + 7) / 8), budget);
-                int validCount;
-                int consumed;
+                DecodedBitmapSection bitmapSection;
                 try
                 {
-                    consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                        payload.Slice(levelOffset, levelByteCount),
+                    bitmapSection = DefinitionLevelCodec.DecodeBitmapSection(
+                        payload,
                         rowCount,
-                        levelsBitmap.Memory.Span,
+                        levelOffset,
+                        levelByteCount,
+                        physicalOffset,
+                        expectedNullCount,
+                        budget,
                         cancellationToken,
-                        out validCount);
+                        location);
                 }
                 catch (ParquetFormatException exception)
                 {
                     throw new ParquetFormatException(exception.Message, exception, new ParquetErrorLocation(exception.ByteOffset ?? location.ByteOffset, location.RowGroupOrdinal, location.ColumnOrdinal, location.PageOrdinal));
                 }
-                if (consumed != levelByteCount)
-                    throw new ParquetFormatException("An optional page has trailing definition-level bytes.", location);
-                if (expectedNullCount is int nullCount && rowCount - validCount != nullCount)
-                    throw new ParquetFormatException("A V2 page null count does not match its definition levels.", location);
-                physicalCount = validCount;
-                if (validCount == rowCount)
-                {
-                    // All-valid pages carry no bitmap; the tight expansions
-                    // below overwrite every output slot.
-                    levelsBitmap.Dispose();
-                    levelsBitmap = null;
-                }
+
+                levelsBitmap = bitmapSection.Validity;
+                physicalCount = bitmapSection.ValidCount;
             }
 
             if (physicalOffset >= payload.Length)

@@ -134,6 +134,8 @@
   contiguous range checks instead of Enum.IsDefined.
 - Hoist loop-invariant spans and counts out of the dictionary-expansion copy loops for
   BYTE_ARRAY and fixed-width pages.
+- Share optional bitmap-section rent, decode, consumed-bytes and null-count checks with
+  all-valid transfer between the primitive page paths and dictionary expansion.
 
 ## 0.1.0 - 2026-09-02
 

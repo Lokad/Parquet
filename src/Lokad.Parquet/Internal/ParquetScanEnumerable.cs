@@ -1528,32 +1528,29 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     try
                     {
                         rowValues = _file.RentColumnValues<int>(_column, rowCount);
-                        validity = PooledArrayOwner<byte>.Rent(
-                            checked((rowCount + 7) / 8),
-                            _memoryBudget);
-                        var int32LevelInput = payload.Slice(levelOffset, levelByteCount);
-                        int int32Consumed;
-                        int validCount;
+                        var int32Location = CurrentPageLocation();
+                        DecodedBitmapSection int32Section;
                         try
                         {
-                            int32Consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                                int32LevelInput,
+                            int32Section = DefinitionLevelCodec.DecodeBitmapSection(
+                                payload,
                                 rowCount,
-                                validity.Memory.Span,
+                                levelOffset,
+                                levelByteCount,
+                                physicalOffset,
+                                expectedNullCount,
+                                _memoryBudget,
                                 _cancellationToken,
-                                out validCount);
+                                int32Location);
                         }
                         catch (ParquetFormatException exception) when (exception.ByteOffset is null)
                         {
-                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
+                            throw new ParquetFormatException(exception.Message, exception, int32Location);
                         }
-                        if (int32Consumed != int32LevelInput.Length)
-                            throw PageFormat("An optional page has trailing definition-level bytes.");
-                        if (expectedNullCount is int int32NullCount && rowCount - validCount != int32NullCount)
-                            throw PageFormat("A V2 page null count does not match its definition levels.");
 
-                        var int32PhysicalByteCount = payload.Length - physicalOffset;
+                        validity = int32Section.Validity;
+                        var validCount = int32Section.ValidCount;
+                        var int32PhysicalByteCount = payload.Length - int32Section.PhysicalOffset;
                         if ((int32PhysicalByteCount & (sizeof(int) - 1)) != 0 ||
                             int32PhysicalByteCount / sizeof(int) != validCount)
                             throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1568,7 +1565,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         else
                         {
                             int32Output.Clear();
-                            var validityBytes = validity.Memory.Span;
+                            var validityBytes = (validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.")).Memory.Span;
                             for (var byteIndex = 0; byteIndex < validityBytes.Length; byteIndex++)
                             {
                                 if ((byteIndex & 511) == 0)
@@ -1592,12 +1589,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         rowValues = null;
                         if (validCount == rowCount)
                         {
-                            validity.Dispose();
-                            validity = null;
+                            // The shared section released the all-valid bitmap.
                             _pageValidity.SetAllValid();
                         }
                         else
                         {
+                            validity = validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.");
                             _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
@@ -1625,29 +1622,28 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     try
                     {
                         rowValues = _file.RentColumnValues<bool>(_column, rowCount);
-                        validity = PooledArrayOwner<byte>.Rent(
-                            checked((rowCount + 7) / 8),
-                            _memoryBudget);
-                        var levelInput = payload.Slice(levelOffset, levelByteCount);
-                        int validCount;
+                        var booleanLocation = CurrentPageLocation();
+                        DecodedBitmapSection booleanSection;
                         try
                         {
-                            var consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                                levelInput,
+                            booleanSection = DefinitionLevelCodec.DecodeBitmapSection(
+                                payload,
                                 rowCount,
-                                validity.Memory.Span,
+                                levelOffset,
+                                levelByteCount,
+                                physicalOffset,
+                                expectedNullCount,
+                                _memoryBudget,
                                 _cancellationToken,
-                                out validCount);
-                            if (consumed != levelInput.Length)
-                                throw PageFormat("An optional page has trailing definition-level bytes.");
-                            if (expectedNullCount is int nullCount && rowCount - validCount != nullCount)
-                                throw PageFormat("A V2 page null count does not match its definition levels.");
+                                booleanLocation);
                         }
                         catch (ParquetFormatException exception) when (exception.ByteOffset is null)
                         {
-                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
+                            throw new ParquetFormatException(exception.Message, exception, booleanLocation);
                         }
+
+                        validity = booleanSection.Validity;
+                        var validCount = booleanSection.ValidCount;
                         var booleanPhysicalByteCount = checked((validCount + 7) / 8);
                         if (booleanPhysicalByteCount != payload.Length - physicalOffset)
                             throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1660,7 +1656,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         else
                         {
                             booleanOutput.Clear();
-                            var validityBytes = validity.Memory.Span;
+                            var validityBytes = (validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.")).Memory.Span;
                             var physicalBitIndex = 0;
                             for (var byteIndex = 0; byteIndex < validityBytes.Length; byteIndex++)
                             {
@@ -1682,12 +1678,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         rowValues = null;
                         if (validCount == rowCount)
                         {
-                            validity.Dispose();
-                            validity = null;
+                            // The shared section released the all-valid bitmap.
                             _pageValidity.SetAllValid();
                         }
                         else
                         {
+                            validity = validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.");
                             _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
@@ -1714,29 +1710,28 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     try
                     {
                         rowValues = _file.RentColumnValues<long>(_column, rowCount);
-                        validity = PooledArrayOwner<byte>.Rent(
-                            checked((rowCount + 7) / 8),
-                            _memoryBudget);
-                        var levelInput = payload.Slice(levelOffset, levelByteCount);
-                        int validCount;
+                        var int64Location = CurrentPageLocation();
+                        DecodedBitmapSection int64Section;
                         try
                         {
-                            var consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                                levelInput,
+                            int64Section = DefinitionLevelCodec.DecodeBitmapSection(
+                                payload,
                                 rowCount,
-                                validity.Memory.Span,
+                                levelOffset,
+                                levelByteCount,
+                                physicalOffset,
+                                expectedNullCount,
+                                _memoryBudget,
                                 _cancellationToken,
-                                out validCount);
-                            if (consumed != levelInput.Length)
-                                throw PageFormat("An optional page has trailing definition-level bytes.");
-                            if (expectedNullCount is int nullCount && rowCount - validCount != nullCount)
-                                throw PageFormat("A V2 page null count does not match its definition levels.");
+                                int64Location);
                         }
                         catch (ParquetFormatException exception) when (exception.ByteOffset is null)
                         {
-                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
+                            throw new ParquetFormatException(exception.Message, exception, int64Location);
                         }
+
+                        validity = int64Section.Validity;
+                        var validCount = int64Section.ValidCount;
                         var int64PhysicalByteCount = checked(validCount * sizeof(long));
                         if (int64PhysicalByteCount != payload.Length - physicalOffset)
                             throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1749,7 +1744,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         else
                         {
                             int64Output.Clear();
-                            var validityBytes = validity.Memory.Span;
+                            var validityBytes = (validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.")).Memory.Span;
                             var physicalByteOffset = 0;
                             for (var byteIndex = 0; byteIndex < validityBytes.Length; byteIndex++)
                             {
@@ -1775,12 +1770,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         rowValues = null;
                         if (validCount == rowCount)
                         {
-                            validity.Dispose();
-                            validity = null;
+                            // The shared section released the all-valid bitmap.
                             _pageValidity.SetAllValid();
                         }
                         else
                         {
+                            validity = validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.");
                             _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
@@ -1807,29 +1802,28 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     try
                     {
                         rowValues = _file.RentColumnValues<float>(_column, rowCount);
-                        validity = PooledArrayOwner<byte>.Rent(
-                            checked((rowCount + 7) / 8),
-                            _memoryBudget);
-                        var levelInput = payload.Slice(levelOffset, levelByteCount);
-                        int validCount;
+                        var floatLocation = CurrentPageLocation();
+                        DecodedBitmapSection floatSection;
                         try
                         {
-                            var consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                                levelInput,
+                            floatSection = DefinitionLevelCodec.DecodeBitmapSection(
+                                payload,
                                 rowCount,
-                                validity.Memory.Span,
+                                levelOffset,
+                                levelByteCount,
+                                physicalOffset,
+                                expectedNullCount,
+                                _memoryBudget,
                                 _cancellationToken,
-                                out validCount);
-                            if (consumed != levelInput.Length)
-                                throw PageFormat("An optional page has trailing definition-level bytes.");
-                            if (expectedNullCount is int nullCount && rowCount - validCount != nullCount)
-                                throw PageFormat("A V2 page null count does not match its definition levels.");
+                                floatLocation);
                         }
                         catch (ParquetFormatException exception) when (exception.ByteOffset is null)
                         {
-                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
+                            throw new ParquetFormatException(exception.Message, exception, floatLocation);
                         }
+
+                        validity = floatSection.Validity;
+                        var validCount = floatSection.ValidCount;
                         var floatPhysicalByteCount = checked(validCount * sizeof(int));
                         if (floatPhysicalByteCount != payload.Length - physicalOffset)
                             throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1842,7 +1836,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         else
                         {
                             floatOutput.Clear();
-                            var validityBytes = validity.Memory.Span;
+                            var validityBytes = (validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.")).Memory.Span;
                             var physicalByteOffset = 0;
                             for (var byteIndex = 0; byteIndex < validityBytes.Length; byteIndex++)
                             {
@@ -1868,12 +1862,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         rowValues = null;
                         if (validCount == rowCount)
                         {
-                            validity.Dispose();
-                            validity = null;
+                            // The shared section released the all-valid bitmap.
                             _pageValidity.SetAllValid();
                         }
                         else
                         {
+                            validity = validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.");
                             _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
@@ -1900,29 +1894,28 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     try
                     {
                         rowValues = _file.RentColumnValues<double>(_column, rowCount);
-                        validity = PooledArrayOwner<byte>.Rent(
-                            checked((rowCount + 7) / 8),
-                            _memoryBudget);
-                        var levelInput = payload.Slice(levelOffset, levelByteCount);
-                        int validCount;
+                        var doubleLocation = CurrentPageLocation();
+                        DecodedBitmapSection doubleSection;
                         try
                         {
-                            var consumed = RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap(
-                                levelInput,
+                            doubleSection = DefinitionLevelCodec.DecodeBitmapSection(
+                                payload,
                                 rowCount,
-                                validity.Memory.Span,
+                                levelOffset,
+                                levelByteCount,
+                                physicalOffset,
+                                expectedNullCount,
+                                _memoryBudget,
                                 _cancellationToken,
-                                out validCount);
-                            if (consumed != levelInput.Length)
-                                throw PageFormat("An optional page has trailing definition-level bytes.");
-                            if (expectedNullCount is int nullCount && rowCount - validCount != nullCount)
-                                throw PageFormat("A V2 page null count does not match its definition levels.");
+                                doubleLocation);
                         }
                         catch (ParquetFormatException exception) when (exception.ByteOffset is null)
                         {
-                            throw new ParquetFormatException(exception.Message, exception, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
+                            throw new ParquetFormatException(exception.Message, exception, doubleLocation);
                         }
+
+                        validity = doubleSection.Validity;
+                        var validCount = doubleSection.ValidCount;
                         var doublePhysicalByteCount = checked(validCount * sizeof(long));
                         if (doublePhysicalByteCount != payload.Length - physicalOffset)
                             throw PageFormat("An optional fixed-width page has an inconsistent physical-value length.");
@@ -1935,7 +1928,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         else
                         {
                             doubleOutput.Clear();
-                            var validityBytes = validity.Memory.Span;
+                            var validityBytes = (validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.")).Memory.Span;
                             var physicalByteOffset = 0;
                             for (var byteIndex = 0; byteIndex < validityBytes.Length; byteIndex++)
                             {
@@ -1961,12 +1954,12 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                         rowValues = null;
                         if (validCount == rowCount)
                         {
-                            validity.Dispose();
-                            validity = null;
+                            // The shared section released the all-valid bitmap.
                             _pageValidity.SetAllValid();
                         }
                         else
                         {
+                            validity = validity ?? throw new InvalidOperationException("A mixed-validity page has no bitmap.");
                             _pageValidity.SetExplicit(validity);
                             validity = null;
                         }
