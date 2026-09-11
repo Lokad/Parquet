@@ -254,6 +254,8 @@ public sealed class SafetyPolicyTests
                 "synthetic frozen census-case builder with one fixture-method caller",
             ["Lokad.Parquet.Tests.OpenFailureTests+PendingFailingSource.Fail"] =
                 "explicit failure-trigger boundary on a pending-read test double",
+            ["Lokad.Parquet.Tests.OpenFailureTests+GatedDisposalLengthStream.CompleteDisposal"] =
+                "explicit disposal-gate boundary on a pending-cleanup test double",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32"] =
                 "independent fixture writer shared across the test/benchmark boundary",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32Columns"] =

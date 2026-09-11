@@ -33,9 +33,12 @@ public sealed class OwnedStreamDisposalTests
     {
         var bytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1] });
         using var stream = new MemoryStream(bytes, writable: false);
-        await using var file = await ParquetFile.OpenAsync(stream, ParquetSourceOwnership.Caller, ParquetReaderOptions.Default, CancellationToken.None);
+        var file = await ParquetFile.OpenAsync(stream, ParquetSourceOwnership.ParquetFile, ParquetReaderOptions.Default, CancellationToken.None);
+        var disposal = file.DisposeAsync();
+        Assert.True(disposal.IsCompletedSuccessfully);
+        await disposal;
+        Assert.False(stream.CanRead);
     }
-
     public sealed class FaultedDisposalMemoryStream : MemoryStream
     {
         public FaultedDisposalMemoryStream(byte[] bytes)

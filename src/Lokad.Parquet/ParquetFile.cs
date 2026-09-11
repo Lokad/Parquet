@@ -132,6 +132,9 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <param name="options">Immutable safety limits.</param>
     /// <param name="cancellationToken">Cancellation for opening reads.</param>
     /// <returns>The open Parquet file.</returns>
+    /// <remarks>Ownership transfers after argument validation: when the file owns the stream,
+    /// adapter-construction and opening failures dispose it exactly once, best-effort, preserving
+    /// the primary error. Caller-owned streams are never disposed on failure.</remarks>
     public static ValueTask<ParquetFile> OpenAsync(
         Stream stream,
         ParquetSourceOwnership ownership,
@@ -141,8 +144,38 @@ public sealed class ParquetFile : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(options);
         ValidateOwnership(ownership);
-        var source = new StreamRandomAccessSource(stream, ownership);
-        return OpenOwnedAsync(source, options, cancellationToken);
+        if (ownership == ParquetSourceOwnership.Caller)
+        {
+            var callerSource = new StreamRandomAccessSource(stream, ownership);
+            return OpenOwnedAsync(callerSource, options, cancellationToken);
+        }
+
+        StreamRandomAccessSource ownedSource;
+        try
+        {
+            ownedSource = new StreamRandomAccessSource(stream, ownership);
+        }
+        catch (Exception constructionFailure)
+        {
+            return DisposeStreamAfterConstructionFailureAsync(stream, constructionFailure);
+        }
+
+        return OpenOwnedAsync(ownedSource, options, cancellationToken);
+
+        async ValueTask<ParquetFile> DisposeStreamAfterConstructionFailureAsync(Stream failedStream, Exception constructionFailure)
+        {
+            try
+            {
+                await failedStream.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best-effort cleanup preserves the primary construction failure.
+            }
+
+            ExceptionDispatchInfo.Capture(constructionFailure).Throw();
+            throw new UnreachableException();
+        }
     }
 
     /// <summary>Opens a caller-provided random-access source and leaves it caller-owned.</summary>

@@ -6,6 +6,9 @@
 
 - Correct slicing of all-valid optional INT32 pages and validate batch-size
   limits consistently for single-column and multi-column scans.
+- Dispose owned streams exactly once when adapter construction fails, preserving
+  the primary error; caller-owned streams stay untouched. Ownership transfers after
+  argument validation.
 - Preserve absent statistics extrema as absent instead of present-empty values,
   keeping counts-only and explicitly empty statistics distinguishable.
 - Decode row-range slices of required FIXED_LEN_BYTE_ARRAY pages in slice
