@@ -475,6 +475,15 @@ public static class BenchmarkReportQuartet
             {
                 var completed = process.WaitForExit(180000);
                 var output = process.StandardOutput.ReadToEnd() + "\n" + process.StandardError.ReadToEnd();
+                // PowerShell renders long terminating errors with host-width word wrapping
+                // (80 columns on the Linux CI runner) and emits ANSI color codes into the
+                // redirected error stream, splitting single-line gate messages across pipe continuations.
+                // Strip the color sequences and unwrap those continuations so message
+                // assertions hold on every host; all gate messages are single-line.
+                var escape = new string((char)27, 1);
+                output = System.Text.RegularExpressions.Regex.Replace(output, escape + @"\[[0-9;?]*[a-zA-Z]", "");
+                output = System.Text.RegularExpressions.Regex.Replace(output, @"\s*\r?\n\s*\|\s*", " ");
+                output = System.Text.RegularExpressions.Regex.Replace(output, @" {2,}", " ");
                 if (!completed)
                 {
                     try
