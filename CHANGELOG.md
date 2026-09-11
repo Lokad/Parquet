@@ -140,6 +140,8 @@
   integer levels, eliding all-valid bitmaps and removing the int-level pipeline.
 - Validate each page header once into an explicit checked plan consumed by post-payload
   dispatch instead of re-deriving and re-validating it.
+- Separate page payload acquisition (borrow or rent, CRC, decompression) from cursor
+  progression behind an explicit ownership-transferring decode method.
 
 ## 0.1.0 - 2026-09-02
 

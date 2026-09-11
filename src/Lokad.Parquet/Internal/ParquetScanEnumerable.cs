@@ -668,129 +668,22 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 Exception? loadFailure = null;
                 try
                 {
-                    ReadOnlyMemory<byte> compressedMemory;
-                    var slicedPage = false;
-                    var slicedFixedPage = false;
-                    var pageBorrowed = ScanPageReader.TryGetSourceMemory(_file.Source, _file.Length, payloadOffset, header.CompressedSize, out var borrowedPage);
-                    if (sliceEligible && pageBorrowed)
-                    {
-                        if (header.Crc is int borrowedCrc && ScanPageReader.ComputeCrc32(borrowedPage.Span, _cancellationToken) != unchecked((uint)borrowedCrc))
-                            throw new ParquetFormatException(
-                                "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-                        _pagePayloadSliceRows = sliceStartRow;
-                        compressedMemory = borrowedPage.Slice(checked(sliceStartRow * sliceByteWidth), checked(sliceRowCount * sliceByteWidth));
-                        slicedPage = true;
-                    }
-                    else if (sliceEligible && header.Crc is null)
-                    {
-                        // Opaque source without a CRC: only selected bytes are read, so no
-                        // CRC is owed and none is performed; chunk accounting still uses
-                        // the header sizes validated above.
-                        var sliceLength = checked(sliceRowCount * sliceByteWidth);
-                        compressedPayload = _pagePayloadCache.Rent(sliceLength);
-                        await ScanPageReader.ReadExactlyAsync(
-                            _file.Source,
-                            _cancellationToken,
-                            checked(payloadOffset + (long)sliceStartRow * sliceByteWidth),
-                            new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length),
-                            "The immutable input ended during a page read.",
-                            ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal))
-                            .ConfigureAwait(false);
-                        compressedMemory = compressedPayload.Memory;
-                        _pagePayloadSliceRows = sliceStartRow;
-                        slicedPage = true;
-                    }
-                    else if (pageBorrowed)
-                    {
-                        compressedMemory = borrowedPage;
-                    }
-                    else
-                    {
-                        compressedPayload = _pagePayloadCache.Rent(header.CompressedSize);
-                        await ScanPageReader.ReadExactlyAsync(
-                            _file.Source,
-                            _cancellationToken,
-                            payloadOffset,
-                            new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length),
-                            "The immutable input ended during a page read.",
-                            ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal))
-                            .ConfigureAwait(false);
-                        compressedMemory = compressedPayload.Memory;
-                    }
-                    _cancellationToken.ThrowIfCancellationRequested();
-                    if (!slicedPage && header.Crc is int expected && ScanPageReader.ComputeCrc32(compressedMemory.Span, _cancellationToken) != unchecked((uint)expected))
-                        throw new ParquetFormatException(
-                            "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
                     var codec = plan.CompressionCodec;
-                    ReadOnlyMemory<byte> decodedMemory;
-                    if (header.PageType == ValidatedPageType.DataV2)
-                    {
-                        if (V2ValueSectionIsUncompressed(header, codec, out _))
-                        {
-                            if (header.CompressedSize != header.UncompressedSize)
-                                throw PageFormat("An uncompressed V2 value section has inconsistent sizes.");
-                            if (compressedPayload is null)
-                            {
-                                decodedMemory = compressedMemory;
-                            }
-                            else
-                            {
-                                decodedPayload = compressedPayload;
-                                compressedPayload = null;
-                                decodedMemory = decodedPayload.Memory;
-                            }
-                        }
-                        else
-                        {
-                            try
-                            {
-                                decodedPayload = DecodeCompressedV2Payload(header, compressedMemory.Span);
-                            }
-                            catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
-                            {
-                                throw AnnotatedDecompressionFailure(exception);
-                            }
-                            decodedMemory = decodedPayload.Memory;
-                        }
-                    }
-                    else switch (codec)
-                        {
-                            case ParquetCompressionCodec.Uncompressed:
-                                if (header.UncompressedSize != header.CompressedSize)
-                                    throw new ParquetFormatException(
-                                        "An uncompressed page declares different compressed and uncompressed sizes.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                                if (compressedPayload is null)
-                                {
-                                    decodedMemory = compressedMemory;
-                                }
-                                else
-                                {
-                                    decodedPayload = compressedPayload;
-                                    compressedPayload = null;
-                                    decodedMemory = decodedPayload.Memory;
-                                }
-                                break;
-                            case ParquetCompressionCodec.Snappy:
-                                decodedPayload = PooledArrayOwner<byte>.Rent(header.UncompressedSize, _memoryBudget);
-                                try
-                                {
-                                    SnappyBlockDecoder.Decompress(
-                                        compressedMemory.Span,
-                                        decodedPayload.Memory.Span,
-                                        _cancellationToken);
-                                }
-                                catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
-                                {
-                                    throw AnnotatedDecompressionFailure(exception);
-                                }
-                                decodedMemory = decodedPayload.Memory;
-                                break;
-                            default:
-                                throw new ParquetUnsupportedFeatureException("The page compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-                        }
+                    var slicedFixedPage = false;
+                    var decodedPage = await DecodePagePayloadAsync(
+                        header,
+                        plan,
+                        payloadOffset,
+                        sliceEligible,
+                        sliceStartRow,
+                        sliceRowCount,
+                        sliceByteWidth).ConfigureAwait(false);
+                    compressedPayload = decodedPage.Compressed;
+                    decodedPayload = decodedPage.DecodedOwned;
+                    ReadOnlyMemory<byte> decodedMemory = decodedPage.Decoded;
+                    var slicedPage = decodedPage.SlicedPage;
+                    if (slicedPage)
+                        _pagePayloadSliceRows = sliceStartRow;
                     if (plan.PageType == ValidatedPageType.Dictionary)
                     {
                         _dictionaryDecoder.DecodePage(decodedMemory.Span, header.Dictionary.ValueCount, plan.PhysicalType, _file.Options, _memoryBudget, CurrentPageLocation(), _cancellationToken);
@@ -2060,56 +1953,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 }
             }
 
-            // Validates the V2 level section and reports whether the value section is
-            // stored uncompressed, in which case the serialized payload is reused
-            // without copying. Snappy value sections still need output storage.
-            bool V2ValueSectionIsUncompressed(
-            ValidatedPageHeader header,
-            ParquetCompressionCodec? codec,
-            out int levelByteCount)
-            {
-                _cancellationToken.ThrowIfCancellationRequested();
-                if (header.PageType != ValidatedPageType.DataV2)
-                    throw new InvalidOperationException("A validated V2 page has no V2 header.");
-                var v2 = header.DataV2;
-                levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(v2, CurrentPageLocation());
-                if (levelByteCount > header.CompressedSize || levelByteCount > header.UncompressedSize)
-                    throw PageFormat("A V2 level section exceeds its page payload.");
-                if (!v2.IsCompressed || codec == ParquetCompressionCodec.Uncompressed)
-                    return true;
-                if (codec == ParquetCompressionCodec.Snappy)
-                    return false;
-                throw new ParquetUnsupportedFeatureException("The V2 value-section compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-            }
-
-            PooledArrayOwner<byte> DecodeCompressedV2Payload(
-            ValidatedPageHeader header,
-            ReadOnlySpan<byte> serializedPayload)
-            {
-                _cancellationToken.ThrowIfCancellationRequested();
-                if (header.PageType != ValidatedPageType.DataV2)
-                    throw new InvalidOperationException("A validated V2 page has no V2 header.");
-                var levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(header.DataV2, CurrentPageLocation());
-                PooledArrayOwner<byte>? decoded = PooledArrayOwner<byte>.Rent(header.UncompressedSize, _memoryBudget);
-                try
-                {
-                    serializedPayload[..levelByteCount].CopyTo(decoded.Memory.Span);
-                    SnappyBlockDecoder.Decompress(
-                        serializedPayload[levelByteCount..],
-                        decoded.Memory.Span[levelByteCount..],
-                        _cancellationToken);
-                    var result = decoded;
-                    decoded = null;
-                    return result;
-                }
-                catch
-                {
-                    // Best-effort rollback preserves the primary page error.
-                    try { decoded?.Dispose(); } catch (Exception) { }
-                    throw;
-                }
-            }
 
             void DecodeRequiredBooleanPage(ReadOnlySpan<byte> payload, int rowCount)
             {
@@ -2133,13 +1976,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             ParquetFormatException PageFormat(string message) => new(
             message,
             ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
-
-            // Attaches the page scopes to a decompression failure while keeping the
-            // offending input offset when the decoder recorded one.
-            ParquetFormatException AnnotatedDecompressionFailure(ParquetFormatException exception) => new(
-                exception.Message,
-                exception,
-                ParquetErrorLocation.AtPage(exception.ByteOffset ?? _pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
 
             ParquetErrorLocation CurrentPageLocation() => ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal);
 
@@ -2195,6 +2031,222 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             if (failure is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+        }
+
+        // One explicit decoded page payload per page: payload acquisition (borrow or
+        // rent, CRC, decompression) separated from cursor progression, so LoadNextPageAsync
+        // orchestrates offsets and row counts while this owns the decoded bytes and
+        // their pooled owners. Ownership transfers to the caller on success.
+        private readonly record struct DecodedPagePayload(
+            ReadOnlyMemory<byte> Decoded,
+            PooledArrayOwner<byte>? Compressed,
+            PooledArrayOwner<byte>? DecodedOwned,
+            bool SlicedPage);
+
+        private async ValueTask<DecodedPagePayload> DecodePagePayloadAsync(
+            ValidatedPageHeader header,
+            CheckedPagePlan plan,
+            long payloadOffset,
+            bool sliceEligible,
+            int sliceStartRow,
+            int sliceRowCount,
+            int sliceByteWidth)
+        {
+            PooledArrayOwner<byte>? compressedPayload = null;
+            PooledArrayOwner<byte>? decodedPayload = null;
+            Exception? decodeFailure = null;
+            try
+            {
+                ReadOnlyMemory<byte> compressedMemory;
+                var slicedPage = false;
+                var pageBorrowed = ScanPageReader.TryGetSourceMemory(_file.Source, _file.Length, payloadOffset, header.CompressedSize, out var borrowedPage);
+                if (sliceEligible && pageBorrowed)
+                {
+                    if (header.Crc is int borrowedCrc && ScanPageReader.ComputeCrc32(borrowedPage.Span, _cancellationToken) != unchecked((uint)borrowedCrc))
+                        throw new ParquetFormatException(
+                            "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+                    compressedMemory = borrowedPage.Slice(checked(sliceStartRow * sliceByteWidth), checked(sliceRowCount * sliceByteWidth));
+                    slicedPage = true;
+                }
+                else if (sliceEligible && header.Crc is null)
+                {
+                    // Opaque source without a CRC: only selected bytes are read, so no
+                    // CRC is owed and none is performed; chunk accounting still uses
+                    // the header sizes validated above.
+                    var sliceLength = checked(sliceRowCount * sliceByteWidth);
+                    compressedPayload = _pagePayloadCache.Rent(sliceLength);
+                    await ScanPageReader.ReadExactlyAsync(
+                        _file.Source,
+                        _cancellationToken,
+                        checked(payloadOffset + (long)sliceStartRow * sliceByteWidth),
+                        new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length),
+                        "The immutable input ended during a page read.",
+                        ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal))
+                        .ConfigureAwait(false);
+                    compressedMemory = compressedPayload.Memory;
+                    slicedPage = true;
+                }
+                else if (pageBorrowed)
+                {
+                    compressedMemory = borrowedPage;
+                }
+                else
+                {
+                    compressedPayload = _pagePayloadCache.Rent(header.CompressedSize);
+                    await ScanPageReader.ReadExactlyAsync(
+                        _file.Source,
+                        _cancellationToken,
+                        payloadOffset,
+                        new ArraySegment<byte>(compressedPayload.Array, 0, compressedPayload.Memory.Length),
+                        "The immutable input ended during a page read.",
+                        ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal))
+                        .ConfigureAwait(false);
+                    compressedMemory = compressedPayload.Memory;
+                }
+                _cancellationToken.ThrowIfCancellationRequested();
+                if (!slicedPage && header.Crc is int expected && ScanPageReader.ComputeCrc32(compressedMemory.Span, _cancellationToken) != unchecked((uint)expected))
+                    throw new ParquetFormatException(
+                        "A page CRC does not match its serialized payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                var codec = plan.CompressionCodec;
+                ReadOnlyMemory<byte> decodedMemory;
+                if (header.PageType == ValidatedPageType.DataV2)
+                {
+                    if (V2ValueSectionIsUncompressed(header, codec, out _))
+                    {
+                        if (compressedPayload is null)
+                        {
+                            decodedMemory = compressedMemory;
+                        }
+                        else
+                        {
+                            decodedPayload = compressedPayload;
+                            compressedPayload = null;
+                            decodedMemory = decodedPayload.Memory;
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            decodedPayload = DecodeCompressedV2Payload(header, compressedMemory.Span);
+                        }
+                        catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
+                        {
+                            throw new ParquetFormatException(
+                                exception.Message,
+                                exception,
+                                ParquetErrorLocation.AtPage(exception.ByteOffset ?? _pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+                        }
+                        decodedMemory = decodedPayload.Memory;
+                    }
+                }
+                else switch (codec)
+                    {
+                        case ParquetCompressionCodec.Uncompressed:
+                            if (header.UncompressedSize != header.CompressedSize)
+                                throw new ParquetFormatException(
+                                    "An uncompressed page declares different compressed and uncompressed sizes.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                            if (compressedPayload is null)
+                            {
+                                decodedMemory = compressedMemory;
+                            }
+                            else
+                            {
+                                decodedPayload = compressedPayload;
+                                compressedPayload = null;
+                                decodedMemory = decodedPayload.Memory;
+                            }
+                            break;
+                        case ParquetCompressionCodec.Snappy:
+                            decodedPayload = PooledArrayOwner<byte>.Rent(header.UncompressedSize, _memoryBudget);
+                            try
+                            {
+                                SnappyBlockDecoder.Decompress(
+                                    compressedMemory.Span,
+                                    decodedPayload.Memory.Span,
+                                    _cancellationToken);
+                            }
+                            catch (ParquetFormatException exception) when (exception.RowGroupOrdinal is null)
+                            {
+                                throw new ParquetFormatException(
+                                    exception.Message,
+                                    exception,
+                                    ParquetErrorLocation.AtPage(exception.ByteOffset ?? _pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+                            }
+                            decodedMemory = decodedPayload.Memory;
+                            break;
+                        default:
+                            throw new ParquetUnsupportedFeatureException("The page compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+                    }
+                var result = new DecodedPagePayload(decodedMemory, compressedPayload, decodedPayload, slicedPage);
+                compressedPayload = null;
+                decodedPayload = null;
+                return result;
+            }
+            catch (Exception exception)
+            {
+                decodeFailure = exception;
+            }
+
+            try { decodedPayload?.Dispose(); } catch (Exception exception) when (decodeFailure is null) { decodeFailure = exception; } catch (Exception) { }
+            try { compressedPayload?.Dispose(); } catch (Exception exception) when (decodeFailure is null) { decodeFailure = exception; } catch (Exception) { }
+            if (decodeFailure is not null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(decodeFailure).Throw();
+            throw new System.Diagnostics.UnreachableException();
+        }
+
+        // Validates the V2 level section and reports whether the value section is
+        // stored uncompressed, in which case the serialized payload is reused
+        // without copying. Snappy value sections still need output storage.
+        private bool V2ValueSectionIsUncompressed(
+        ValidatedPageHeader header,
+        ParquetCompressionCodec? codec,
+        out int levelByteCount)
+        {
+            _cancellationToken.ThrowIfCancellationRequested();
+            if (header.PageType != ValidatedPageType.DataV2)
+                throw new InvalidOperationException("A validated V2 page has no V2 header.");
+            var v2 = header.DataV2;
+            levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(v2, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+            if (levelByteCount > header.CompressedSize || levelByteCount > header.UncompressedSize)
+                throw new ParquetFormatException("A V2 level section exceeds its page payload.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+            if (!v2.IsCompressed || codec == ParquetCompressionCodec.Uncompressed)
+                return true;
+            if (codec == ParquetCompressionCodec.Snappy)
+                return false;
+            throw new ParquetUnsupportedFeatureException("The V2 value-section compression codec is unsupported.", ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+
+        }
+
+        private PooledArrayOwner<byte> DecodeCompressedV2Payload(
+        ValidatedPageHeader header,
+        ReadOnlySpan<byte> serializedPayload)
+        {
+            _cancellationToken.ThrowIfCancellationRequested();
+            if (header.PageType != ValidatedPageType.DataV2)
+                throw new InvalidOperationException("A validated V2 page has no V2 header.");
+            var levelByteCount = DefinitionLevelCodec.GetV2LevelByteCount(header.DataV2, ParquetErrorLocation.AtPage(_pageOffset, _plan.RowGroup.Ordinal, _column.Ordinal, _pageOrdinal));
+            PooledArrayOwner<byte>? decoded = PooledArrayOwner<byte>.Rent(header.UncompressedSize, _memoryBudget);
+            try
+            {
+                serializedPayload[..levelByteCount].CopyTo(decoded.Memory.Span);
+                SnappyBlockDecoder.Decompress(
+                    serializedPayload[levelByteCount..],
+                    decoded.Memory.Span[levelByteCount..],
+                    _cancellationToken);
+                var result = decoded;
+                decoded = null;
+                return result;
+            }
+            catch
+            {
+                // Best-effort rollback preserves the primary page error.
+                try { decoded?.Dispose(); } catch (Exception) { }
+                throw;
+            }
         }
 
     }

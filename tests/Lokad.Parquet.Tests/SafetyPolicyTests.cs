@@ -314,6 +314,10 @@ public sealed class SafetyPolicyTests
                 "primitive dictionary expansion shared by the five fixed-width layouts",
             ["Lokad.Parquet.Internal.RleBitPackedHybridDecoder.Decode"] =
                 "RLE/bit-packed hybrid index decoder behind the dictionary expansion boundary",
+            ["Lokad.Parquet.Internal.ParquetScanEnumerable+ColumnCursor.DecodePagePayloadAsync"] =
+                "page payload acquisition behind the cursor progression boundary",
+            ["Lokad.Parquet.Internal.ParquetScanEnumerable+ColumnCursor.DecodeCompressedV2Payload"] =
+                "compressed V2 payload decoder behind the page acquisition boundary",
             ["Lokad.Parquet.ParquetFile+ColumnCacheProvider.RentColumnValues"] =
                 "typed column-cache rent behind the file provider boundary",
         };
