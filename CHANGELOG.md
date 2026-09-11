@@ -49,6 +49,8 @@
   and derive scan budgets and caches from the file instead of passing them alongside it.
 - Share V1 section splitting, required V2 validation, null counting, and batch owner
   disposal through single checked helpers instead of repeating them per path.
+- Attach page identity to dictionary decoding failures, preserving inner errors
+  and any more precise byte offset.
 
 ### Changed
 

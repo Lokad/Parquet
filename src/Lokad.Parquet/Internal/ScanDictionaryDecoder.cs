@@ -55,7 +55,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
 
         var expectedByteCount = PlainDecoder.GetPlainByteCount(physicalType, valueCount, location);
         if (payload.Length != expectedByteCount)
-            throw new ParquetFormatException("A PLAIN dictionary payload length does not match its entry count.");
+            throw new ParquetFormatException("A PLAIN dictionary payload length does not match its entry count.", location);
 
         switch (physicalType)
         {
@@ -95,11 +95,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     if ((index & 1023) == 0)
                         cancellationToken.ThrowIfCancellationRequested();
                     if (payload.Length - inputOffset < sizeof(int))
-                        throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary length is truncated.");
+                        throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary length is truncated.", location);
                     var length = BinaryPrimitives.ReadInt32LittleEndian(payload[inputOffset..]);
                     inputOffset += sizeof(int);
                     if (length < 0 || length > payload.Length - inputOffset)
-                        throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary length is invalid.");
+                        throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary length is invalid.", location);
                     if (length > options.MaximumBinaryValueBytes)
                         throw new ParquetLimitExceededException("A BYTE_ARRAY dictionary value exceeds the configured byte limit.", location);
 
@@ -108,7 +108,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     offsets.Memory.Span[index + 1] = aggregateLength;
                 }
                 if (inputOffset != payload.Length)
-                    throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary has trailing bytes.");
+                    throw new ParquetFormatException("A PLAIN BYTE_ARRAY dictionary has trailing bytes.", location);
                 var decodedBytes = checked((valueCount + 1L) * sizeof(int) + (long)aggregateLength);
                 if (decodedBytes > options.MaximumDictionaryBytes)
                     throw new ParquetLimitExceededException("A decoded BYTE_ARRAY dictionary exceeds its configured byte limit.", location);
@@ -147,11 +147,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         {
             var width = _column.SchemaElement.TypeLength ?? 0;
             if (width <= 0)
-                throw new ParquetFormatException("A FIXED_LEN_BYTE_ARRAY column has an invalid width.");
+                throw new ParquetFormatException("A FIXED_LEN_BYTE_ARRAY column has an invalid width.", location);
             if (width > options.MaximumBinaryValueBytes)
                 throw new ParquetLimitExceededException("A FIXED_LEN_BYTE_ARRAY dictionary value exceeds the configured byte limit.", location);
             if (valueCount > payload.Length / width || valueCount * width != payload.Length)
-                throw new ParquetFormatException("A PLAIN FIXED_LEN_BYTE_ARRAY dictionary payload length is inconsistent.");
+                throw new ParquetFormatException("A PLAIN FIXED_LEN_BYTE_ARRAY dictionary payload length is inconsistent.", location);
             PooledArrayOwner<byte>? values = PooledArrayOwner<byte>.Rent(payload.Length, budget);
             try
             {
@@ -271,9 +271,9 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                         cancellationToken,
                         out validCount);
                 }
-                catch (ParquetFormatException exception) when (exception.ByteOffset is null)
+                catch (ParquetFormatException exception)
                 {
-                    throw new ParquetFormatException(exception.Message, exception, location);
+                    throw new ParquetFormatException(exception.Message, exception, new ParquetErrorLocation(exception.ByteOffset ?? location.ByteOffset, location.RowGroupOrdinal, location.ColumnOrdinal, location.PageOrdinal));
                 }
                 if (consumed != levelByteCount)
                     throw new ParquetFormatException("An optional page has trailing definition-level bytes.", location);
@@ -290,7 +290,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
             }
 
             if (physicalOffset >= payload.Length)
-                throw new ParquetFormatException("A dictionary data page is missing its index bit width.");
+                throw new ParquetFormatException("A dictionary data page is missing its index bit width.", location);
             var bitWidth = payload[physicalOffset++];
             PooledArrayOwner<int>? indices = null;
             Exception? indicesFailure = null;
@@ -307,13 +307,12 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                         indices.Memory.Span,
                         cancellationToken);
                 }
-                catch (ParquetFormatException exception) when (exception.ByteOffset is null)
+                catch (ParquetFormatException exception)
                 {
-                    throw new ParquetFormatException(exception.Message, exception, location);
-
+                    throw new ParquetFormatException(exception.Message, exception, new ParquetErrorLocation(exception.ByteOffset ?? location.ByteOffset, location.RowGroupOrdinal, location.ColumnOrdinal, location.PageOrdinal));
                 }
                 if (indexConsumed != encodedIndices.Length)
-                    throw new ParquetFormatException("A dictionary data page has trailing index bytes.");
+                    throw new ParquetFormatException("A dictionary data page has trailing index bytes.", location);
 
                 // Index bounds fuse into the expansions below: each consumed
                 // index is range-checked as it is read, so no standalone
@@ -395,14 +394,14 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         if (tight)
         {
             if (optional && indices.Length != rowCount)
-                throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
             for (var position = 0; position < indices.Length; position++)
             {
                 if ((position & 1023) == 0)
                     cancellationToken.ThrowIfCancellationRequested();
                 var dictionaryIndex = indices[position];
                 if ((uint)dictionaryIndex >= (uint)_count)
-                    throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                    throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                 aggregateLength += dictionaryOffsets[dictionaryIndex + 1] - dictionaryOffsets[dictionaryIndex];
             }
         }
@@ -417,11 +416,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     continue;
                 var dictionaryIndex = indices[physicalIndex++];
                 if ((uint)dictionaryIndex >= (uint)_count)
-                    throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                    throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                 aggregateLength += dictionaryOffsets[dictionaryIndex + 1] - dictionaryOffsets[dictionaryIndex];
             }
             if (physicalIndex != indices.Length)
-                throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
         }
         var retainedBytes = aggregateLength + checked((outputCount + 1L) * sizeof(int));
         if (aggregateLength > int.MaxValue || retainedBytes > options.MaximumScanPooledBytes)
@@ -522,14 +521,14 @@ internal sealed class ScanDictionaryDecoder : IDisposable
             if (tight)
             {
                 if (optional && indices.Length != rowCount)
-                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
                 for (var position = 0; position < indices.Length; position++)
                 {
                     if ((position & 1023) == 0)
                         cancellationToken.ThrowIfCancellationRequested();
                     var dictionaryIndex = indices[position];
                     if ((uint)dictionaryIndex >= (uint)_count)
-                        throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                        throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                     _fixedPayload.Memory.Span
                         .Slice(dictionaryIndex * _fixedWidth, _fixedWidth)
                         .CopyTo(payload.Memory.Span.Slice(position * _fixedWidth, _fixedWidth));
@@ -546,13 +545,13 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                         continue;
                     var dictionaryIndex = indices[physicalIndex++];
                     if ((uint)dictionaryIndex >= (uint)_count)
-                        throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                        throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                     _fixedPayload.Memory.Span
                         .Slice(dictionaryIndex * _fixedWidth, _fixedWidth)
                         .CopyTo(payload.Memory.Span.Slice(row * _fixedWidth, _fixedWidth));
                 }
                 if (physicalIndex != indices.Length)
-                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
             }
             pageFixedPayload = payload;
             pageFixedWidth = _fixedWidth;
@@ -594,14 +593,14 @@ internal sealed class ScanDictionaryDecoder : IDisposable
             if (tight)
             {
                 if (optional && indices.Length != rowCount)
-                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
                 for (var position = 0; position < indices.Length; position++)
                 {
                     if ((position & 1023) == 0)
                         cancellationToken.ThrowIfCancellationRequested();
                     var dictionaryIndex = indices[position];
                     if ((uint)dictionaryIndex >= (uint)_count)
-                        throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                        throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                     output[position] = dictionary[dictionaryIndex];
                 }
             }
@@ -616,11 +615,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                         continue;
                     var dictionaryIndex = indices[physicalIndex++];
                     if ((uint)dictionaryIndex >= (uint)_count)
-                        throw new ParquetFormatException("A dictionary index is outside the dictionary.");
+                        throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                     output[row] = dictionary[dictionaryIndex];
                 }
                 if (physicalIndex != indices.Length)
-                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.");
+                    throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);
             }
             pageValues.Set(rowValues);
             rowValues = null;

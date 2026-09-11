@@ -56,6 +56,7 @@ internal sealed class ParquetFixtureOptions
     public int[]? DictionaryIndices { get; init; }
     public bool CoalesceIndexRuns { get; init; }
     public bool BitPackedIndices { get; init; }
+    public int? DictionaryIndexBitWidth { get; init; }
     public bool AppendTrailingIndexRun { get; init; }
     public bool SnappyCopyEncoding { get; init; }
     public FixtureDictionaryMode DictionaryMode { get; init; }
@@ -94,6 +95,7 @@ internal sealed class ParquetPageHeaderOverrides
     public int? UncompressedSize { get; init; }
     public int? CompressedSize { get; init; }
     public int? ValueCount { get; init; }
+    public int? DictionaryValueCount { get; init; }
     public int? ValueEncodingCode { get; init; }
     public int? DefinitionEncodingCode { get; init; }
     public int? RepetitionEncodingCode { get; init; }
@@ -155,6 +157,7 @@ internal static class ParquetFixtureBuilder
             options.DictionaryMode,
             options.CoalesceIndexRuns,
             options.BitPackedIndices,
+            options.DictionaryIndexBitWidth,
             options.AppendTrailingIndexRun,
             options.SnappyCopyEncoding,
             options.CompressionCodec,
@@ -176,6 +179,7 @@ internal static class ParquetFixtureBuilder
                 FixtureDictionaryMode.BeforeDataPage,
                 false,
                 false,
+                null,
                 false,
                 false,
                 options.CompressionCodec,
@@ -342,6 +346,7 @@ internal static class ParquetFixtureBuilder
                     FixtureDictionaryMode.BeforeDataPage,
                     false,
                     false,
+                    null,
                     false,
                     false,
                     ParquetCompressionCodec.Uncompressed,
@@ -445,6 +450,7 @@ internal static class ParquetFixtureBuilder
                 FixtureDictionaryMode.BeforeDataPage,
                 false,
                 false,
+                null,
                 false,
                 false,
                 ParquetCompressionCodec.Uncompressed,
@@ -585,6 +591,7 @@ internal static class ParquetFixtureBuilder
                 FixtureDictionaryMode.BeforeDataPage,
                 false,
                 false,
+                null,
                 false,
                 false,
                 ParquetCompressionCodec.Uncompressed,
@@ -669,6 +676,7 @@ internal static class ParquetFixtureBuilder
         FixtureDictionaryMode dictionaryMode,
         bool coalesceIndexRuns,
         bool bitPackedIndices,
+        int? indexBitWidth,
         bool appendTrailingIndexRun,
         bool snappyCopyEncoding,
         ParquetCompressionCodec codec,
@@ -712,7 +720,7 @@ internal static class ParquetFixtureBuilder
             : ParquetPhysicalType.Int32;
         var encodedPhysical = dictionaryValues is null
             ? EncodePlainValues(values, effectiveValidity, repetition, physicalType, physicalCount, typeLength)
-            : EncodeDictionaryIndices(dictionaryValues, dictionaryIndices, physicalCount, coalesceIndexRuns, bitPackedIndices, appendTrailingIndexRun);
+            : EncodeDictionaryIndices(dictionaryValues, dictionaryIndices, physicalCount, coalesceIndexRuns, bitPackedIndices, indexBitWidth, appendTrailingIndexRun);
         byte[] uncompressed;
         byte[] payload;
         if (dataPageV2)
@@ -815,7 +823,8 @@ internal static class ParquetFixtureBuilder
             dictionaryMode,
             snappyCopyEncoding,
             codec,
-            crcMode);
+            crcMode,
+            overrides?.DictionaryValueCount);
         if (dictionaryMode == FixtureDictionaryMode.DuplicateBeforeDataPage)
             return new GeneratedPages(
                 Combine(Combine(dictionaryPage.Bytes, dictionaryPage.Bytes), dataPage),
@@ -835,7 +844,8 @@ internal static class ParquetFixtureBuilder
         FixtureDictionaryMode dictionaryMode,
         bool snappyCopyEncoding,
         ParquetCompressionCodec codec,
-        FixtureCrcMode crcMode)
+        FixtureCrcMode crcMode,
+        int? dictionaryValueCount)
         {
             var validity = Enumerable.Repeat(true, values.Length).ToArray();
             var uncompressed = EncodePlainValues(
@@ -861,7 +871,7 @@ internal static class ParquetFixtureBuilder
             header.StructField(ref page, 7, () =>
             {
                 short dictionary = 0;
-                header.Int32Field(ref dictionary, 1, values.Length);
+                header.Int32Field(ref dictionary, 1, dictionaryValueCount ?? values.Length);
                 header.Int32Field(
                     ref dictionary,
                     2,
@@ -883,15 +893,17 @@ internal static class ParquetFixtureBuilder
         int physicalCount,
         bool coalesceRuns,
         bool bitPacked,
+        int? bitWidthOverride,
         bool trailingRun)
         {
             if (indices is null || indices.Length != physicalCount)
                 throw new ArgumentException("Dictionary fixtures require one index per physical value.", nameof(indices));
             if (coalesceRuns && bitPacked)
                 throw new ArgumentException("Dictionary fixtures support only one index encoding shape.", nameof(bitPacked));
-            var bitWidth = 0;
-            for (var maximum = dictionary.Length - 1; maximum > 0; maximum >>= 1)
-                bitWidth++;
+            var bitWidth = bitWidthOverride ?? 0;
+            if (bitWidthOverride is null)
+                for (var maximum = dictionary.Length - 1; maximum > 0; maximum >>= 1)
+                    bitWidth++;
             var result = new List<byte> { checked((byte)bitWidth) };
             if (bitPacked)
             {
