@@ -170,7 +170,7 @@ public static class LiveSessionRetention
 
             var valueChains = new long[fields.Length];
             var nullChains = new long[fields.Length];
-            var destinations = BaselineDestinations.Create(fields.Length, maximumGroupRows);
+            var destinations = BaselineDestinations.Create(fields, workload, maximumGroupRows);
 
             Utf8ScanSink? sink = ScanWorkloadCatalog.IsString(workload)
                 ? new Utf8ScanSink(emittedRowCount, utf8PayloadBytes)
@@ -216,48 +216,45 @@ public static class LiveSessionRetention
     }
 
 
-    /// <summary>Reusable baseline destinations sized to the largest row group.</summary>
-    internal sealed record BaselineDestinations(
-        int[][] Integers,
-        int?[][] NullableIntegers,
-        bool?[][] Booleans,
-        string?[][] Strings,
-        long[][] Longs,
-        long?[][] NullableLongs,
-        float[][] Floats,
-        float?[][] NullableFloats,
-        double[][] Doubles,
-        double?[][] NullableDoubles,
-        ReadOnlyMemory<byte>[][] Roms,
-        ReadOnlyMemory<byte>?[][] NullableRoms)
-    {
-        internal static BaselineDestinations Create(int columns, int maximumGroupRows)
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(columns);
-            ArgumentOutOfRangeException.ThrowIfNegative(maximumGroupRows);
-            var destinations = new BaselineDestinations(
-                new int[columns][], new int?[columns][], new bool?[columns][],
-                new string?[columns][], new long[columns][], new long?[columns][],
-                new float[columns][], new float?[columns][],
-                new double[columns][], new double?[columns][],
-                new ReadOnlyMemory<byte>[columns][], new ReadOnlyMemory<byte>?[columns][]);
-            for (var column = 0; column < columns; column++)
-            {
-                destinations.Integers[column] = new int[maximumGroupRows];
-                destinations.NullableIntegers[column] = new int?[maximumGroupRows];
-                destinations.Booleans[column] = new bool?[maximumGroupRows];
-                destinations.Strings[column] = new string?[maximumGroupRows];
-                destinations.Longs[column] = new long[maximumGroupRows];
-                destinations.NullableLongs[column] = new long?[maximumGroupRows];
-                destinations.Floats[column] = new float[maximumGroupRows];
-                destinations.NullableFloats[column] = new float?[maximumGroupRows];
-                destinations.Doubles[column] = new double[maximumGroupRows];
-                destinations.NullableDoubles[column] = new double?[maximumGroupRows];
-                destinations.Roms[column] = new ReadOnlyMemory<byte>[maximumGroupRows];
-                destinations.NullableRoms[column] = new ReadOnlyMemory<byte>?[maximumGroupRows];
-            }
+    /// <summary>Reusable baseline destination buffer for one projected column, sized to the largest row group.</summary>
+    /// <remarks>Each projected column retains exactly one layout buffer, selected from its
+    /// baseline field by the same predicate the session consumer reads with, so unused layouts
+    /// cannot inflate live retention. The session holds the table alive through its window.</remarks>
+    internal sealed record BaselineColumnDestinations(Array Values);
 
-            return destinations;
+    /// <summary>Reusable baseline destinations sized to the largest row group.</summary>
+    internal sealed record BaselineDestinations(BaselineColumnDestinations[] Columns)
+    {
+        internal BaselineColumnDestinations this[int column] => Columns[column];
+
+        internal static BaselineDestinations Create(BaselineDataField[] fields, ScanWorkload workload, int maximumGroupRows)
+        {
+            ArgumentNullException.ThrowIfNull(fields);
+            ArgumentOutOfRangeException.ThrowIfNegative(maximumGroupRows);
+            var multi = fields.Length > 1;
+            var columns = new BaselineColumnDestinations[fields.Length];
+            for (var column = 0; column < fields.Length; column++)
+                columns[column] = new BaselineColumnDestinations(SelectBuffer(multi, workload, fields[column], maximumGroupRows));
+            return new BaselineDestinations(columns);
+
+            static Array SelectBuffer(bool multi, ScanWorkload workload, BaselineDataField field, int maximumGroupRows)
+            {
+                if (!multi && field.ClrType == typeof(bool))
+                    return new bool?[maximumGroupRows];
+                if (!multi && field.ClrType == typeof(long))
+                    return field.IsNullable ? new long?[maximumGroupRows] : new long[maximumGroupRows];
+                if (!multi && field.ClrType == typeof(float))
+                    return field.IsNullable ? new float?[maximumGroupRows] : new float[maximumGroupRows];
+                if (!multi && field.ClrType == typeof(double))
+                    return field.IsNullable ? new double?[maximumGroupRows] : new double[maximumGroupRows];
+                if (!multi && field.ClrType == typeof(ReadOnlyMemory<byte>))
+                    return field.IsNullable ? new ReadOnlyMemory<byte>?[maximumGroupRows] : new ReadOnlyMemory<byte>[maximumGroupRows];
+                if (!multi && field.IsNullable)
+                    return new int?[maximumGroupRows];
+                if (ScanWorkloadCatalog.IsString(workload))
+                    return new string?[maximumGroupRows];
+                return new int[maximumGroupRows];
+            }
         }
     }
 
@@ -288,13 +285,14 @@ public static class LiveSessionRetention
             {
                 if (!multi && fields[column].ClrType == typeof(bool))
                 {
-                    await group.ReadAsync<bool>(fields[column], destinations.Booleans[column]);
+                    var booleans = (bool?[])destinations[column].Values;
+                    await group.ReadAsync<bool>(fields[column], booleans);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        if (destinations.Booleans[column][row] is bool value)
+                        if (booleans[row] is bool value)
                             valueChains[column] = ScanChecksum.Mix(valueChains[column], value ? 1 : 0);
                         else
                             nullChains[column] = ScanChecksum.Mix(nullChains[column], checked((int)global));
@@ -305,16 +303,17 @@ public static class LiveSessionRetention
                 else if (!multi && fields[column].ClrType == typeof(long))
                 {
                     var nullableLong = fields[column].IsNullable;
+                    var longBuffer = destinations[column].Values;
                     if (nullableLong)
-                        await group.ReadAsync<long>(fields[column], destinations.NullableLongs[column]);
+                        await group.ReadAsync<long>(fields[column], (long?[])longBuffer);
                     else
-                        await group.ReadAsync<long>(fields[column], destinations.Longs[column]);
+                        await group.ReadAsync<long>(fields[column], (long[])longBuffer);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        long? actual = nullableLong ? destinations.NullableLongs[column][row] : destinations.Longs[column][row];
+                        long? actual = nullableLong ? ((long?[])longBuffer)[row] : ((long[])longBuffer)[row];
                         if (actual is long longValue)
                             valueChains[column] = ScanChecksum.MixInt64(valueChains[column], longValue);
                         else
@@ -326,16 +325,17 @@ public static class LiveSessionRetention
                 else if (!multi && fields[column].ClrType == typeof(float))
                 {
                     var nullableFloat = fields[column].IsNullable;
+                    var floatBuffer = destinations[column].Values;
                     if (nullableFloat)
-                        await group.ReadAsync<float>(fields[column], destinations.NullableFloats[column]);
+                        await group.ReadAsync<float>(fields[column], (float?[])floatBuffer);
                     else
-                        await group.ReadAsync<float>(fields[column], destinations.Floats[column]);
+                        await group.ReadAsync<float>(fields[column], (float[])floatBuffer);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        float? actual = nullableFloat ? destinations.NullableFloats[column][row] : destinations.Floats[column][row];
+                        float? actual = nullableFloat ? ((float?[])floatBuffer)[row] : ((float[])floatBuffer)[row];
                         if (actual is float floatValue)
                             valueChains[column] = ScanChecksum.MixFloat(valueChains[column], floatValue);
                         else
@@ -347,16 +347,17 @@ public static class LiveSessionRetention
                 else if (!multi && fields[column].ClrType == typeof(double))
                 {
                     var nullableDouble = fields[column].IsNullable;
+                    var doubleBuffer = destinations[column].Values;
                     if (nullableDouble)
-                        await group.ReadAsync<double>(fields[column], destinations.NullableDoubles[column]);
+                        await group.ReadAsync<double>(fields[column], (double?[])doubleBuffer);
                     else
-                        await group.ReadAsync<double>(fields[column], destinations.Doubles[column]);
+                        await group.ReadAsync<double>(fields[column], (double[])doubleBuffer);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        double? actual = nullableDouble ? destinations.NullableDoubles[column][row] : destinations.Doubles[column][row];
+                        double? actual = nullableDouble ? ((double?[])doubleBuffer)[row] : ((double[])doubleBuffer)[row];
                         if (actual is double doubleValue)
                             valueChains[column] = ScanChecksum.MixDouble(valueChains[column], doubleValue);
                         else
@@ -368,16 +369,17 @@ public static class LiveSessionRetention
                 else if (!multi && fields[column].ClrType == typeof(ReadOnlyMemory<byte>))
                 {
                     var nullableRom = fields[column].IsNullable;
+                    var romBuffer = destinations[column].Values;
                     if (nullableRom)
-                        await group.ReadAsync<ReadOnlyMemory<byte>>(fields[column], destinations.NullableRoms[column]);
+                        await group.ReadAsync<ReadOnlyMemory<byte>>(fields[column], (ReadOnlyMemory<byte>?[])romBuffer);
                     else
-                        await group.ReadAsync<ReadOnlyMemory<byte>>(fields[column], destinations.Roms[column]);
+                        await group.ReadAsync<ReadOnlyMemory<byte>>(fields[column], (ReadOnlyMemory<byte>[])romBuffer);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        ReadOnlyMemory<byte>? actual = nullableRom ? destinations.NullableRoms[column][row] : destinations.Roms[column][row];
+                        ReadOnlyMemory<byte>? actual = nullableRom ? ((ReadOnlyMemory<byte>?[])romBuffer)[row] : ((ReadOnlyMemory<byte>[])romBuffer)[row];
                         if (actual is ReadOnlyMemory<byte> bytes)
                             valueChains[column] = ScanChecksum.MixBytes(valueChains[column], bytes.ToArray());
                         else
@@ -388,13 +390,14 @@ public static class LiveSessionRetention
                 }
                 else if (!multi && fields[column].IsNullable)
                 {
-                    await group.ReadAsync<int>(fields[column], destinations.NullableIntegers[column]);
+                    var nullableIntegers = (int?[])destinations[column].Values;
+                    await group.ReadAsync<int>(fields[column], nullableIntegers);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        if (destinations.NullableIntegers[column][row] is int value)
+                        if (nullableIntegers[row] is int value)
                             valueChains[column] = ScanChecksum.Mix(valueChains[column], value);
                         else
                             nullChains[column] = ScanChecksum.Mix(nullChains[column], checked((int)global));
@@ -406,13 +409,14 @@ public static class LiveSessionRetention
                 {
                     if (sink is null)
                         throw new InvalidOperationException("The baseline live session has no UTF-8 sink.");
-                    await group.ReadAsync(fields[column], destinations.Strings[column]);
+                    var strings = (string?[])destinations[column].Values;
+                    await group.ReadAsync(fields[column], strings);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        sink.AppendString(destinations.Strings[column][row] ??
+                        sink.AppendString(strings[row] ??
                             throw new InvalidOperationException("A required baseline string decoded as null."));
                         if (column == 0)
                             rows++;
@@ -420,13 +424,14 @@ public static class LiveSessionRetention
                 }
                 else
                 {
-                    await group.ReadAsync<int>(fields[column], destinations.Integers[column]);
+                    var integers = (int[])destinations[column].Values;
+                    await group.ReadAsync<int>(fields[column], integers);
                     for (var row = 0; row < groupRowCount; row++)
                     {
                         var global = consumedGlobal + row;
                         if (global < rangeStart || global >= rangeEnd)
                             continue;
-                        valueChains[column] = ScanChecksum.Mix(valueChains[column], destinations.Integers[column][row]);
+                        valueChains[column] = ScanChecksum.Mix(valueChains[column], integers[row]);
                         if (column == 0)
                             rows++;
                     }

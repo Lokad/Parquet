@@ -107,6 +107,8 @@
   chain as the high-cardinality string oracle, select baseline nullable-INT32 destinations
   by schema nullability, and re-pin the committed fixed-width fixture hash to the value
   both readers mutually verify.
+- Retain one baseline live-session destination buffer per projected column, selected from
+  the field type and nullability, instead of twelve parallel layouts per column.
 
 ## 0.1.0 - 2026-09-02
 
