@@ -1162,7 +1162,7 @@ internal static class ParquetFooterParser
 
         static ParquetSemanticAnnotation? FromLegacy(int legacyCode, int? scale, int? precision)
         {
-            if (!Enum.IsDefined((ParquetConvertedType)legacyCode))
+            if ((uint)legacyCode > (uint)ParquetConvertedType.Interval)
                 return null;
             var legacy = (ParquetConvertedType)legacyCode;
             var kind = legacy switch
@@ -1228,7 +1228,7 @@ internal static class ParquetFooterParser
 
         static bool IsPhysicallyCompatible(SchemaElementWire element, ParquetSemanticAnnotation annotation)
         {
-            var physical = element.TypeCode is int typeCode && Enum.IsDefined((ParquetPhysicalType)typeCode)
+            var physical = element.TypeCode is int typeCode && (uint)typeCode <= (uint)ParquetPhysicalType.FixedLengthByteArray
                 ? (ParquetPhysicalType)typeCode : (ParquetPhysicalType?)null;
             return annotation.Kind switch
             {

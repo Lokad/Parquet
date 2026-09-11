@@ -158,14 +158,14 @@ public sealed class ParquetSchemaElement
     public int? PhysicalTypeCode { get; }
 
     /// <summary>Gets the known physical type, or null for a group or unknown value.</summary>
-    public ParquetPhysicalType? PhysicalType => PhysicalTypeCode is int code && Enum.IsDefined((ParquetPhysicalType)code)
+    public ParquetPhysicalType? PhysicalType => PhysicalTypeCode is int code && (uint)code <= (uint)ParquetPhysicalType.FixedLengthByteArray
         ? (ParquetPhysicalType)code : null;
 
     /// <summary>Gets the raw repetition enum value, or null for the root.</summary>
     public int? RepetitionCode { get; }
 
     /// <summary>Gets the known repetition mode, or null when absent or unknown.</summary>
-    public ParquetRepetition? Repetition => RepetitionCode is int code && Enum.IsDefined((ParquetRepetition)code)
+    public ParquetRepetition? Repetition => RepetitionCode is int code && (uint)code <= (uint)ParquetRepetition.Repeated
         ? (ParquetRepetition)code : null;
 
     /// <summary>Gets the declared type length.</summary>
@@ -178,7 +178,7 @@ public sealed class ParquetSchemaElement
     public int? ConvertedTypeCode { get; }
 
     /// <summary>Gets the known legacy converted type.</summary>
-    public ParquetConvertedType? ConvertedType => ConvertedTypeCode is int code && Enum.IsDefined((ParquetConvertedType)code)
+    public ParquetConvertedType? ConvertedType => ConvertedTypeCode is int code && (uint)code <= (uint)ParquetConvertedType.Interval
         ? (ParquetConvertedType)code : null;
 
     /// <summary>Gets the schema-element decimal scale.</summary>
@@ -424,12 +424,12 @@ public sealed class ParquetColumnChunk
     /// <summary>Gets the raw physical-type code.</summary>
     public int PhysicalTypeCode { get; }
     /// <summary>Gets the known physical type.</summary>
-    public ParquetPhysicalType? PhysicalType => Enum.IsDefined((ParquetPhysicalType)PhysicalTypeCode)
+    public ParquetPhysicalType? PhysicalType => (uint)PhysicalTypeCode <= (uint)ParquetPhysicalType.FixedLengthByteArray
         ? (ParquetPhysicalType)PhysicalTypeCode : null;
     /// <summary>Gets the raw compression-codec code.</summary>
     public int CompressionCodecCode { get; }
     /// <summary>Gets the known compression codec.</summary>
-    public ParquetCompressionCodec? CompressionCodec => Enum.IsDefined((ParquetCompressionCodec)CompressionCodecCode)
+    public ParquetCompressionCodec? CompressionCodec => (uint)CompressionCodecCode <= (uint)ParquetCompressionCodec.Lz4Raw
         ? (ParquetCompressionCodec)CompressionCodecCode : null;
     /// <summary>Gets the advertised raw encoding codes.</summary>
     public ReadOnlyCollection<int> EncodingCodes { get; }

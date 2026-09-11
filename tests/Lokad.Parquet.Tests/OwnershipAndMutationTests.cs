@@ -106,7 +106,9 @@ public sealed class OwnershipAndMutationTests
                 batch.Dispose();
         }
 
-        Assert.True(tracker.RentCount >= 3);
+        // Open no longer rents: the footer buffer is directly allocated, so only
+        // the scan page buffers trip this observation guard.
+        Assert.True(tracker.RentCount >= 2);
     }
 
     [Fact]

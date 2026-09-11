@@ -686,30 +686,18 @@ public sealed class ParquetFile : IAsyncDisposable
             throw new ParquetFormatException("The footer range lies outside the input.", ParquetErrorLocation.AtOffset(source.Length - 8));
 
         var footerOffset = source.Length - 8 - footerLength;
-        var footer = ParquetArrayPool.Rent<byte>(Math.Max(footerLength, 1));
-        Exception? footerFailure = null;
-        ParquetFile? opened = null;
-        try
-        {
-            var footerSegment = new ArraySegment<byte>(footer, 0, footerLength);
-            await ReadInputExactlyAsync(footerOffset, footerSegment).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            var metadata = ParquetFooterParser.Parse(
-                footerSegment.AsSpan(),
-                footerOffset,
-                source.Length,
-                options,
-                cancellationToken);
-            opened = new ParquetFile(source, sourceOwnership, options, metadata);
-        }
-        catch (Exception exception)
-        {
-            footerFailure = exception;
-        }
-        try { ParquetArrayPool.Return(footer); } catch (Exception exception) when (footerFailure is null) { footerFailure = exception; } catch (Exception) { }
-        if (footerFailure is not null)
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(footerFailure).Throw();
-        return opened ?? throw new InvalidOperationException("Footer handling did not produce a file.");
+        // The footer buffer lives exactly for this parse: a nursery allocation is
+        // cheaper than a pooled rent plus a full-bucket clear on return.
+        var footerSegment = new ArraySegment<byte>(new byte[Math.Max(footerLength, 1)], 0, footerLength);
+        await ReadInputExactlyAsync(footerOffset, footerSegment).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var metadata = ParquetFooterParser.Parse(
+            footerSegment.AsSpan(),
+            footerOffset,
+            source.Length,
+            options,
+            cancellationToken);
+        return new ParquetFile(source, sourceOwnership, options, metadata);
 
         void ValidateOptions()
         {

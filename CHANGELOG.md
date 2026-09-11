@@ -129,6 +129,9 @@
 - Retain per-case work-census checkpoints with a completion or failure marker in a session
   directory next to the snapshot, so interrupted runs keep their measured cases visible
   without ever qualifying as evidence.
+- Allocate the footer buffer directly instead of a pooled rent plus a full-bucket clear on
+  return, simplifying open error handling, and resolve recognized metadata enums with
+  contiguous range checks instead of Enum.IsDefined.
 
 ## 0.1.0 - 2026-09-02
 
