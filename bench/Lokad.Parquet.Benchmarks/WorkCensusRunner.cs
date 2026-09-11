@@ -30,767 +30,791 @@ internal static class WorkCensusRunner
 
     public static async Task<int> RunAsync()
     {
-        var results = new List<WorkCensusCase>();
-        foreach (var workload in ScanWorkloadCatalog.ParityWorkloads)
-            results.Add(await MeasureAsync(workload));
-        {
-            // Uneven multi-row-group case: the catalog writer emits one page per
-            // column chunk, so uneven batch partitioning is covered here with a
-            // fully known oracle instead.
-            const int firstGroupRows = 2048;
-            const int secondGroupRows = 6144;
-            var (unevenBytes, unevenFolded, unevenExpected) = await ScanTruthVerification.WriteUnevenTwoColumnFixtureAsync(firstGroupRows, secondGroupRows);
-            results.Add(await MeasureCustomAsync(
-                "UnevenInt32Plain",
-                unevenBytes,
-                firstGroupRows + secondGroupRows,
-                2,
-                0,
-                0,
-                unevenExpected,
-                unevenFolded,
-                [0, 0],
-                ScanWorkload.TwoRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
-                [new CensusPassSpec([0, 1], firstGroupRows + secondGroupRows),
-                 new CensusPassSpec([1], 4096)],
-                null));
-        }
-        {
-            // Narrow projection in a wide schema: one column of eight at the
-            // full target, then a different single column at a small target.
-            var wide = await ScanFixture.CreateAsync(ScanWorkload.EightRequiredInt32Plain, RowCount);
-            results.Add(await MeasureCustomAsync(
-                "NarrowInt32Plain",
-                wide.Bytes,
-                RowCount,
-                1,
-                0,
-                0,
-                wide.Checksum,
-                wide.ColumnChecksums,
-                wide.NullCounts,
-                ScanWorkload.EightRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
-                [new CensusPassSpec([0], RowCount),
-                 new CensusPassSpec([1], 4096)],
-                null));
-        }
-        {
-            // Caller-selected small row range: the oracle covers exactly the
-            // selected rows while source accounting still observes the full
-            // row-group decode underneath.
-            const int rangeStart = 4096;
-            const int rangeCount = 4096;
-            var fixture = await ScanFixture.CreateAsync(ScanWorkload.RequiredInt32Plain, RowCount);
-            var chain = ScanChecksum.Seed;
-            for (var row = rangeStart; row < rangeStart + rangeCount; row++)
-                chain = ScanChecksum.Mix(chain, ScanChecksum.CreateInt32(row));
-            var folded = ScanChecksum.CombineColumn(chain, ScanChecksum.Seed);
-            results.Add(await MeasureCustomAsync(
-                "RequiredInt32RowRange",
-                fixture.Bytes,
-                rangeCount,
-                1,
-                0,
-                0,
-                folded,
-                [folded],
-                [0],
-                ScanWorkload.RequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
-                [new CensusPassSpec([0], rangeCount)],
-                new ParquetRowRange(rangeStart, rangeCount)));
-        }
-        {
-            // Many small row groups stand in for many small pages, with page
-            // boundary stress across eight groups.
-            const int smallGroups = 8;
-            const int smallGroupRows = 8192;
-            var (smallBytes, smallFolded) = await WriteSmallRowGroupsFixtureAsync(smallGroups, smallGroupRows);
-            results.Add(await MeasureCustomAsync(
-                "SmallRowGroupsInt32Plain",
-                smallBytes,
-                smallGroups * smallGroupRows,
-                1,
-                0,
-                0,
-                smallFolded,
-                [smallFolded],
-                [0],
-                ScanWorkload.RequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
-                [new CensusPassSpec([0], smallGroups * smallGroupRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Highly compressible Snappy lane: zeros exercise copy-heavy
-            // decoding against the hash-valued literal-heavy catalog lane.
-            var zeros = new int[RowCount];
-            var compressibleField = new DataField<int>("value", nullable: false);
-            using var compressibleStream = new MemoryStream();
-            var compressibleOptions = new ParquetOptions { CompressionMethod = CompressionMethod.Snappy, DictionaryEncodingThreshold = 0 };
-            await using (var writer = await BaselineParquetWriter.CreateAsync(new BaselineParquetSchema(compressibleField), compressibleStream, compressibleOptions))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<int>(compressibleField, zeros);
-                rowGroup.CompleteValidate();
-            }
-            var compressibleChain = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, zeros);
-            var compressibleFolded = ScanChecksum.CombineColumn(compressibleChain, ScanChecksum.Seed);
-            results.Add(await MeasureCustomAsync(
-                "CompressibleInt32Snappy",
-                compressibleStream.ToArray(),
-                RowCount,
-                1,
-                0,
-                0,
-                compressibleFolded,
-                [compressibleFolded],
-                [0],
-                ScanWorkload.RequiredInt32Snappy,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
-                [new CensusPassSpec([0], RowCount),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Optional non-INT32 lane: nullable booleans carry their own workload
-            // token with bool-lane validity accounting.
-            const int booleanRows = 8192;
-            var (booleanBytes, booleanFolded, booleanNulls) = await WriteNullableBooleanFixtureAsync(booleanRows);
-            results.Add(await MeasureCustomAsync(
-                "NullableBooleanPlain",
-                booleanBytes,
-                booleanRows,
-                1,
-                0,
-                0,
-                booleanFolded,
-                [booleanFolded],
-                [booleanNulls],
-                ScanWorkload.NullableBooleanPlain,
-                new CensusCaseLayout(CensusPhysicalType.Boolean, 1, true, CensusConsumer.Boolean),
-                [new CensusPassSpec([0], booleanRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Minimal dictionary cardinality with maximal reuse: two values
-            // over the full row count.
-            const int dictionaryRows = 65536;
-            var (dictionaryBytes, dictionaryChecksum, dictionaryUtf8Bytes) = await WriteLowCardinalityDictionaryFixtureAsync(dictionaryRows);
-            results.Add(await MeasureCustomAsync(
-                "LowCardinalityStringDictionary",
-                dictionaryBytes,
-                dictionaryRows,
-                1,
-                dictionaryUtf8Bytes,
-                0,
-                dictionaryChecksum,
-                [dictionaryChecksum],
-                [0],
-                ScanWorkload.RequiredStringDictionary,
-                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
-                [new CensusPassSpec([0], dictionaryRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-
-        {
-            // Wider required primitives: INT64, FLOAT and DOUBLE decode through
-            // dedicated physical paths with their own checksums and layouts.
-            const int wideRows = 65536;
-            var int64Field = new DataField<long>("value", nullable: false);
-            var int64Values = new long[wideRows];
-            var int64Chain = ScanChecksum.Seed;
-            for (var row = 0; row < int64Values.Length; row++)
-            {
-                int64Values[row] = ScanChecksum.CreateInt32(row);
-                int64Chain = ScanChecksum.MixInt64(int64Chain, int64Values[row]);
-            }
-
-            var int64Folded = ScanChecksum.CombineColumn(int64Chain, ScanChecksum.Seed);
-            using var int64Stream = new MemoryStream();
-            await using (var writer = await BaselineParquetWriter.CreateAsync(
-                new BaselineParquetSchema(int64Field), int64Stream,
-                new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<long>(int64Field, int64Values);
-                rowGroup.CompleteValidate();
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "RequiredInt64Plain",
-                int64Stream.ToArray(),
-                wideRows,
-                1,
-                0,
-                0,
-                int64Folded,
-                [int64Folded],
-                [0],
-                ScanWorkload.RequiredInt64Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
-                [new CensusPassSpec([0], wideRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            const int wideRows = 65536;
-            var floatField = new DataField<float>("value", nullable: false);
-            var floatValues = new float[wideRows];
-            var floatChain = ScanChecksum.Seed;
-            for (var row = 0; row < floatValues.Length; row++)
-            {
-                floatValues[row] = (float)row * 0.5f + 1f;
-                floatChain = ScanChecksum.MixFloat(floatChain, floatValues[row]);
-            }
-
-            var floatFolded = ScanChecksum.CombineColumn(floatChain, ScanChecksum.Seed);
-            using var floatStream = new MemoryStream();
-            await using (var writer = await BaselineParquetWriter.CreateAsync(
-                new BaselineParquetSchema(floatField), floatStream,
-                new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<float>(floatField, floatValues);
-                rowGroup.CompleteValidate();
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "RequiredFloatPlain",
-                floatStream.ToArray(),
-                wideRows,
-                1,
-                0,
-                0,
-                floatFolded,
-                [floatFolded],
-                [0],
-                ScanWorkload.RequiredFloatPlain,
-                new CensusCaseLayout(CensusPhysicalType.Float, sizeof(float), false, CensusConsumer.Float),
-                [new CensusPassSpec([0], wideRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            const int wideRows = 65536;
-            var doubleField = new DataField<double>("value", nullable: false);
-            var doubleValues = new double[wideRows];
-            var doubleChain = ScanChecksum.Seed;
-            for (var row = 0; row < doubleValues.Length; row++)
-            {
-                doubleValues[row] = (double)row * 0.5 + 1.0;
-                doubleChain = ScanChecksum.MixDouble(doubleChain, doubleValues[row]);
-            }
-
-            var doubleFolded = ScanChecksum.CombineColumn(doubleChain, ScanChecksum.Seed);
-            using var doubleStream = new MemoryStream();
-            await using (var writer = await BaselineParquetWriter.CreateAsync(
-                new BaselineParquetSchema(doubleField), doubleStream,
-                new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<double>(doubleField, doubleValues);
-                rowGroup.CompleteValidate();
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "RequiredDoublePlain",
-                doubleStream.ToArray(),
-                wideRows,
-                1,
-                0,
-                0,
-                doubleFolded,
-                [doubleFolded],
-                [0],
-                ScanWorkload.RequiredDoublePlain,
-                new CensusCaseLayout(CensusPhysicalType.Double, sizeof(double), false, CensusConsumer.Double),
-                [new CensusPassSpec([0], wideRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-
-        {
-            // Nullable INT64 mirrors the nullable INT32 lane shape with eight-byte slots.
-            const int nullableInt64Rows = 65536;
-            var nullableInt64Field = new DataField<long?>("value");
-            var nullableInt64Values = new long?[nullableInt64Rows];
-            var nullableInt64Chain = ScanChecksum.Seed;
-            var nullableInt64Nulls = ScanChecksum.Seed;
-            var nullableInt64NullCount = 0;
-            for (var row = 0; row < nullableInt64Values.Length; row++)
-            {
-                if ((row & 7) == 0)
-                {
-                    nullableInt64Values[row] = null;
-                    nullableInt64Nulls = ScanChecksum.Mix(nullableInt64Nulls, row);
-                    nullableInt64NullCount++;
-                }
-                else
-                {
-                    var nullableInt64Value = ScanChecksum.CreateInt32(row);
-                    nullableInt64Values[row] = nullableInt64Value;
-                    nullableInt64Chain = ScanChecksum.MixInt64(nullableInt64Chain, nullableInt64Value);
-                }
-            }
-
-            var nullableInt64Folded = ScanChecksum.CombineColumn(nullableInt64Chain, nullableInt64Nulls);
-            using var nullableInt64Stream = new MemoryStream();
-            await using (var writer = await BaselineParquetWriter.CreateAsync(
-                new BaselineParquetSchema(nullableInt64Field), nullableInt64Stream,
-                new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<long>(nullableInt64Field, nullableInt64Values);
-                rowGroup.CompleteValidate();
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "NullableInt64Plain",
-                nullableInt64Stream.ToArray(),
-                nullableInt64Rows,
-                1,
-                0,
-                0,
-                nullableInt64Folded,
-                [nullableInt64Folded],
-                [nullableInt64NullCount],
-                ScanWorkload.NullableInt64Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), true, CensusConsumer.NullableInt64),
-                [new CensusPassSpec([0], nullableInt64Rows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Dense nulls: every other row is null, stressing definition-level
-            // runs and validity expansion far beyond the one-in-eight lane.
-            const int denseRows = 65536;
-            var denseField = new DataField<int?>("value");
-            var denseValues = new int?[denseRows];
-            var denseChain = ScanChecksum.Seed;
-            var denseNulls = ScanChecksum.Seed;
-            var denseNullCount = 0;
-            for (var row = 0; row < denseValues.Length; row++)
-            {
-                if ((row & 1) == 0)
-                {
-                    denseValues[row] = null;
-                    denseNulls = ScanChecksum.Mix(denseNulls, row);
-                    denseNullCount++;
-                }
-                else
-                {
-                    var denseValue = ScanChecksum.CreateInt32(row);
-                    denseValues[row] = denseValue;
-                    denseChain = ScanChecksum.Mix(denseChain, denseValue);
-                }
-            }
-
-            var denseFolded = ScanChecksum.CombineColumn(denseChain, denseNulls);
-            using var denseStream = new MemoryStream();
-            await using (var writer = await BaselineParquetWriter.CreateAsync(
-                new BaselineParquetSchema(denseField), denseStream,
-                new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<int>(denseField, denseValues);
-                rowGroup.CompleteValidate();
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "NullableInt32DenseNulls",
-                denseStream.ToArray(),
-                denseRows,
-                1,
-                0,
-                0,
-                denseFolded,
-                [denseFolded],
-                [denseNullCount],
-                ScanWorkload.NullableInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
-                [new CensusPassSpec([0], denseRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // High dictionary cardinality: 16,384 distinct values over the full
-            // row count with dictionary encoding forced, mirroring the
-            // low-cardinality lane oracle shape.
-            const int highCardRows = 65536;
-            var highCardField = new DataField<string>("value", nullable: false);
-            var highCardEncoded = new ReadOnlyMemory<char>[highCardRows];
-            var highCardChain = ScanChecksum.Seed;
-            var highCardPayload = 0;
-            for (var row = 0; row < highCardEncoded.Length; row++)
-            {
-                var text = "v-" + (row % 16384);
-                highCardEncoded[row] = string.Intern(text).AsMemory();
-                foreach (var value in Encoding.UTF8.GetBytes(text))
-                {
-                    highCardChain = ScanChecksum.Mix(highCardChain, value);
-                    highCardPayload++;
-                }
-
-                highCardChain = ScanChecksum.Mix(highCardChain, ScanChecksum.ValueSeparator);
-            }
-
-            using var highCardStream = new MemoryStream();
-            var highCardOptions = new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 1 };
-            highCardOptions.ColumnEncodingHints[highCardField.Path.ToString()] = EncodingHint.Dictionary;
-            await using (var writer = await BaselineParquetWriter.CreateAsync(new BaselineParquetSchema(highCardField), highCardStream, highCardOptions))
-            {
-                using var rowGroup = writer.CreateRowGroup();
-                await rowGroup.WriteAsync<ReadOnlyMemory<char>>(highCardField, highCardEncoded);
-                rowGroup.CompleteValidate();
-            }
-
-            var highCardBytes = highCardStream.ToArray();
-            await using (var inspection = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)highCardBytes))
-            {
-                var chunk = inspection.Metadata.RowGroups[0].Columns[0];
-                var hasDictionaryEncoding = chunk.EncodingCodes.Contains((int)ParquetEncoding.PlainDictionary) ||
-                    chunk.EncodingCodes.Contains((int)ParquetEncoding.RunLengthDictionary);
-                if (!hasDictionaryEncoding)
-                    throw new InvalidOperationException("The high-cardinality fixture did not use dictionary encoding: " + string.Join(",", chunk.EncodingCodes) + ".");
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "HighCardinalityStringDictionary",
-                highCardBytes,
-                highCardRows,
-                1,
-                highCardPayload,
-                0,
-                highCardChain,
-                [highCardChain],
-                [0],
-                ScanWorkload.RequiredStringDictionary,
-                new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
-                [new CensusPassSpec([0], highCardRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-
-        {
-            // Data Page V2 layouts: the hand-built V2 value sections exercise V2
-            // level handling that the Parquet.NET writer cannot produce.
-            const int v2Rows = 65536;
-            var v2Values = Enumerable.Range(0, v2Rows).Select(ScanChecksum.CreateInt32).ToArray();
-            var v2Chain = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, v2Values);
-            var v2Folded = ScanChecksum.CombineColumn(v2Chain, ScanChecksum.Seed);
-            var v2Bytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
-            {
-                Values = v2Values,
-                PageVersion = Lokad.Parquet.Tests.FixturePageVersion.DataPageV2,
-            });
-            results.Add(await MeasureCustomAsync(
-                "RequiredInt32V2",
-                v2Bytes,
-                v2Rows,
-                1,
-                0,
-                0,
-                v2Folded,
-                [v2Folded],
-                [0],
-                ScanWorkload.RequiredInt32V2,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
-                [new CensusPassSpec([0], v2Rows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            const int nullableV2Rows = 65536;
-            var nullableV2Values = Enumerable.Range(0, nullableV2Rows).Select(ScanChecksum.CreateInt32).ToArray();
-            var nullableV2Validity = Enumerable.Range(0, nullableV2Rows).Select(static row => (row & 7) != 0).ToArray();
-            var nullableV2Chain = ScanChecksum.Seed;
-            var nullableV2Nulls = ScanChecksum.Seed;
-            var nullableV2NullCount = 0;
-            for (var row = 0; row < nullableV2Rows; row++)
-            {
-                if (nullableV2Validity[row])
-                    nullableV2Chain = ScanChecksum.Mix(nullableV2Chain, nullableV2Values[row]);
-                else
-                {
-                    nullableV2Nulls = ScanChecksum.Mix(nullableV2Nulls, row);
-                    nullableV2NullCount++;
-                }
-            }
-
-            var nullableV2Folded = ScanChecksum.CombineColumn(nullableV2Chain, nullableV2Nulls);
-            var nullableV2Bytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
-            {
-                Values = nullableV2Values,
-                Repetition = ParquetRepetition.Optional,
-                Validity = nullableV2Validity,
-                PageVersion = Lokad.Parquet.Tests.FixturePageVersion.DataPageV2,
-            });
-            results.Add(await MeasureCustomAsync(
-                "NullableInt32V2",
-                nullableV2Bytes,
-                nullableV2Rows,
-                1,
-                0,
-                0,
-                nullableV2Folded,
-                [nullableV2Folded],
-                [nullableV2NullCount],
-                ScanWorkload.NullableInt32V2,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
-                [new CensusPassSpec([0], nullableV2Rows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Nullable variable-width binary: optional BYTE_ARRAY pages with null
-            // rows exercise definition levels over offsets without UTF-8 validation.
-            const int binaryRows = 8192;
-            var binaryValues = new byte[binaryRows][];
-            var binaryValidity = new bool[binaryRows];
-            var binaryChain = ScanChecksum.Seed;
-            var binaryNulls = ScanChecksum.Seed;
-            var binaryNullCount = 0;
-            var binaryPayloadBytes = 0;
-            for (var row = 0; row < binaryRows; row++)
-            {
-                if (row % 3 == 2)
-                {
-                    binaryValues[row] = [];
-                    binaryValidity[row] = false;
-                    binaryNulls = ScanChecksum.Mix(binaryNulls, row);
-                    binaryNullCount++;
-                }
-                else
-                {
-                    binaryValues[row] = [(byte)(row & 255), (byte)((row >> 8) & 255)];
-                    binaryValidity[row] = true;
-                    binaryChain = ScanChecksum.MixBytes(binaryChain, binaryValues[row]);
-                    binaryPayloadBytes += binaryValues[row].Length;
-                }
-            }
-
-            var binaryFolded = ScanChecksum.CombineColumn(binaryChain, binaryNulls);
-            var binaryBytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
-            {
-                PhysicalTypeCode = (int)ParquetPhysicalType.ByteArray,
-                PhysicalValues = binaryValues,
-                Repetition = ParquetRepetition.Optional,
-                Validity = binaryValidity,
-            });
-            results.Add(await MeasureCustomAsync(
-                "NullableBinaryPlain",
-                binaryBytes,
-                binaryRows,
-                1,
-                0,
-                binaryPayloadBytes,
-                binaryFolded,
-                [binaryFolded],
-                [binaryNullCount],
-                ScanWorkload.NullableBinaryPlain,
-                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, true, CensusConsumer.NullableBinary),
-                [new CensusPassSpec([0], binaryRows),
-                 new CensusPassSpec([0], 4096)],
-                null));
-        }
-        {
-            // Real multi-page misalignment within one row group: the two columns
-            // split their pages at different rows, so small-target projected
-            // batches slice partial pages on both sides instead of transferring.
-            const int misalignedRows = 2000;
-            var leftPages = new[]
-            {
-                Enumerable.Range(0, 1000).Select(ScanChecksum.CreateInt32).ToArray(),
-                Enumerable.Range(1000, 1000).Select(ScanChecksum.CreateInt32).ToArray(),
-            };
-            var rightPages = new[]
-            {
-                Enumerable.Range(0, 1500).Select(static row => ScanChecksum.CreateInt32(100000 + row)).ToArray(),
-                Enumerable.Range(1500, 500).Select(static row => ScanChecksum.CreateInt32(100000 + row)).ToArray(),
-            };
-            var leftFolded = ScanChecksum.CombineColumn(
-                ScanChecksum.ConsumeRequired(ScanChecksum.Seed, leftPages[0].Concat(leftPages[1]).ToArray()), ScanChecksum.Seed);
-            var rightFolded = ScanChecksum.CombineColumn(
-                ScanChecksum.ConsumeRequired(ScanChecksum.Seed, rightPages[0].Concat(rightPages[1]).ToArray()), ScanChecksum.Seed);
-            var misalignedBytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32Columns(
-            [
-                new Lokad.Parquet.Tests.RequiredInt32FixtureColumn { Name = "left", Pages = leftPages },
-                new Lokad.Parquet.Tests.RequiredInt32FixtureColumn { Name = "right", Pages = rightPages },
-            ]);
-            var misalignedChecksum = ScanChecksum.CombineColumns([leftFolded, rightFolded]);
-            results.Add(await MeasureCustomAsync(
-                "MisalignedMultiPage",
-                misalignedBytes,
-                misalignedRows,
-                2,
-                0,
-                0,
-                misalignedChecksum,
-                [leftFolded, rightFolded],
-                [0, 0],
-                ScanWorkload.TwoRequiredInt32Plain,
-                new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
-                [new CensusPassSpec([0, 1], misalignedRows),
-                 new CensusPassSpec([0, 1], 128)],
-                null));
-        }
-
-        {
-            // Committed producer fixtures with page CRCs: truth comes from the
-            // pinned independent column hashes plus Lokad/baseline agreement,
-            // established before any timing runs. The pinned baseline never
-            // reads or validates page CRCs (its read path has no CRC handling);
-            // Lokad validates every present CRC before trusting payload bytes.
-            var repositoryRoot = Environment.GetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT") ??
-                throw new InvalidOperationException("The benchmark repository root is unavailable.");
-            var plainChecksumBytes = await File.ReadAllBytesAsync(Path.Combine(
-                repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "plain-dict-uncompressed-checksum.parquet"));
-            var plainTruth = await EstablishCommittedTruthAsync(
-                plainChecksumBytes, 0, "b4e1c8ce8ea209fb64ee37db3c5b356b0952a756d919b5b31f69e1dc49087cf2");
-            results.Add(await MeasureCustomAsync(
-                "CrcInt64Dictionary",
-                plainChecksumBytes,
-                plainTruth.RowCount,
-                1,
-                0,
-                0,
-                plainTruth.Checksum,
-                plainTruth.ColumnHashes,
-                plainTruth.NullCounts,
-                ScanWorkload.CrcInt64Dictionary,
-                new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
-                [new CensusPassSpec([0], plainTruth.RowCount),
-                 new CensusPassSpec([0], 256)],
-                null));
-            var snappyChecksumBytes = await File.ReadAllBytesAsync(Path.Combine(
-                repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "rle-dict-snappy-checksum.parquet"));
-            var snappyTruth = await EstablishCommittedTruthAsync(
-                snappyChecksumBytes, 1, "7466464aa99cfabca1449d81db1f859a10208da4e72ba5b5d12df8ecf4f42a59");
-            results.Add(await MeasureCustomAsync(
-                "CrcBinaryDictionarySnappy",
-                snappyChecksumBytes,
-                snappyTruth.RowCount,
-                1,
-                0,
-                snappyTruth.BinaryPayloadBytes,
-                snappyTruth.Checksum,
-                snappyTruth.ColumnHashes,
-                snappyTruth.NullCounts,
-                ScanWorkload.CrcBinaryDictionarySnappy,
-                new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, false, CensusConsumer.Binary),
-                [new CensusPassSpec([1], snappyTruth.RowCount),
-                 new CensusPassSpec([1], 256)],
-                null));
-            var fixedBytes = await File.ReadAllBytesAsync(Path.Combine(
-                repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "fixed_length_byte_array.parquet"));
-            var fixedTruth = await EstablishCommittedTruthAsync(
-                fixedBytes, 0, "ccef1cbacb37a62e63bd7be4128dc95a1808f97b2f1d7eed79755d916bcc9abd");
-            await using (var fixedInspection = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)fixedBytes))
-            {
-                if (fixedInspection.Metadata.Schema.Columns[0].SchemaElement.TypeLength != 4)
-                    throw new InvalidOperationException("The committed fixed fixture changed its type width.");
-            }
-
-            results.Add(await MeasureCustomAsync(
-                "NullableFixedByteArrayPlain",
-                fixedBytes,
-                fixedTruth.RowCount,
-                1,
-                0,
-                0,
-                fixedTruth.Checksum,
-                fixedTruth.ColumnHashes,
-                fixedTruth.NullCounts,
-                ScanWorkload.NullableFixedByteArrayPlain,
-                new CensusCaseLayout(CensusPhysicalType.FixedLengthByteArray, 4, true, CensusConsumer.Fixed),
-                [new CensusPassSpec([0], fixedTruth.RowCount),
-                 new CensusPassSpec([0], 256)],
-                null));
-        }
-        {
-            // The static catalog is load-bearing: every measured case resolves
-            // to exactly one entry with a matching layout and pass set, so a
-            // renamed, added, or reshaped case fails here instead of silently
-            // drifting from the exported and reconciled catalog.
-            var catalogByName = new Dictionary<string, CensusCatalogCase>(StringComparer.Ordinal);
-            foreach (var catalogEntry in CensusCatalog.Cases)
-                catalogByName.Add(catalogEntry.Name, catalogEntry);
-            var reconciled = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var result in results)
-            {
-                if (!catalogByName.TryGetValue(result.Name, out var catalogEntry))
-                    throw new InvalidOperationException($"The work census measured an unknown case '{result.Name}'.");
-                if (!reconciled.Add(result.Name))
-                    throw new InvalidOperationException($"The work census measured a duplicate case '{result.Name}'.");
-                if (!string.Equals(result.PhysicalType, CensusLayout.NameOf(catalogEntry.PhysicalType), StringComparison.Ordinal) ||
-                    result.ValueWidthBytes != catalogEntry.TypeWidthBytes ||
-                    result.Nullable != catalogEntry.Nullable ||
-                    !string.Equals(result.Consumer, CensusConsumerNames.SnapshotName(catalogEntry.Consumer), StringComparison.Ordinal))
-                    throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog layout.");
-                if (result.PassPeaks.Count != catalogEntry.PassProjections.Count)
-                    throw new InvalidOperationException($"The work census case '{result.Name}' does not carry its catalog passes.");
-                for (var pass = 0; pass < result.PassPeaks.Count; pass++)
-                {
-                    if (!result.PassPeaks[pass].Projection.SequenceEqual(catalogEntry.PassProjections[pass]))
-                        throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog passes.");
-                }
-            }
-            if (reconciled.Count != CensusCatalog.Cases.Count)
-                throw new InvalidOperationException("The work census is missing catalog cases.");
-        }
+        var sessionId = Guid.NewGuid();
+        var sessionStartedAt = DateTimeOffset.UtcNow;
         var platform = OperatingSystem.IsWindows() ? "windows" : "linux";
         var outputPath = Path.Combine(
             "artifacts",
             "benchmarks",
             "work-census-" + platform + "-" + DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss") + ".json");
-        var affinityMask = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
-        var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "work census output");
-        var snapshot = new WorkCensusSnapshot(
-            SnapshotSchemaVersion,
-            DateTimeOffset.UtcNow,
-            Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
-            RuntimeInformation.FrameworkDescription,
-            RuntimeInformation.OSDescription,
-            RuntimeInformation.ProcessArchitecture.ToString(),
-            BenchmarkHostPolicy.GetProcessorName(),
-            BenchmarkHostPolicy.FormatAffinity(affinityMask),
-            BenchmarkHostPolicy.GetSelectedLogicalProcessor(affinityMask),
-            BenchmarkHostPolicy.GetServerGarbageCollection(),
-            BenchmarkHostPolicy.GetGcLatencyMode(),
-            BenchmarkHostPolicy.GetTieredCompilation(),
-            BenchmarkHostPolicy.GetTieredPgo(),
-            outputEvidence.ResolvedPath,
-            outputEvidence.FileSystem,
-            PairedParityRunner.GetRunnerFingerprint(),
-            Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
-            results);
-        Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ??
-            throw new InvalidOperationException("The work-census output has no directory."));
-        await using (var output = File.Create(outputPath))
+        var session = BeginCensusSession(outputPath, sessionId, sessionStartedAt);
+        var snapshotParent = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ??
+            throw new InvalidOperationException("The work-census output has no directory.");
+        foreach (var incomplete in PairedSessionRecorder.FindIncompleteSessionDirectories(snapshotParent))
         {
-            await JsonSerializer.SerializeAsync(output, snapshot, new JsonSerializerOptions
+            if (!string.Equals(incomplete.SessionDirectory, session.SessionDirectory, StringComparison.Ordinal))
+                Console.WriteLine($"Warning: incomplete census session {incomplete.SessionDirectory} has no completeness marker and never qualifies as evidence.");
+        }
+        var results = new List<WorkCensusCase>();
+        var order = 0;
+        async Task<WorkCensusCase> RunCensusCaseAsync(Func<Task<WorkCensusCase>> measureAsync)
+        {
+            var caseStartedAt = DateTimeOffset.UtcNow;
+            var result = await measureAsync();
+            var caseEndedAt = DateTimeOffset.UtcNow;
+            RecordCensusCheckpoint(session, order, result.Name, caseStartedAt, caseEndedAt, result);
+            results.Add(result);
+            order++;
+            return result;
+        }
+        try
+        {
+            foreach (var workload in ScanWorkloadCatalog.ParityWorkloads)
+                await RunCensusCaseAsync(() => MeasureAsync(workload));
             {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                WriteIndented = true,
-            });
-        }
+                // Uneven multi-row-group case: the catalog writer emits one page per
+                // column chunk, so uneven batch partitioning is covered here with a
+                // fully known oracle instead.
+                const int firstGroupRows = 2048;
+                const int secondGroupRows = 6144;
+                var (unevenBytes, unevenFolded, unevenExpected) = await ScanTruthVerification.WriteUnevenTwoColumnFixtureAsync(firstGroupRows, secondGroupRows);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "UnevenInt32Plain",
+                    unevenBytes,
+                    firstGroupRows + secondGroupRows,
+                    2,
+                    0,
+                    0,
+                    unevenExpected,
+                    unevenFolded,
+                    [0, 0],
+                    ScanWorkload.TwoRequiredInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
+                    [new CensusPassSpec([0, 1], firstGroupRows + secondGroupRows),
+                     new CensusPassSpec([1], 4096)],
+                    null));
+            }
+            {
+                // Narrow projection in a wide schema: one column of eight at the
+                // full target, then a different single column at a small target.
+                var wide = await ScanFixture.CreateAsync(ScanWorkload.EightRequiredInt32Plain, RowCount);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NarrowInt32Plain",
+                    wide.Bytes,
+                    RowCount,
+                    1,
+                    0,
+                    0,
+                    wide.Checksum,
+                    wide.ColumnChecksums,
+                    wide.NullCounts,
+                    ScanWorkload.EightRequiredInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
+                    [new CensusPassSpec([0], RowCount),
+                     new CensusPassSpec([1], 4096)],
+                    null));
+            }
+            {
+                // Caller-selected small row range: the oracle covers exactly the
+                // selected rows while source accounting still observes the full
+                // row-group decode underneath.
+                const int rangeStart = 4096;
+                const int rangeCount = 4096;
+                var fixture = await ScanFixture.CreateAsync(ScanWorkload.RequiredInt32Plain, RowCount);
+                var chain = ScanChecksum.Seed;
+                for (var row = rangeStart; row < rangeStart + rangeCount; row++)
+                    chain = ScanChecksum.Mix(chain, ScanChecksum.CreateInt32(row));
+                var folded = ScanChecksum.CombineColumn(chain, ScanChecksum.Seed);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "RequiredInt32RowRange",
+                    fixture.Bytes,
+                    rangeCount,
+                    1,
+                    0,
+                    0,
+                    folded,
+                    [folded],
+                    [0],
+                    ScanWorkload.RequiredInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
+                    [new CensusPassSpec([0], rangeCount)],
+                    new ParquetRowRange(rangeStart, rangeCount)));
+            }
+            {
+                // Many small row groups stand in for many small pages, with page
+                // boundary stress across eight groups.
+                const int smallGroups = 8;
+                const int smallGroupRows = 8192;
+                var (smallBytes, smallFolded) = await WriteSmallRowGroupsFixtureAsync(smallGroups, smallGroupRows);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "SmallRowGroupsInt32Plain",
+                    smallBytes,
+                    smallGroups * smallGroupRows,
+                    1,
+                    0,
+                    0,
+                    smallFolded,
+                    [smallFolded],
+                    [0],
+                    ScanWorkload.RequiredInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
+                    [new CensusPassSpec([0], smallGroups * smallGroupRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Highly compressible Snappy lane: zeros exercise copy-heavy
+                // decoding against the hash-valued literal-heavy catalog lane.
+                var zeros = new int[RowCount];
+                var compressibleField = new DataField<int>("value", nullable: false);
+                using var compressibleStream = new MemoryStream();
+                var compressibleOptions = new ParquetOptions { CompressionMethod = CompressionMethod.Snappy, DictionaryEncodingThreshold = 0 };
+                await using (var writer = await BaselineParquetWriter.CreateAsync(new BaselineParquetSchema(compressibleField), compressibleStream, compressibleOptions))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<int>(compressibleField, zeros);
+                    rowGroup.CompleteValidate();
+                }
+                var compressibleChain = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, zeros);
+                var compressibleFolded = ScanChecksum.CombineColumn(compressibleChain, ScanChecksum.Seed);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "CompressibleInt32Snappy",
+                    compressibleStream.ToArray(),
+                    RowCount,
+                    1,
+                    0,
+                    0,
+                    compressibleFolded,
+                    [compressibleFolded],
+                    [0],
+                    ScanWorkload.RequiredInt32Snappy,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
+                    [new CensusPassSpec([0], RowCount),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Optional non-INT32 lane: nullable booleans carry their own workload
+                // token with bool-lane validity accounting.
+                const int booleanRows = 8192;
+                var (booleanBytes, booleanFolded, booleanNulls) = await WriteNullableBooleanFixtureAsync(booleanRows);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableBooleanPlain",
+                    booleanBytes,
+                    booleanRows,
+                    1,
+                    0,
+                    0,
+                    booleanFolded,
+                    [booleanFolded],
+                    [booleanNulls],
+                    ScanWorkload.NullableBooleanPlain,
+                    new CensusCaseLayout(CensusPhysicalType.Boolean, 1, true, CensusConsumer.Boolean),
+                    [new CensusPassSpec([0], booleanRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Minimal dictionary cardinality with maximal reuse: two values
+                // over the full row count.
+                const int dictionaryRows = 65536;
+                var (dictionaryBytes, dictionaryChecksum, dictionaryUtf8Bytes) = await WriteLowCardinalityDictionaryFixtureAsync(dictionaryRows);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "LowCardinalityStringDictionary",
+                    dictionaryBytes,
+                    dictionaryRows,
+                    1,
+                    dictionaryUtf8Bytes,
+                    0,
+                    dictionaryChecksum,
+                    [dictionaryChecksum],
+                    [0],
+                    ScanWorkload.RequiredStringDictionary,
+                    new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
+                    [new CensusPassSpec([0], dictionaryRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
 
-        Console.WriteLine($"Work census: {Path.GetFullPath(outputPath)}");
-        foreach (var result in results)
-        {
-            Console.WriteLine(
-                $"{result.Name}: reads={result.SourceReadCalls}/{result.SourceBytesRead} B, " +
-                $"pool={result.PoolRents} rents/{result.PeakPooledBytes} B peak/" +
-                $"{result.PooledBytesCleared} B cleared, moves={result.SynchronousMoves}/" +
-                $"{result.TotalMoves} synchronous.");
+            {
+                // Wider required primitives: INT64, FLOAT and DOUBLE decode through
+                // dedicated physical paths with their own checksums and layouts.
+                const int wideRows = 65536;
+                var int64Field = new DataField<long>("value", nullable: false);
+                var int64Values = new long[wideRows];
+                var int64Chain = ScanChecksum.Seed;
+                for (var row = 0; row < int64Values.Length; row++)
+                {
+                    int64Values[row] = ScanChecksum.CreateInt32(row);
+                    int64Chain = ScanChecksum.MixInt64(int64Chain, int64Values[row]);
+                }
+
+                var int64Folded = ScanChecksum.CombineColumn(int64Chain, ScanChecksum.Seed);
+                using var int64Stream = new MemoryStream();
+                await using (var writer = await BaselineParquetWriter.CreateAsync(
+                    new BaselineParquetSchema(int64Field), int64Stream,
+                    new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<long>(int64Field, int64Values);
+                    rowGroup.CompleteValidate();
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "RequiredInt64Plain",
+                    int64Stream.ToArray(),
+                    wideRows,
+                    1,
+                    0,
+                    0,
+                    int64Folded,
+                    [int64Folded],
+                    [0],
+                    ScanWorkload.RequiredInt64Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
+                    [new CensusPassSpec([0], wideRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                const int wideRows = 65536;
+                var floatField = new DataField<float>("value", nullable: false);
+                var floatValues = new float[wideRows];
+                var floatChain = ScanChecksum.Seed;
+                for (var row = 0; row < floatValues.Length; row++)
+                {
+                    floatValues[row] = (float)row * 0.5f + 1f;
+                    floatChain = ScanChecksum.MixFloat(floatChain, floatValues[row]);
+                }
+
+                var floatFolded = ScanChecksum.CombineColumn(floatChain, ScanChecksum.Seed);
+                using var floatStream = new MemoryStream();
+                await using (var writer = await BaselineParquetWriter.CreateAsync(
+                    new BaselineParquetSchema(floatField), floatStream,
+                    new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<float>(floatField, floatValues);
+                    rowGroup.CompleteValidate();
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "RequiredFloatPlain",
+                    floatStream.ToArray(),
+                    wideRows,
+                    1,
+                    0,
+                    0,
+                    floatFolded,
+                    [floatFolded],
+                    [0],
+                    ScanWorkload.RequiredFloatPlain,
+                    new CensusCaseLayout(CensusPhysicalType.Float, sizeof(float), false, CensusConsumer.Float),
+                    [new CensusPassSpec([0], wideRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                const int wideRows = 65536;
+                var doubleField = new DataField<double>("value", nullable: false);
+                var doubleValues = new double[wideRows];
+                var doubleChain = ScanChecksum.Seed;
+                for (var row = 0; row < doubleValues.Length; row++)
+                {
+                    doubleValues[row] = (double)row * 0.5 + 1.0;
+                    doubleChain = ScanChecksum.MixDouble(doubleChain, doubleValues[row]);
+                }
+
+                var doubleFolded = ScanChecksum.CombineColumn(doubleChain, ScanChecksum.Seed);
+                using var doubleStream = new MemoryStream();
+                await using (var writer = await BaselineParquetWriter.CreateAsync(
+                    new BaselineParquetSchema(doubleField), doubleStream,
+                    new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<double>(doubleField, doubleValues);
+                    rowGroup.CompleteValidate();
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "RequiredDoublePlain",
+                    doubleStream.ToArray(),
+                    wideRows,
+                    1,
+                    0,
+                    0,
+                    doubleFolded,
+                    [doubleFolded],
+                    [0],
+                    ScanWorkload.RequiredDoublePlain,
+                    new CensusCaseLayout(CensusPhysicalType.Double, sizeof(double), false, CensusConsumer.Double),
+                    [new CensusPassSpec([0], wideRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+
+            {
+                // Nullable INT64 mirrors the nullable INT32 lane shape with eight-byte slots.
+                const int nullableInt64Rows = 65536;
+                var nullableInt64Field = new DataField<long?>("value");
+                var nullableInt64Values = new long?[nullableInt64Rows];
+                var nullableInt64Chain = ScanChecksum.Seed;
+                var nullableInt64Nulls = ScanChecksum.Seed;
+                var nullableInt64NullCount = 0;
+                for (var row = 0; row < nullableInt64Values.Length; row++)
+                {
+                    if ((row & 7) == 0)
+                    {
+                        nullableInt64Values[row] = null;
+                        nullableInt64Nulls = ScanChecksum.Mix(nullableInt64Nulls, row);
+                        nullableInt64NullCount++;
+                    }
+                    else
+                    {
+                        var nullableInt64Value = ScanChecksum.CreateInt32(row);
+                        nullableInt64Values[row] = nullableInt64Value;
+                        nullableInt64Chain = ScanChecksum.MixInt64(nullableInt64Chain, nullableInt64Value);
+                    }
+                }
+
+                var nullableInt64Folded = ScanChecksum.CombineColumn(nullableInt64Chain, nullableInt64Nulls);
+                using var nullableInt64Stream = new MemoryStream();
+                await using (var writer = await BaselineParquetWriter.CreateAsync(
+                    new BaselineParquetSchema(nullableInt64Field), nullableInt64Stream,
+                    new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<long>(nullableInt64Field, nullableInt64Values);
+                    rowGroup.CompleteValidate();
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableInt64Plain",
+                    nullableInt64Stream.ToArray(),
+                    nullableInt64Rows,
+                    1,
+                    0,
+                    0,
+                    nullableInt64Folded,
+                    [nullableInt64Folded],
+                    [nullableInt64NullCount],
+                    ScanWorkload.NullableInt64Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), true, CensusConsumer.NullableInt64),
+                    [new CensusPassSpec([0], nullableInt64Rows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Dense nulls: every other row is null, stressing definition-level
+                // runs and validity expansion far beyond the one-in-eight lane.
+                const int denseRows = 65536;
+                var denseField = new DataField<int?>("value");
+                var denseValues = new int?[denseRows];
+                var denseChain = ScanChecksum.Seed;
+                var denseNulls = ScanChecksum.Seed;
+                var denseNullCount = 0;
+                for (var row = 0; row < denseValues.Length; row++)
+                {
+                    if ((row & 1) == 0)
+                    {
+                        denseValues[row] = null;
+                        denseNulls = ScanChecksum.Mix(denseNulls, row);
+                        denseNullCount++;
+                    }
+                    else
+                    {
+                        var denseValue = ScanChecksum.CreateInt32(row);
+                        denseValues[row] = denseValue;
+                        denseChain = ScanChecksum.Mix(denseChain, denseValue);
+                    }
+                }
+
+                var denseFolded = ScanChecksum.CombineColumn(denseChain, denseNulls);
+                using var denseStream = new MemoryStream();
+                await using (var writer = await BaselineParquetWriter.CreateAsync(
+                    new BaselineParquetSchema(denseField), denseStream,
+                    new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 0 }))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<int>(denseField, denseValues);
+                    rowGroup.CompleteValidate();
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableInt32DenseNulls",
+                    denseStream.ToArray(),
+                    denseRows,
+                    1,
+                    0,
+                    0,
+                    denseFolded,
+                    [denseFolded],
+                    [denseNullCount],
+                    ScanWorkload.NullableInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
+                    [new CensusPassSpec([0], denseRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // High dictionary cardinality: 16,384 distinct values over the full
+                // row count with dictionary encoding forced, mirroring the
+                // low-cardinality lane oracle shape.
+                const int highCardRows = 65536;
+                var highCardField = new DataField<string>("value", nullable: false);
+                var highCardEncoded = new ReadOnlyMemory<char>[highCardRows];
+                var highCardChain = ScanChecksum.Seed;
+                var highCardPayload = 0;
+                for (var row = 0; row < highCardEncoded.Length; row++)
+                {
+                    var text = "v-" + (row % 16384);
+                    highCardEncoded[row] = string.Intern(text).AsMemory();
+                    foreach (var value in Encoding.UTF8.GetBytes(text))
+                    {
+                        highCardChain = ScanChecksum.Mix(highCardChain, value);
+                        highCardPayload++;
+                    }
+
+                    highCardChain = ScanChecksum.Mix(highCardChain, ScanChecksum.ValueSeparator);
+                }
+
+                using var highCardStream = new MemoryStream();
+                var highCardOptions = new ParquetOptions { CompressionMethod = CompressionMethod.None, DictionaryEncodingThreshold = 1 };
+                highCardOptions.ColumnEncodingHints[highCardField.Path.ToString()] = EncodingHint.Dictionary;
+                await using (var writer = await BaselineParquetWriter.CreateAsync(new BaselineParquetSchema(highCardField), highCardStream, highCardOptions))
+                {
+                    using var rowGroup = writer.CreateRowGroup();
+                    await rowGroup.WriteAsync<ReadOnlyMemory<char>>(highCardField, highCardEncoded);
+                    rowGroup.CompleteValidate();
+                }
+
+                var highCardBytes = highCardStream.ToArray();
+                await using (var inspection = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)highCardBytes))
+                {
+                    var chunk = inspection.Metadata.RowGroups[0].Columns[0];
+                    var hasDictionaryEncoding = chunk.EncodingCodes.Contains((int)ParquetEncoding.PlainDictionary) ||
+                        chunk.EncodingCodes.Contains((int)ParquetEncoding.RunLengthDictionary);
+                    if (!hasDictionaryEncoding)
+                        throw new InvalidOperationException("The high-cardinality fixture did not use dictionary encoding: " + string.Join(",", chunk.EncodingCodes) + ".");
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "HighCardinalityStringDictionary",
+                    highCardBytes,
+                    highCardRows,
+                    1,
+                    highCardPayload,
+                    0,
+                    highCardChain,
+                    [highCardChain],
+                    [0],
+                    ScanWorkload.RequiredStringDictionary,
+                    new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, CensusConsumer.Utf8),
+                    [new CensusPassSpec([0], highCardRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+
+            {
+                // Data Page V2 layouts: the hand-built V2 value sections exercise V2
+                // level handling that the Parquet.NET writer cannot produce.
+                const int v2Rows = 65536;
+                var v2Values = Enumerable.Range(0, v2Rows).Select(ScanChecksum.CreateInt32).ToArray();
+                var v2Chain = ScanChecksum.ConsumeRequired(ScanChecksum.Seed, v2Values);
+                var v2Folded = ScanChecksum.CombineColumn(v2Chain, ScanChecksum.Seed);
+                var v2Bytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
+                {
+                    Values = v2Values,
+                    PageVersion = Lokad.Parquet.Tests.FixturePageVersion.DataPageV2,
+                });
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "RequiredInt32V2",
+                    v2Bytes,
+                    v2Rows,
+                    1,
+                    0,
+                    0,
+                    v2Folded,
+                    [v2Folded],
+                    [0],
+                    ScanWorkload.RequiredInt32V2,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.Int32),
+                    [new CensusPassSpec([0], v2Rows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                const int nullableV2Rows = 65536;
+                var nullableV2Values = Enumerable.Range(0, nullableV2Rows).Select(ScanChecksum.CreateInt32).ToArray();
+                var nullableV2Validity = Enumerable.Range(0, nullableV2Rows).Select(static row => (row & 7) != 0).ToArray();
+                var nullableV2Chain = ScanChecksum.Seed;
+                var nullableV2Nulls = ScanChecksum.Seed;
+                var nullableV2NullCount = 0;
+                for (var row = 0; row < nullableV2Rows; row++)
+                {
+                    if (nullableV2Validity[row])
+                        nullableV2Chain = ScanChecksum.Mix(nullableV2Chain, nullableV2Values[row]);
+                    else
+                    {
+                        nullableV2Nulls = ScanChecksum.Mix(nullableV2Nulls, row);
+                        nullableV2NullCount++;
+                    }
+                }
+
+                var nullableV2Folded = ScanChecksum.CombineColumn(nullableV2Chain, nullableV2Nulls);
+                var nullableV2Bytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
+                {
+                    Values = nullableV2Values,
+                    Repetition = ParquetRepetition.Optional,
+                    Validity = nullableV2Validity,
+                    PageVersion = Lokad.Parquet.Tests.FixturePageVersion.DataPageV2,
+                });
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableInt32V2",
+                    nullableV2Bytes,
+                    nullableV2Rows,
+                    1,
+                    0,
+                    0,
+                    nullableV2Folded,
+                    [nullableV2Folded],
+                    [nullableV2NullCount],
+                    ScanWorkload.NullableInt32V2,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), true, CensusConsumer.NullableInt32),
+                    [new CensusPassSpec([0], nullableV2Rows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Nullable variable-width binary: optional BYTE_ARRAY pages with null
+                // rows exercise definition levels over offsets without UTF-8 validation.
+                const int binaryRows = 8192;
+                var binaryValues = new byte[binaryRows][];
+                var binaryValidity = new bool[binaryRows];
+                var binaryChain = ScanChecksum.Seed;
+                var binaryNulls = ScanChecksum.Seed;
+                var binaryNullCount = 0;
+                var binaryPayloadBytes = 0;
+                for (var row = 0; row < binaryRows; row++)
+                {
+                    if (row % 3 == 2)
+                    {
+                        binaryValues[row] = [];
+                        binaryValidity[row] = false;
+                        binaryNulls = ScanChecksum.Mix(binaryNulls, row);
+                        binaryNullCount++;
+                    }
+                    else
+                    {
+                        binaryValues[row] = [(byte)(row & 255), (byte)((row >> 8) & 255)];
+                        binaryValidity[row] = true;
+                        binaryChain = ScanChecksum.MixBytes(binaryChain, binaryValues[row]);
+                        binaryPayloadBytes += binaryValues[row].Length;
+                    }
+                }
+
+                var binaryFolded = ScanChecksum.CombineColumn(binaryChain, binaryNulls);
+                var binaryBytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateInt32(new Lokad.Parquet.Tests.ParquetFixtureOptions
+                {
+                    PhysicalTypeCode = (int)ParquetPhysicalType.ByteArray,
+                    PhysicalValues = binaryValues,
+                    Repetition = ParquetRepetition.Optional,
+                    Validity = binaryValidity,
+                });
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableBinaryPlain",
+                    binaryBytes,
+                    binaryRows,
+                    1,
+                    0,
+                    binaryPayloadBytes,
+                    binaryFolded,
+                    [binaryFolded],
+                    [binaryNullCount],
+                    ScanWorkload.NullableBinaryPlain,
+                    new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, true, CensusConsumer.NullableBinary),
+                    [new CensusPassSpec([0], binaryRows),
+                     new CensusPassSpec([0], 4096)],
+                    null));
+            }
+            {
+                // Real multi-page misalignment within one row group: the two columns
+                // split their pages at different rows, so small-target projected
+                // batches slice partial pages on both sides instead of transferring.
+                const int misalignedRows = 2000;
+                var leftPages = new[]
+                {
+                    Enumerable.Range(0, 1000).Select(ScanChecksum.CreateInt32).ToArray(),
+                    Enumerable.Range(1000, 1000).Select(ScanChecksum.CreateInt32).ToArray(),
+                };
+                var rightPages = new[]
+                {
+                    Enumerable.Range(0, 1500).Select(static row => ScanChecksum.CreateInt32(100000 + row)).ToArray(),
+                    Enumerable.Range(1500, 500).Select(static row => ScanChecksum.CreateInt32(100000 + row)).ToArray(),
+                };
+                var leftFolded = ScanChecksum.CombineColumn(
+                    ScanChecksum.ConsumeRequired(ScanChecksum.Seed, leftPages[0].Concat(leftPages[1]).ToArray()), ScanChecksum.Seed);
+                var rightFolded = ScanChecksum.CombineColumn(
+                    ScanChecksum.ConsumeRequired(ScanChecksum.Seed, rightPages[0].Concat(rightPages[1]).ToArray()), ScanChecksum.Seed);
+                var misalignedBytes = Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32Columns(
+                [
+                    new Lokad.Parquet.Tests.RequiredInt32FixtureColumn { Name = "left", Pages = leftPages },
+                    new Lokad.Parquet.Tests.RequiredInt32FixtureColumn { Name = "right", Pages = rightPages },
+                ]);
+                var misalignedChecksum = ScanChecksum.CombineColumns([leftFolded, rightFolded]);
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "MisalignedMultiPage",
+                    misalignedBytes,
+                    misalignedRows,
+                    2,
+                    0,
+                    0,
+                    misalignedChecksum,
+                    [leftFolded, rightFolded],
+                    [0, 0],
+                    ScanWorkload.TwoRequiredInt32Plain,
+                    new CensusCaseLayout(CensusPhysicalType.Int32, sizeof(int), false, CensusConsumer.MultiInt32),
+                    [new CensusPassSpec([0, 1], misalignedRows),
+                     new CensusPassSpec([0, 1], 128)],
+                    null));
+            }
+
+            {
+                // Committed producer fixtures with page CRCs: truth comes from the
+                // pinned independent column hashes plus Lokad/baseline agreement,
+                // established before any timing runs. The pinned baseline never
+                // reads or validates page CRCs (its read path has no CRC handling);
+                // Lokad validates every present CRC before trusting payload bytes.
+                var repositoryRoot = Environment.GetEnvironmentVariable("LOKAD_PARQUET_REPOSITORY_ROOT") ??
+                    throw new InvalidOperationException("The benchmark repository root is unavailable.");
+                var plainChecksumBytes = await File.ReadAllBytesAsync(Path.Combine(
+                    repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "plain-dict-uncompressed-checksum.parquet"));
+                var plainTruth = await EstablishCommittedTruthAsync(
+                    plainChecksumBytes, 0, "b4e1c8ce8ea209fb64ee37db3c5b356b0952a756d919b5b31f69e1dc49087cf2");
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "CrcInt64Dictionary",
+                    plainChecksumBytes,
+                    plainTruth.RowCount,
+                    1,
+                    0,
+                    0,
+                    plainTruth.Checksum,
+                    plainTruth.ColumnHashes,
+                    plainTruth.NullCounts,
+                    ScanWorkload.CrcInt64Dictionary,
+                    new CensusCaseLayout(CensusPhysicalType.Int64, sizeof(long), false, CensusConsumer.Int64),
+                    [new CensusPassSpec([0], plainTruth.RowCount),
+                     new CensusPassSpec([0], 256)],
+                    null));
+                var snappyChecksumBytes = await File.ReadAllBytesAsync(Path.Combine(
+                    repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "rle-dict-snappy-checksum.parquet"));
+                var snappyTruth = await EstablishCommittedTruthAsync(
+                    snappyChecksumBytes, 1, "7466464aa99cfabca1449d81db1f859a10208da4e72ba5b5d12df8ecf4f42a59");
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "CrcBinaryDictionarySnappy",
+                    snappyChecksumBytes,
+                    snappyTruth.RowCount,
+                    1,
+                    0,
+                    snappyTruth.BinaryPayloadBytes,
+                    snappyTruth.Checksum,
+                    snappyTruth.ColumnHashes,
+                    snappyTruth.NullCounts,
+                    ScanWorkload.CrcBinaryDictionarySnappy,
+                    new CensusCaseLayout(CensusPhysicalType.ByteArray, 0, false, CensusConsumer.Binary),
+                    [new CensusPassSpec([1], snappyTruth.RowCount),
+                     new CensusPassSpec([1], 256)],
+                    null));
+                var fixedBytes = await File.ReadAllBytesAsync(Path.Combine(
+                    repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "fixed_length_byte_array.parquet"));
+                var fixedTruth = await EstablishCommittedTruthAsync(
+                    fixedBytes, 0, "ccef1cbacb37a62e63bd7be4128dc95a1808f97b2f1d7eed79755d916bcc9abd");
+                await using (var fixedInspection = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)fixedBytes))
+                {
+                    if (fixedInspection.Metadata.Schema.Columns[0].SchemaElement.TypeLength != 4)
+                        throw new InvalidOperationException("The committed fixed fixture changed its type width.");
+                }
+
+                await RunCensusCaseAsync(() => MeasureCustomAsync(
+                    "NullableFixedByteArrayPlain",
+                    fixedBytes,
+                    fixedTruth.RowCount,
+                    1,
+                    0,
+                    0,
+                    fixedTruth.Checksum,
+                    fixedTruth.ColumnHashes,
+                    fixedTruth.NullCounts,
+                    ScanWorkload.NullableFixedByteArrayPlain,
+                    new CensusCaseLayout(CensusPhysicalType.FixedLengthByteArray, 4, true, CensusConsumer.Fixed),
+                    [new CensusPassSpec([0], fixedTruth.RowCount),
+                     new CensusPassSpec([0], 256)],
+                    null));
+            }
+            {
+                // The static catalog is load-bearing: every measured case resolves
+                // to exactly one entry with a matching layout and pass set, so a
+                // renamed, added, or reshaped case fails here instead of silently
+                // drifting from the exported and reconciled catalog.
+                var catalogByName = new Dictionary<string, CensusCatalogCase>(StringComparer.Ordinal);
+                foreach (var catalogEntry in CensusCatalog.Cases)
+                    catalogByName.Add(catalogEntry.Name, catalogEntry);
+                var reconciled = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var result in results)
+                {
+                    if (!catalogByName.TryGetValue(result.Name, out var catalogEntry))
+                        throw new InvalidOperationException($"The work census measured an unknown case '{result.Name}'.");
+                    if (!reconciled.Add(result.Name))
+                        throw new InvalidOperationException($"The work census measured a duplicate case '{result.Name}'.");
+                    if (!string.Equals(result.PhysicalType, CensusLayout.NameOf(catalogEntry.PhysicalType), StringComparison.Ordinal) ||
+                        result.ValueWidthBytes != catalogEntry.TypeWidthBytes ||
+                        result.Nullable != catalogEntry.Nullable ||
+                        !string.Equals(result.Consumer, CensusConsumerNames.SnapshotName(catalogEntry.Consumer), StringComparison.Ordinal))
+                        throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog layout.");
+                    if (result.PassPeaks.Count != catalogEntry.PassProjections.Count)
+                        throw new InvalidOperationException($"The work census case '{result.Name}' does not carry its catalog passes.");
+                    for (var pass = 0; pass < result.PassPeaks.Count; pass++)
+                    {
+                        if (!result.PassPeaks[pass].Projection.SequenceEqual(catalogEntry.PassProjections[pass]))
+                            throw new InvalidOperationException($"The work census case '{result.Name}' does not match its catalog passes.");
+                    }
+                }
+                if (reconciled.Count != CensusCatalog.Cases.Count)
+                    throw new InvalidOperationException("The work census is missing catalog cases.");
+            }
+            var affinityMask = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
+            var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "work census output");
+            var snapshot = new WorkCensusSnapshot(
+                SnapshotSchemaVersion,
+                DateTimeOffset.UtcNow,
+                Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+                RuntimeInformation.FrameworkDescription,
+                RuntimeInformation.OSDescription,
+                RuntimeInformation.ProcessArchitecture.ToString(),
+                BenchmarkHostPolicy.GetProcessorName(),
+                BenchmarkHostPolicy.FormatAffinity(affinityMask),
+                BenchmarkHostPolicy.GetSelectedLogicalProcessor(affinityMask),
+                BenchmarkHostPolicy.GetServerGarbageCollection(),
+                BenchmarkHostPolicy.GetGcLatencyMode(),
+                BenchmarkHostPolicy.GetTieredCompilation(),
+                BenchmarkHostPolicy.GetTieredPgo(),
+                outputEvidence.ResolvedPath,
+                outputEvidence.FileSystem,
+                PairedParityRunner.GetRunnerFingerprint(),
+                Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+                results);
+            var snapshotJson = JsonSerializer.Serialize(snapshot, PairedSessionRecorder.SessionJson);
+            PairedSessionRecorder.WriteSessionFileAtomic(outputPath, snapshotJson);
+            var snapshotHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(outputPath)));
+
+            Console.WriteLine($"Work census: {Path.GetFullPath(outputPath)}");
+            foreach (var result in results)
+            {
+                Console.WriteLine(
+                    $"{result.Name}: reads={result.SourceReadCalls}/{result.SourceBytesRead} B, " +
+                    $"pool={result.PoolRents} rents/{result.PeakPooledBytes} B peak/" +
+                    $"{result.PooledBytesCleared} B cleared, moves={result.SynchronousMoves}/" +
+                    $"{result.TotalMoves} synchronous.");
+            }
+            CompleteCensusSession(session, outputPath, snapshotHash, results.Select(static result => result.Name).ToArray(), 0);
+            return 0;
         }
-        return 0;
+        catch (Exception exception)
+        {
+            AbortCensusSession(session, exception.Message);
+            Console.Error.WriteLine($"The work census session {sessionId} aborted: {exception.Message}");
+            return 1;
+        }
 
         static async Task<WorkCensusCase> MeasureAsync(ScanWorkload workload)
         {
@@ -1598,6 +1622,81 @@ internal static class WorkCensusRunner
             }
         }
         return new CensusPassOutcome(passBatches, totalMoves, synchronousMoves, consumerUtf8Bytes, checksum);
+    }
+
+    internal static CensusSession BeginCensusSession(string snapshotPath, Guid sessionId, DateTimeOffset startedAtUtc)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(snapshotPath);
+        var leaf = Path.GetFileNameWithoutExtension(snapshotPath);
+        if (string.IsNullOrEmpty(leaf))
+            leaf = "work-census";
+        var parent = Path.GetDirectoryName(Path.GetFullPath(snapshotPath)) ??
+            throw new InvalidOperationException("The work-census output has no directory.");
+        var session = new CensusSession(
+            Path.Combine(parent, leaf + "." + sessionId.ToString("N")[..8] + ".session"),
+            sessionId,
+            startedAtUtc,
+            Path.GetFullPath(snapshotPath));
+        WriteCensusSessionMetadata(session, "running", null, null, null);
+        return session;
+    }
+
+    internal static void RecordCensusCheckpoint(CensusSession session, int order, string caseName, DateTimeOffset startedAtUtc, DateTimeOffset endedAtUtc, WorkCensusCase result)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentOutOfRangeException.ThrowIfNegative(order);
+        ArgumentException.ThrowIfNullOrWhiteSpace(caseName);
+        ArgumentNullException.ThrowIfNull(result);
+        var checkpoint = new CensusCaseCheckpoint(session.SessionId, order, caseName, startedAtUtc, endedAtUtc, result);
+        PairedSessionRecorder.WriteSessionFileAtomic(
+            Path.Combine(session.SessionDirectory, $"checkpoint-{order:D2}.json"),
+            JsonSerializer.Serialize(checkpoint, PairedSessionRecorder.SessionJson));
+    }
+
+    internal static void CompleteCensusSession(CensusSession session, string snapshotPath, string snapshotSha256, string[] caseNames, int exitStatus)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentException.ThrowIfNullOrWhiteSpace(snapshotPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(snapshotSha256);
+        ArgumentNullException.ThrowIfNull(caseNames);
+        var finishedAt = DateTimeOffset.UtcNow;
+        var completion = new CensusSessionCompletion(
+            session.SessionId, finishedAt, Path.GetFullPath(snapshotPath), snapshotSha256, caseNames.Length, caseNames, exitStatus);
+        PairedSessionRecorder.WriteSessionFileAtomic(
+            Path.Combine(session.SessionDirectory, "completed.json"),
+            JsonSerializer.Serialize(completion, PairedSessionRecorder.SessionJson));
+        WriteCensusSessionMetadata(session, "completed", null, exitStatus, finishedAt);
+    }
+
+    internal static void AbortCensusSession(CensusSession session, string failure)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentException.ThrowIfNullOrWhiteSpace(failure);
+        WriteCensusSessionMetadata(session, "aborted", failure, null, DateTimeOffset.UtcNow);
+    }
+
+    private static void WriteCensusSessionMetadata(CensusSession session, string status, string? failure, int? exitStatus, DateTimeOffset? finishedAt)
+    {
+        var metadata = new CensusSessionMetadata(
+            session.SessionId,
+            SnapshotSchemaVersion,
+            status,
+            session.StartedAtUtc,
+            finishedAt,
+            Environment.MachineName,
+            Environment.ProcessId,
+            Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded",
+            PairedParityRunner.GetRunnerFingerprint(),
+            Environment.GetEnvironmentVariable("LOKAD_PARQUET_PACKAGE_LOCK_HASH") ?? "unrecorded",
+            RuntimeInformation.FrameworkDescription,
+            RuntimeInformation.OSDescription,
+            RuntimeInformation.ProcessArchitecture.ToString(),
+            session.SnapshotPath,
+            failure,
+            exitStatus);
+        PairedSessionRecorder.WriteSessionFileAtomic(
+            Path.Combine(session.SessionDirectory, "session.json"),
+            JsonSerializer.Serialize(metadata, PairedSessionRecorder.SessionJson));
     }
 
     internal static long CensusExpectedChecksum(

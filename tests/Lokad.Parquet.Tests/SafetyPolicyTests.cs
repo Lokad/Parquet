@@ -286,6 +286,14 @@ public sealed class SafetyPolicyTests
                 "shared nullable primitive decode helper across the census consumer branches",
             ["Lokad.Parquet.Benchmarks.DiagnosticPairedCases.CreateAsync"] =
                 "optional diagnostic paired-case entry point outside the frozen claim",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.BeginCensusSession"] =
+                "census session directory and running marker behind the census boundary",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.RecordCensusCheckpoint"] =
+                "per-case census checkpoint behind the census measurement boundary",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.CompleteCensusSession"] =
+                "census snapshot binding and completion marker behind the census boundary",
+            ["Lokad.Parquet.Benchmarks.WorkCensusRunner.AbortCensusSession"] =
+                "census failure marker behind the census abort boundary",
             ["Lokad.Parquet.Benchmarks.PairedSessionRecorder.FindIncompleteSessionDirectories"] =
                 "incomplete paired-session discovery for concurrent-campaign detection",
             ["Lokad.Parquet.Internal.PooledValueLease.TryTake"] =

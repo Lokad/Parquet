@@ -9,6 +9,12 @@ namespace Lokad.Parquet.Benchmarks;
 // merged into another session. File contract (camelCase JSON):
 // session.json { sessionId, status ("running", "completed" or "aborted") },
 // checkpoint-NN.json { sessionId, order, caseName, result }, completed.json.
+// The work census reuses the same contract with census-shaped payloads:
+// session.json { sessionId, status, snapshotPath },
+// checkpoint-NN.json { sessionId, order, caseName, result }, completed.json
+// { sessionId, snapshotPath, snapshotSha256, caseNames }. A failed census keeps
+// its checkpoints with an aborted marker and no snapshot, so partial evidence
+// stays visibly non-qualifying without rebuilding this recorder.
 internal sealed record PairedSessionMetadata(
     Guid SessionId,
     int SchemaVersion,
@@ -51,6 +57,47 @@ internal sealed record IncompletePairedSession(
     string? SessionId,
     string? Status,
     int CheckpointCount);
+
+internal sealed record CensusSessionMetadata(
+    Guid SessionId,
+    int SchemaVersion,
+    string Status,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset? FinishedAtUtc,
+    string MachineName,
+    int ProcessId,
+    string SourceRevision,
+    string RunnerFingerprint,
+    string PackageLockHash,
+    string Runtime,
+    string OperatingSystem,
+    string Architecture,
+    string SnapshotPath,
+    string? Failure,
+    int? ExitStatus);
+
+internal sealed record CensusCaseCheckpoint(
+    Guid SessionId,
+    int Order,
+    string CaseName,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset EndedAtUtc,
+    WorkCensusCase Result);
+
+internal sealed record CensusSessionCompletion(
+    Guid SessionId,
+    DateTimeOffset FinishedAtUtc,
+    string SnapshotPath,
+    string SnapshotSha256,
+    int CaseCount,
+    string[] CaseNames,
+    int ExitStatus);
+
+internal sealed record CensusSession(
+    string SessionDirectory,
+    Guid SessionId,
+    DateTimeOffset StartedAtUtc,
+    string SnapshotPath);
 
 internal static class PairedSessionRecorder
 {

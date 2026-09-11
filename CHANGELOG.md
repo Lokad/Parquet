@@ -126,6 +126,9 @@
 - Extend the optional diagnostic paired cases with shape lanes for wider types, nullable
   binary and fixed widths, V2 pages, row ranges, small row groups, high-cardinality
   dictionaries, misaligned pages and CRC validation, each truth-checked on both readers.
+- Retain per-case work-census checkpoints with a completion or failure marker in a session
+  directory next to the snapshot, so interrupted runs keep their measured cases visible
+  without ever qualifying as evidence.
 
 ## 0.1.0 - 2026-09-02
 
