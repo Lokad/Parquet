@@ -7,15 +7,14 @@ namespace Lokad.Parquet.Internal;
 // borrowed, but page headers are always rented into pooled buffers and filled
 // by the read, never borrowed. The reader owns only its rented header buffers,
 // which are returned on both parse success and parse failure; decoded payload
-// ownership stays with the scan cursor. This extraction gives the scan state
-// machine a smaller independently understandable I/O scope without changing the
-// public API or the sequential single-scan contract.
+// ownership stays with the scan cursor. Page I/O stays in this dedicated scope
+// with narrow inputs and explicit ownership, without changing the public API
+// or the sequential single-scan contract.
 internal static class ScanPageReader
 {
-    // Bounded 8 KiB slicing-by-8 IEEE tables shared by every page check;
-    // the static constructor is the only initializer, so no helper needs a
-    // SafetyPolicy single-caller exception. SSE4.2 CRC32 is deliberately not
-    // used: it computes a different polynomial.
+    // Bounded 8 KiB slicing-by-8 IEEE tables shared by every page check,
+    // initialized once by the static constructor on first use. SSE4.2 CRC32
+    // is deliberately not used: it computes a different polynomial.
     private static readonly uint[][] Crc32Tables;
 
     static ScanPageReader()

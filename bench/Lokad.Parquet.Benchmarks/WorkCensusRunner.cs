@@ -120,8 +120,9 @@ internal static class WorkCensusRunner
             }
             {
                 // Caller-selected small row range: the oracle covers exactly the
-                // selected rows while source accounting still observes the full
-                // row-group decode underneath.
+                // selected rows while source accounting observes only the bounded
+                // slice reads underneath; the group cursor still advances past
+                // each whole page.
                 const int rangeStart = 4096;
                 const int rangeCount = 4096;
                 var fixture = await ScanFixture.CreateAsync(ScanWorkload.RequiredInt32Plain, RowCount);

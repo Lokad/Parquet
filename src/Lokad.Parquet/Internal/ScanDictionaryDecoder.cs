@@ -10,10 +10,10 @@ internal delegate void PlainPageDecode<T>(ReadOnlySpan<byte> source, Span<T> des
 // Dictionary page decoder for one column scan. Owns the row-group dictionary
 // store across data pages: primitive entries in a bound lease, variable-width
 // entries in explicit owners, plus the entry count used for index validation.
-// The cursor drives page progression and keeps page outputs; this component
-// receives options, budget, page sinks, error location and cancellation
-// explicitly and captures nothing. Decoding matches the cursor locals it was
-// extracted from; only the organization changed.
+// The cursor drives page progression and keeps page outputs; each expansion
+// takes the page buffers, error location and cancellation explicitly and
+// leaves no per-page state behind. Dictionary failures carry the page
+// identity while preserving the inner error and any precise byte offset.
 internal sealed class ScanDictionaryDecoder : IDisposable
 {
     private readonly ParquetColumn _column;
@@ -210,10 +210,10 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         ParquetErrorLocation location,
         CancellationToken cancellationToken)
     {
-        // Optional definition levels decode straight into a validity bitmap,
-        // reusing the item-18 primitive layout: no int level array, no
-        // validity rescan. The bitmap doubles as the page validity on success
-        // and is released by the levels failure policy on any error.
+        // Optional definition levels decode through the shared bitmap section
+        // straight into a validity bitmap: no int level array, no validity
+        // rescan. The bitmap doubles as the page validity on success and is
+        // released by the levels failure policy on any error.
         PooledArrayOwner<byte>? levelsBitmap = null;
         Exception? levelsFailure = null;
         try

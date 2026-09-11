@@ -15,9 +15,9 @@ public enum CensusPhysicalType
     Double = 4,
     /// <summary>Fixed-width byte slices of the declared width.</summary>
     FixedLengthByteArray = 5,
-    /// <summary>Length-prefixed UTF-8 bytes with an offsets entry per row boundary.</summary>
+    /// <summary>Contiguous UTF-8 payload bytes with an offsets entry per row boundary.</summary>
     Utf8 = 6,
-    /// <summary>Length-prefixed raw bytes with an offsets entry per row boundary.</summary>
+    /// <summary>Contiguous raw payload bytes with an offsets entry per row boundary.</summary>
     ByteArray = 7,
 }
 

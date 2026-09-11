@@ -13,7 +13,7 @@ namespace Lokad.Parquet.Internal;
 
 // The checked outcome of decoding an optional bitmap section straight into a
 // validity bitmap: rented levels as a bitmap (null when every row is valid),
-// the physical payload offset, and the validated non-null value count.
+// the physical payload byte offset, and the validated non-null value count.
 internal readonly record struct DecodedBitmapSection(PooledArrayOwner<byte>? Validity, int PhysicalOffset, int ValidCount);
 internal static class DefinitionLevelCodec
 {
