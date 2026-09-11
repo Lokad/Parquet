@@ -284,6 +284,8 @@ public sealed class SafetyPolicyTests
                 "committed-fixture truth oracle across the checksum/time boundary",
             ["Lokad.Parquet.Benchmarks.WorkCensusRunner.DecodeNullablePrimitive"] =
                 "shared nullable primitive decode helper across the census consumer branches",
+            ["Lokad.Parquet.Benchmarks.DiagnosticPairedCases.CreateAsync"] =
+                "optional diagnostic paired-case entry point outside the frozen claim",
             ["Lokad.Parquet.Benchmarks.PairedSessionRecorder.FindIncompleteSessionDirectories"] =
                 "incomplete paired-session discovery for concurrent-campaign detection",
             ["Lokad.Parquet.Internal.PooledValueLease.TryTake"] =

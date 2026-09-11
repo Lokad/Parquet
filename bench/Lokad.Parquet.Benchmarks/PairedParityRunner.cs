@@ -151,6 +151,15 @@ internal static class PairedParityRunner
                 caseOrder++;
                 caseResults.Add(caseResult);
             }
+            if (selectedCase is not null && selectedCase.StartsWith("Diagnostic/", StringComparison.Ordinal))
+            {
+                var diagnosticStartedAt = DateTimeOffset.UtcNow;
+                await using var diagnosticCase = await DiagnosticPairedCases.CreateAsync(selectedCase);
+                var diagnosticResult = await MeasureAsync(diagnosticCase);
+                WriteCaseCheckpoint(diagnosticResult, caseOrder, diagnosticStartedAt, DateTimeOffset.UtcNow);
+                caseOrder++;
+                caseResults.Add(diagnosticResult);
+            }
             if (selectedCase is null || string.Equals(selectedCase, "WarmMetadataOpen", StringComparison.Ordinal))
             {
                 var metadataStartedAt = DateTimeOffset.UtcNow;

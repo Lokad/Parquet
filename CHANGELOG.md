@@ -120,6 +120,9 @@
 - Fingerprint every benchmark build input including the linked fixture builder and committed
   fixtures, record the census package lock and both-assemblies runner fingerprint, restore
   locked for qualification, and reconcile all identities in the report.
+- Add reusable optional diagnostic paired cases outside the frozen claim, starting with source
+  lanes that pair each Lokad source against a Parquet.NET counterpart with truth-checked
+  sentinels and per-observation allocation evidence.
 
 ## 0.1.0 - 2026-09-02
 

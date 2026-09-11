@@ -1413,6 +1413,30 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
     }
 
     [Fact]
+    public void DiagnosticSnapshotCaseStaysOutsideFrozenClaim()
+    {
+        // B06: diagnostic snapshots reuse the paired writer, but the parity
+        // report only ever reconciles catalog cases.
+        var root = CopyQuartet(_quartets.V9Root);
+        try
+        {
+            var path = Path.Combine(root, "paired-0.json");
+            var snapshot = Assert.IsType<JsonObject>(JsonNode.Parse(File.ReadAllText(path)));
+            var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
+            var clone = Assert.IsType<JsonObject>(JsonNode.Parse(Assert.IsType<JsonObject>(cases[0]).ToJsonString()));
+            clone["name"] = "Diagnostic/SourceMemory";
+            cases.Add(clone);
+            File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            var outcome = RunVerify(root);
+            Assert.NotEqual(0, outcome.ExitCode);
+            Assert.Contains("wrong catalog size", outcome.Output);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+    [Fact]
     public void FailedWarmLaneDoesNotFailClaim()
     {
         var root = CopyQuartet(_quartets.V9Root);
