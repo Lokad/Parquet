@@ -389,6 +389,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         var tight = !optional || validityBits.IsEmpty;
         var outputCount = optional ? rowCount : indices.Length;
         var dictionaryOffsets = _binaryOffsets.Memory.Span;
+        var dictionaryCount = _count;
         long aggregateLength = 0;
         cancellationToken.ThrowIfCancellationRequested();
         if (tight)
@@ -400,7 +401,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                 if ((position & 1023) == 0)
                     cancellationToken.ThrowIfCancellationRequested();
                 var dictionaryIndex = indices[position];
-                if ((uint)dictionaryIndex >= (uint)_count)
+                if ((uint)dictionaryIndex >= (uint)dictionaryCount)
                     throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                 aggregateLength += dictionaryOffsets[dictionaryIndex + 1] - dictionaryOffsets[dictionaryIndex];
             }
@@ -415,7 +416,7 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                 if ((validityBits[row >> 3] & (1 << (row & 7))) == 0)
                     continue;
                 var dictionaryIndex = indices[physicalIndex++];
-                if ((uint)dictionaryIndex >= (uint)_count)
+                if ((uint)dictionaryIndex >= (uint)dictionaryCount)
                     throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
                 aggregateLength += dictionaryOffsets[dictionaryIndex + 1] - dictionaryOffsets[dictionaryIndex];
             }
@@ -433,7 +434,10 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         {
             offsets = PooledArrayOwner<int>.Rent(checked(outputCount + 1), budget);
             payload = PooledArrayOwner<byte>.Rent((int)aggregateLength, budget);
-            offsets.Memory.Span[0] = 0;
+            var outputOffsets = offsets.Memory.Span;
+            var outputPayload = payload.Memory.Span;
+            var dictionaryPayload = _binaryPayload.Memory.Span;
+            outputOffsets[0] = 0;
             // The prescan above already range-checked every consumed index in
             // the same order, so the copies below reuse them directly. Null
             // slots repeat the running offset, keeping zero-length entries.
@@ -447,10 +451,10 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     var dictionaryIndex = indices[position];
                     var start = dictionaryOffsets[dictionaryIndex];
                     var length = dictionaryOffsets[dictionaryIndex + 1] - start;
-                    _binaryPayload.Memory.Span.Slice(start, length)
-                        .CopyTo(payload.Memory.Span[outputOffset..]);
+                    dictionaryPayload.Slice(start, length)
+                        .CopyTo(outputPayload[outputOffset..]);
                     outputOffset += length;
-                    offsets.Memory.Span[position + 1] = outputOffset;
+                    outputOffsets[position + 1] = outputOffset;
                 }
             }
             else
@@ -462,16 +466,16 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                         cancellationToken.ThrowIfCancellationRequested();
                     if ((validityBits[row >> 3] & (1 << (row & 7))) == 0)
                     {
-                        offsets.Memory.Span[row + 1] = outputOffset;
+                        outputOffsets[row + 1] = outputOffset;
                         continue;
                     }
                     var dictionaryIndex = indices[physicalIndex++];
                     var start = dictionaryOffsets[dictionaryIndex];
                     var length = dictionaryOffsets[dictionaryIndex + 1] - start;
-                    _binaryPayload.Memory.Span.Slice(start, length)
-                        .CopyTo(payload.Memory.Span[outputOffset..]);
+                    dictionaryPayload.Slice(start, length)
+                        .CopyTo(outputPayload[outputOffset..]);
                     outputOffset += length;
-                    offsets.Memory.Span[row + 1] = outputOffset;
+                    outputOffsets[row + 1] = outputOffset;
                 }
             }
             pageBinaryOffsets = offsets;
@@ -513,10 +517,14 @@ internal sealed class ScanDictionaryDecoder : IDisposable
         PooledArrayOwner<byte>? payload = PooledArrayOwner<byte>.Rent((int)byteCount, budget);
         try
         {
+            var dictionaryPayload = _fixedPayload.Memory.Span;
+            var outputPayload = payload.Memory.Span;
+            var fixedWidth = _fixedWidth;
+            var dictionaryCount = _count;
             // The tight loops below overwrite every slot; only mixed pages
             // need cleared null slots.
             if (!tight)
-                payload.Memory.Span.Clear();
+                outputPayload.Clear();
             cancellationToken.ThrowIfCancellationRequested();
             if (tight)
             {
@@ -527,11 +535,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     if ((position & 1023) == 0)
                         cancellationToken.ThrowIfCancellationRequested();
                     var dictionaryIndex = indices[position];
-                    if ((uint)dictionaryIndex >= (uint)_count)
+                    if ((uint)dictionaryIndex >= (uint)dictionaryCount)
                         throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
-                    _fixedPayload.Memory.Span
-                        .Slice(dictionaryIndex * _fixedWidth, _fixedWidth)
-                        .CopyTo(payload.Memory.Span.Slice(position * _fixedWidth, _fixedWidth));
+                    dictionaryPayload
+                        .Slice(dictionaryIndex * fixedWidth, fixedWidth)
+                        .CopyTo(outputPayload.Slice(position * fixedWidth, fixedWidth));
                 }
             }
             else
@@ -544,11 +552,11 @@ internal sealed class ScanDictionaryDecoder : IDisposable
                     if ((validityBits[row >> 3] & (1 << (row & 7))) == 0)
                         continue;
                     var dictionaryIndex = indices[physicalIndex++];
-                    if ((uint)dictionaryIndex >= (uint)_count)
+                    if ((uint)dictionaryIndex >= (uint)dictionaryCount)
                         throw new ParquetFormatException("A dictionary index is outside the dictionary.", location);
-                    _fixedPayload.Memory.Span
-                        .Slice(dictionaryIndex * _fixedWidth, _fixedWidth)
-                        .CopyTo(payload.Memory.Span.Slice(row * _fixedWidth, _fixedWidth));
+                    dictionaryPayload
+                        .Slice(dictionaryIndex * fixedWidth, fixedWidth)
+                        .CopyTo(outputPayload.Slice(row * fixedWidth, fixedWidth));
                 }
                 if (physicalIndex != indices.Length)
                     throw new ParquetFormatException("Dictionary indices do not match the definition levels.", location);

@@ -132,6 +132,8 @@
 - Allocate the footer buffer directly instead of a pooled rent plus a full-bucket clear on
   return, simplifying open error handling, and resolve recognized metadata enums with
   contiguous range checks instead of Enum.IsDefined.
+- Hoist loop-invariant spans and counts out of the dictionary-expansion copy loops for
+  BYTE_ARRAY and fixed-width pages.
 
 ## 0.1.0 - 2026-09-02
 
