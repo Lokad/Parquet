@@ -258,7 +258,7 @@ public static class LiveSessionRetention
         }
     }
 
-    private static async Task<long> ScanBaselineSessionAsync(
+    internal static async Task<long> ScanBaselineSessionAsync(
         BaselineParquetReader reader,
         BaselineDataField[] fields,
         ScanWorkload workload,

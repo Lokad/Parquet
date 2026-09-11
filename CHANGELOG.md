@@ -123,6 +123,9 @@
 - Add reusable optional diagnostic paired cases outside the frozen claim, starting with source
   lanes that pair each Lokad source against a Parquet.NET counterpart with truth-checked
   sentinels and per-observation allocation evidence.
+- Extend the optional diagnostic paired cases with shape lanes for wider types, nullable
+  binary and fixed widths, V2 pages, row ranges, small row groups, high-cardinality
+  dictionaries, misaligned pages and CRC validation, each truth-checked on both readers.
 
 ## 0.1.0 - 2026-09-02
 

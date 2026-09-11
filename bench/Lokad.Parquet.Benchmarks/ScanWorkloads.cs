@@ -436,7 +436,7 @@ internal sealed class Utf8ScanSink
     {
         if (_rowCount != expectedRowCount || _byteCount != expectedPayloadByteCount ||
             _offsets[_rowCount] != expectedPayloadByteCount)
-            throw new InvalidOperationException("The UTF-8 benchmark sink produced an unexpected layout.");
+            throw new InvalidOperationException($"The UTF-8 benchmark sink saw {_rowCount} rows instead of {expectedRowCount} and {_byteCount} payload bytes instead of {expectedPayloadByteCount}.");
         return _checksum;
     }
 
