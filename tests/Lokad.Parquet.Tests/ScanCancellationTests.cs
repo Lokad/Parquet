@@ -71,31 +71,26 @@ public sealed class ScanCancellationTests
     }
 
     [Fact]
-    public async Task CancelledLevelsReturnDoesNotYieldBatch()
+    public async Task CancelledLevelsRentDoesNotYieldBatch()
     {
-        // Cancelling when the decoded definition-level buffer is returned must surface
-        // at the pre-publication boundary instead of yielding an already cancelled batch.
+        // Cancelling on the definition-level bitmap rent must surface at the
+        // pre-publication boundary instead of yielding an already cancelled batch.
+        // The bitmap replaces the former integer level array on this path.
         var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
-        Array? levelArray = null;
         PoolTracker.SetObservers(
             (array, requested) =>
         {
             outstanding.NoteRent(array);
 
-            if (array is int[] && requested == 3)
+            if (array is byte[] && requested == 1)
             {
-                levelArray = array;
+                cancellation.Cancel();
             }
         },
         (array, _) =>
         {
             outstanding.NoteReturn(array);
-
-            if (ReferenceEquals(array, levelArray))
-            {
-                cancellation.Cancel();
-            }
         });
         try
         {
@@ -356,7 +351,7 @@ public sealed class ScanCancellationTests
         {
             outstanding.NoteRent(array);
 
-            if (array is int[] && requested == 20000 && !fired)
+            if (array is byte[] && requested == 2500 && !fired)
             {
                 fired = true;
                 cancellation.Cancel();

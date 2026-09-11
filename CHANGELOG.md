@@ -136,6 +136,8 @@
   BYTE_ARRAY and fixed-width pages.
 - Share optional bitmap-section rent, decode, consumed-bytes and null-count checks with
   all-valid transfer between the primitive page paths and dictionary expansion.
+- Decode nullable PLAIN binary pages through the shared bitmap section instead of
+  integer levels, eliding all-valid bitmaps and removing the int-level pipeline.
 
 ## 0.1.0 - 2026-09-02
 

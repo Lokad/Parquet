@@ -146,7 +146,7 @@ public sealed class ExhaustiveTeardownTests
             (array, requested) =>
             {
                 outstanding.NoteRent(array);
-                if (array is int[] && requested == 3)
+                if (array is byte[] && requested == 1)
                 {
                     fired = true;
                     cancellation.Cancel();

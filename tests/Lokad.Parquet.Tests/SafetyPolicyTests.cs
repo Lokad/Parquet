@@ -310,10 +310,10 @@ public sealed class SafetyPolicyTests
                 "variable-width dictionary expansion for one physical layout",
             ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandFixedDictionary"] =
                 "fixed-width dictionary expansion for one physical layout",
-            ["Lokad.Parquet.Internal.DefinitionLevelCodec.DecodeValidated"] =
-                "validated definition-level decoding behind the section decoder",
             ["Lokad.Parquet.Internal.ScanDictionaryDecoder.ExpandValues"] =
                 "primitive dictionary expansion shared by the five fixed-width layouts",
+            ["Lokad.Parquet.Internal.RleBitPackedHybridDecoder.Decode"] =
+                "RLE/bit-packed hybrid index decoder behind the dictionary expansion boundary",
             ["Lokad.Parquet.ParquetFile+ColumnCacheProvider.RentColumnValues"] =
                 "typed column-cache rent behind the file provider boundary",
         };
