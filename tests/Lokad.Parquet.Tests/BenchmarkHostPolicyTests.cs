@@ -161,25 +161,9 @@ public sealed class BenchmarkHostPolicyTests
 
     private static object? CallPolicy(string name, params object?[] arguments)
     {
-        var testAssembly = typeof(BenchmarkHostPolicyTests).Assembly;
-        var testOutput = Path.GetDirectoryName(testAssembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        var benchmarkAssembly = Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll");
-        var assembly = Assembly.LoadFrom(benchmarkAssembly);
-        var policy = assembly.GetType("Lokad.Parquet.Benchmarks.BenchmarkHostPolicy") ??
-            throw new InvalidOperationException("The benchmark host policy is unavailable.");
-        var method = policy.GetMethod(name, BindingFlags.Public | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark host policy has no method " + name + ".");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var policy = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.BenchmarkHostPolicy");
+        var method = BenchmarkReflection.RequireStaticMethod(policy, name, null);
         return method.Invoke(null, arguments);
     }
 

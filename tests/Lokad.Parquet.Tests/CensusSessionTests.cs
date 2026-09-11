@@ -18,7 +18,7 @@ public sealed class CensusSessionTests
         var root = NewTempRoot();
         try
         {
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var snapshotPath = Path.Combine(root, "work-census-windows-20260911-120000.json");
             var session = BeginSession(assembly, snapshotPath);
             var directory = SessionDirectory(session);
@@ -51,7 +51,7 @@ public sealed class CensusSessionTests
 
         static void AbortSession(Assembly assembly, object session, string failure)
         {
-            InvokeRunner(assembly, "AbortCensusSession", [session, failure]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "AbortCensusSession", [session, failure]);
         }
 
         static void AssertCheckpoint(string directory, Guid sessionId, int order, string caseName)
@@ -69,7 +69,7 @@ public sealed class CensusSessionTests
         var root = NewTempRoot();
         try
         {
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var snapshotPath = Path.Combine(root, "work-census-windows-20260911-120000.json");
             var session = BeginSession(assembly, snapshotPath);
             var directory = SessionDirectory(session);
@@ -78,7 +78,7 @@ public sealed class CensusSessionTests
             var started = new DateTimeOffset(2026, 9, 11, 12, 0, 0, TimeSpan.Zero);
             RecordCheckpoint(assembly, session, 0, "Probe/First", started, started.AddSeconds(1), probe);
             var payload = "{census:probe}";
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [snapshotPath, payload]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [snapshotPath, payload]);
             var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(payload)));
             CompleteSession(assembly, session, snapshotPath, hash, ["Probe/First"], 0);
             Assert.Equal(payload, File.ReadAllText(snapshotPath));
@@ -104,7 +104,7 @@ public sealed class CensusSessionTests
 
         static void CompleteSession(Assembly assembly, object session, string snapshotPath, string snapshotSha256, string[] caseNames, int exitStatus)
         {
-            InvokeRunner(assembly, "CompleteCensusSession", [session, snapshotPath, snapshotSha256, caseNames, exitStatus]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "CompleteCensusSession", [session, snapshotPath, snapshotSha256, caseNames, exitStatus]);
         }
     }
 
@@ -114,7 +114,7 @@ public sealed class CensusSessionTests
         var root = NewTempRoot();
         try
         {
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var snapshotPath = Path.Combine(root, "work-census-windows-20260911-120000.json");
             var first = SessionDirectory(BeginSession(assembly, snapshotPath));
             var second = SessionDirectory(BeginSession(assembly, snapshotPath));
@@ -202,7 +202,7 @@ public sealed class CensusSessionTests
             Assert.False(File.Exists(Path.Combine(sessionDirectory, "completed.json")));
             Assert.True(Directory.GetFiles(artifacts, "work-census-*.json")
                 .All(path => beforeSnapshots.Contains(path)));
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var incomplete = ListIncomplete(assembly, artifacts);
             Assert.Contains(incomplete, entry => string.Equals(DescribeIncomplete(entry).Directory, sessionDirectory, StringComparison.Ordinal));
         }
@@ -224,36 +224,18 @@ public sealed class CensusSessionTests
 
     private static object BeginSession(Assembly assembly, string snapshotPath)
     {
-        return InvokeRunner(assembly, "BeginCensusSession", [snapshotPath, Guid.NewGuid(), DateTimeOffset.UtcNow]) ??
+        return BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "BeginCensusSession", [snapshotPath, Guid.NewGuid(), DateTimeOffset.UtcNow]) ??
             throw new InvalidOperationException("The census session failed to begin.");
     }
 
     private static void RecordCheckpoint(Assembly assembly, object session, int order, string caseName, DateTimeOffset startedAtUtc, DateTimeOffset endedAtUtc, object result)
     {
-        InvokeRunner(assembly, "RecordCensusCheckpoint", [session, order, caseName, startedAtUtc, endedAtUtc, result]);
-    }
-
-    private static object? InvokeRunner(Assembly assembly, string method, object?[] args)
-    {
-        var runnerType = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusRunner") ??
-            throw new InvalidOperationException("The benchmark census runner is unavailable.");
-        var target = runnerType.GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark census runner has no such operation.");
-        return target.Invoke(null, args);
-    }
-
-    private static object? InvokeRecorder(Assembly assembly, string method, object?[] args)
-    {
-        var recorderType = assembly.GetType("Lokad.Parquet.Benchmarks.PairedSessionRecorder") ??
-            throw new InvalidOperationException("The paired session recorder is unavailable.");
-        var target = recorderType.GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The paired session recorder has no such operation.");
-        return target.Invoke(null, args);
+        BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "RecordCensusCheckpoint", [session, order, caseName, startedAtUtc, endedAtUtc, result]);
     }
 
     private static List<object?> ListIncomplete(Assembly assembly, string directory)
     {
-        var found = InvokeRecorder(assembly, "FindIncompleteSessionDirectories", [directory]);
+        var found = BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "FindIncompleteSessionDirectories", [directory]);
         var entries = Assert.IsAssignableFrom<System.Collections.IEnumerable>(found);
         var result = new List<object?>();
         foreach (var entry in entries)
@@ -293,8 +275,7 @@ public sealed class CensusSessionTests
 
     private static object ProbeCase(Assembly assembly)
     {
-        var caseType = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusCase") ??
-            throw new InvalidOperationException("The benchmark census case is unavailable.");
+        var caseType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.WorkCensusCase");
         var constructor = Assert.Single(caseType.GetConstructors());
         var arguments = constructor.GetParameters().Select(static parameter => ProbeValue(parameter.ParameterType)).ToArray();
         return constructor.Invoke(arguments);
@@ -327,20 +308,4 @@ public sealed class CensusSessionTests
         return root;
     }
 
-    private static Assembly BenchmarkAssembly()
-    {
-        var testOutput = Path.GetDirectoryName(typeof(CensusSessionTests).Assembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
-    }
 }

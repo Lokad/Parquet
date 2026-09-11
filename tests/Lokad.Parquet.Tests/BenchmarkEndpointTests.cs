@@ -13,7 +13,7 @@ public sealed class BenchmarkEndpointTests
     [Fact]
     public void EveryBenchmarkBelongsToExactlyOneEndpoint()
     {
-        var assembly = LoadBenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var benchmarks = new List<string>();
         foreach (var type in assembly.GetTypes())
         {
@@ -31,8 +31,7 @@ public sealed class BenchmarkEndpointTests
                     benchmarks.Add(type.Name + "." + method.Name);
             }
         }
-        var endpointsType = assembly.GetType("Lokad.Parquet.Benchmarks.BenchmarkEndpoints") ??
-            throw new InvalidOperationException("The benchmark endpoint catalog is unavailable.");
+        var endpointsType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.BenchmarkEndpoints");
         var entries = Assert.IsAssignableFrom<System.Collections.IList>(
             endpointsType.GetField("All")?.GetValue(null) ??
             throw new InvalidOperationException("The benchmark endpoint catalog entries are unavailable."));
@@ -61,9 +60,8 @@ public sealed class BenchmarkEndpointTests
     [Fact]
     public void NonPipelineProbesStayLabeled()
     {
-        var assembly = LoadBenchmarkAssembly();
-        var endpointsType = assembly.GetType("Lokad.Parquet.Benchmarks.BenchmarkEndpoints") ??
-            throw new InvalidOperationException("The benchmark endpoint catalog is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var endpointsType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.BenchmarkEndpoints");
         var entries = Assert.IsAssignableFrom<System.Collections.IList>(
             endpointsType.GetField("All")?.GetValue(null) ??
             throw new InvalidOperationException("The benchmark endpoint catalog entries are unavailable."));
@@ -104,23 +102,5 @@ public sealed class BenchmarkEndpointTests
         }
         Assert.True(expectedNonPipeline.SetEquals(actualNonPipeline), "Non-pipeline probes changed: " + string.Join(",", actualNonPipeline.OrderBy(static key => key)));
         Assert.True(customSourcePipeline, "The custom-source endpoint must stay pipeline evidence.");
-    }
-
-    private static Assembly LoadBenchmarkAssembly()
-    {
-        var testAssembly = typeof(BenchmarkEndpointTests).Assembly;
-        var testOutput = Path.GetDirectoryName(testAssembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
     }
 }

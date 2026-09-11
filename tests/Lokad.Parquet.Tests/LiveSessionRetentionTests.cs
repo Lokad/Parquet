@@ -249,14 +249,12 @@ public sealed class LiveSessionRetentionTests
     [Fact]
     public void SnapshotSeparatesLiveFromPostDisposal()
     {
-        var assembly = BenchmarkAssembly();
-        var snapshotCase = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusCase") ??
-            throw new InvalidOperationException("The benchmark census case is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var snapshotCase = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.WorkCensusCase");
         Assert.NotNull(snapshotCase.GetProperty("LokadLiveOwnedBytes"));
         Assert.NotNull(snapshotCase.GetProperty("BaselineLiveOwnedBytes"));
         Assert.NotNull(snapshotCase.GetProperty("LokadRetainedManagedBytes"));
-        var measurement = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionMeasurement") ??
-            throw new InvalidOperationException("The benchmark live-session measurement is unavailable.");
+        var measurement = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.LiveSessionMeasurement");
         foreach (var property in new[] { "LiveOwnedBytes", "LiveOwnedProcessPrivateBytes", "PostDisposalBytes", "PostDisposalProcessPrivateBytes", "Checksum" })
             Assert.NotNull(measurement.GetProperty(property));
     }
@@ -264,9 +262,8 @@ public sealed class LiveSessionRetentionTests
     [Fact]
     public void PassesCarryInstrumentedRoles()
     {
-        var assembly = BenchmarkAssembly();
-        var pass = assembly.GetType("Lokad.Parquet.Benchmarks.CensusPassMeasurement") ??
-            throw new InvalidOperationException("The benchmark pass measurement is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var pass = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.CensusPassMeasurement");
         Assert.NotNull(pass.GetProperty("Role"));
     }
 
@@ -276,16 +273,10 @@ public sealed class LiveSessionRetentionTests
 
     private static async Task<FixtureSnapshot> CreateFixtureAsync(string workload, int rowCount)
     {
-        var assembly = BenchmarkAssembly();
-        var fixtureType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanFixture") ??
-            throw new InvalidOperationException("The benchmark fixture writer is unavailable.");
-        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ??
-            throw new InvalidOperationException("The benchmark workload token is unavailable.");
-        var create = fixtureType.GetMethod("CreateAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark fixture writer has no creation method.");
-        var task = (Task)(create.Invoke(null, [Enum.Parse(workloadType, workload), rowCount]) ?? throw new InvalidOperationException("The benchmark fixture creation returned nothing."));
-        await task.ConfigureAwait(false);
-        var fixture = task.GetType().GetProperty("Result")?.GetValue(task) ??
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var fixtureType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanFixture");
+        var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
+        var fixture = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.ScanFixture", "CreateAsync", [Enum.Parse(workloadType, workload), rowCount]) ??
             throw new InvalidOperationException("The benchmark fixture creation returned nothing.");
         byte[] bytes = Assert.IsType<byte[]>(fixtureType.GetProperty("Bytes")?.GetValue(fixture));
         return new FixtureSnapshot(
@@ -298,15 +289,11 @@ public sealed class LiveSessionRetentionTests
 
     private static long RangeOracle(long start, long count)
     {
-        var assembly = BenchmarkAssembly();
-        var checksumType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanChecksum") ??
-            throw new InvalidOperationException("The benchmark checksum helper is unavailable.");
-        var create = checksumType.GetMethod("CreateInt32", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark value mapper is unavailable.");
-        var mix = checksumType.GetMethod("Mix", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark mixer is unavailable.");
-        var combine = checksumType.GetMethod("CombineColumn", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark column combiner is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var checksumType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanChecksum");
+        var create = BenchmarkReflection.RequireStaticMethod(checksumType, "CreateInt32", null);
+        var mix = BenchmarkReflection.RequireStaticMethod(checksumType, "Mix", null);
+        var combine = BenchmarkReflection.RequireStaticMethod(checksumType, "CombineColumn", null);
         var seed = Assert.IsType<long>(checksumType.GetField("Seed", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null));
         var chain = seed;
         for (var row = start; row < start + count; row++)
@@ -321,23 +308,16 @@ public sealed class LiveSessionRetentionTests
     private static async Task<MeasuredSession> MeasureLokadAsync(
         FixtureSnapshot fixture, string workload, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum, string caseName, int[] projection)
     {
-        var assembly = BenchmarkAssembly();
-        var retention = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionRetention") ??
-            throw new InvalidOperationException("The benchmark live-session probe is unavailable.");
-        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ??
-            throw new InvalidOperationException("The benchmark workload token is unavailable.");
-        var measure = retention.GetMethod("MeasureLokadAsync", BindingFlags.Public | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark Lokad live probe is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
         var hashes = rangeStart.HasValue ? new long[] { expectedChecksum } : fixture.ColumnChecksums;
         var nulls = rangeStart.HasValue ? new int[] { 0 } : fixture.NullCounts;
-        var task = (Task)(measure.Invoke(null,
+        var measurement = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.LiveSessionRetention", "MeasureLokadAsync",
         [
             fixture.Bytes, projection, rowCount, rangeStart, rangeCount, emittedRows, 0,
             Enum.Parse(workloadType, workload), expectedChecksum,
             hashes, nulls, repetitions, caseName,
-        ]) ?? throw new InvalidOperationException("The benchmark live probe returned nothing."));
-        await task.ConfigureAwait(false);
-        var measurement = task.GetType().GetProperty("Result")?.GetValue(task) ??
+        ]) ??
             throw new InvalidOperationException("The benchmark live probe returned nothing.");
         return new MeasuredSession(measurement);
     }
@@ -345,20 +325,13 @@ public sealed class LiveSessionRetentionTests
     private static async Task<MeasuredSession> MeasureBaselineAsync(
         FixtureSnapshot fixture, string workload, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum, string caseName, int[] projection)
     {
-        var assembly = BenchmarkAssembly();
-        var retention = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionRetention") ??
-            throw new InvalidOperationException("The benchmark live-session probe is unavailable.");
-        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ??
-            throw new InvalidOperationException("The benchmark workload token is unavailable.");
-        var measure = retention.GetMethod("MeasureBaselineAsync", BindingFlags.Public | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark baseline live probe is unavailable.");
-        var task = (Task)(measure.Invoke(null,
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
+        var measurement = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.LiveSessionRetention", "MeasureBaselineAsync",
         [
             fixture.Bytes, projection, rangeStart, rangeCount, emittedRows, 0,
             Enum.Parse(workloadType, workload), expectedChecksum, repetitions, caseName,
-        ]) ?? throw new InvalidOperationException("The benchmark live probe returned nothing."));
-        await task.ConfigureAwait(false);
-        var measurement = task.GetType().GetProperty("Result")?.GetValue(task) ??
+        ]) ??
             throw new InvalidOperationException("The benchmark live probe returned nothing.");
         return new MeasuredSession(measurement);
     }
@@ -369,11 +342,9 @@ public sealed class LiveSessionRetentionTests
         // arbitrary projection, mirroring how the census derives retention truth.
         await using var file = await ParquetFile.OpenAsync(fixture.Bytes, new ParquetReaderOptions(), CancellationToken.None);
         var columns = file.Metadata.Schema.Columns;
-        var assembly = BenchmarkAssembly();
-        var runner = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusRunner") ??
-            throw new InvalidOperationException("The benchmark census runner is unavailable.");
-        var oracle = runner.GetMethod("CensusExpectedChecksum", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark projection oracle is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var runner = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner");
+        var oracle = BenchmarkReflection.RequireStaticMethod(runner, "CensusExpectedChecksum", null);
         return Assert.IsType<long>(oracle.Invoke(null,
             [fixture.Checksum, fixture.ColumnChecksums, columns.Count, projection.Select(ordinal => columns[ordinal]).ToArray()]));
     }
@@ -382,7 +353,7 @@ public sealed class LiveSessionRetentionTests
     {
         // Baseline schema fields for one fixture, so destination selection is
         // pinned against the fields the baseline session actually reads.
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var binDirectory = Path.GetDirectoryName(assembly.Location) ?? throw new InvalidOperationException("The benchmark output has no directory.");
         var baseline = Assembly.LoadFrom(Path.Combine(binDirectory, "Parquet.dll"));
         var readerType = baseline.GetType("Parquet.ParquetReader") ?? throw new InvalidOperationException("The baseline reader is unavailable.");
@@ -425,10 +396,10 @@ public sealed class LiveSessionRetentionTests
 
     private static object CreateDestinations(Array fields, string workload, int maximumGroupRows)
     {
-        var assembly = BenchmarkAssembly();
-        var destinationsType = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionRetention+BaselineDestinations") ?? throw new InvalidOperationException("The benchmark destinations are unavailable.");
-        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ?? throw new InvalidOperationException("The benchmark workload token is unavailable.");
-        var create = destinationsType.GetMethod("Create", BindingFlags.NonPublic | BindingFlags.Static) ?? throw new InvalidOperationException("The benchmark destination allocator is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var destinationsType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.LiveSessionRetention+BaselineDestinations");
+        var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
+        var create = BenchmarkReflection.RequireStaticMethod(destinationsType, "Create", null);
         return create.Invoke(null, [fields, Enum.Parse(workloadType, workload), maximumGroupRows]) ?? throw new InvalidOperationException("The benchmark destination allocation returned nothing.");
     }
 
@@ -438,22 +409,6 @@ public sealed class LiveSessionRetentionTests
         var holder = ((Array)table).GetValue(column) ?? throw new InvalidOperationException("A benchmark destination column is missing.");
         var values = holder.GetType().GetProperty("Values")?.GetValue(holder) ?? throw new InvalidOperationException("A benchmark destination column has no buffer.");
         return Assert.IsAssignableFrom<Array>(values);
-    }
-    private static Assembly BenchmarkAssembly()
-    {
-        var testOutput = Path.GetDirectoryName(typeof(LiveSessionRetentionTests).Assembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
     }
 
     private sealed record FixtureSnapshot(byte[] Bytes, long Checksum, int RowCount, long[] ColumnChecksums, int[] NullCounts);

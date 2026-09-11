@@ -20,13 +20,9 @@ public sealed class DiagnosticPairedCaseTests
     [Fact]
     public async Task UnknownDiagnosticCaseIsRejected()
     {
-        var assembly = BenchmarkAssembly();
-        var factory = assembly.GetType("Lokad.Parquet.Benchmarks.DiagnosticPairedCases") ??
-            throw new InvalidOperationException("The benchmark diagnostic factory is unavailable.");
-        var create = factory.GetMethod("CreateAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark diagnostic creation is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var failure = await Assert.ThrowsAsync<ArgumentException>(async () =>
-            await (Task)(create.Invoke(null, ["Diagnostic/Nope"]) ?? throw new InvalidOperationException("The benchmark diagnostic creation returned nothing.")));
+            await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.DiagnosticPairedCases", "CreateAsync", ["Diagnostic/Nope"]));
         Assert.Contains("Diagnostic/Nope", failure.Message, StringComparison.Ordinal);
     }
 
@@ -35,18 +31,12 @@ public sealed class DiagnosticPairedCaseTests
     {
         // Creation runs both readers once with full truth checks, so equal
         // emitted values, nulls and ranges hold before any timing runs.
-        var assembly = BenchmarkAssembly();
-        var factory = assembly.GetType("Lokad.Parquet.Benchmarks.DiagnosticPairedCases") ??
-            throw new InvalidOperationException("The benchmark diagnostic factory is unavailable.");
-        var create = factory.GetMethod("CreateAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark diagnostic creation is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         foreach (var name in DiagnosticCaseNames())
         {
-            var built = create.Invoke(null, [name]) ??
+            var pairedCase = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.DiagnosticPairedCases", "CreateAsync", [name]) ??
                 throw new InvalidOperationException($"The {name} diagnostic creation returned nothing.");
-            var pending = (Task)built;
-            await pending;
-            await using var paired = (IAsyncDisposable)(pending.GetType().GetProperty("Result")?.GetValue(pending) ?? throw new InvalidOperationException($"The {name} diagnostic creation returned nothing."));
+            await using var paired = (IAsyncDisposable)pairedCase;
         }
     }
 
@@ -58,7 +48,7 @@ public sealed class DiagnosticPairedCaseTests
         // One end-to-end paired run: 400 balanced observations with allocation
         // and GC evidence for a diagnostic source lane. The paired runner
         // requires single-processor affinity, so pin and restore the host.
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         using var host = System.Diagnostics.Process.GetCurrentProcess();
         var previousAffinity = host.ProcessorAffinity;
         var previousPriority = OperatingSystem.IsWindows() ? host.PriorityClass : System.Diagnostics.ProcessPriorityClass.Normal;
@@ -101,9 +91,8 @@ public sealed class DiagnosticPairedCaseTests
     }
     private static string[] DiagnosticCaseNames()
     {
-        var assembly = BenchmarkAssembly();
-        var factory = assembly.GetType("Lokad.Parquet.Benchmarks.DiagnosticPairedCases") ??
-            throw new InvalidOperationException("The benchmark diagnostic factory is unavailable.");
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var factory = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.DiagnosticPairedCases");
         var names = factory.GetProperty("Names", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as System.Collections.IEnumerable ??
             throw new InvalidOperationException("The benchmark diagnostic list is unavailable.");
         var result = new List<string>();
@@ -112,20 +101,4 @@ public sealed class DiagnosticPairedCaseTests
         return result.ToArray();
     }
 
-    private static Assembly BenchmarkAssembly()
-    {
-        var testOutput = Path.GetDirectoryName(typeof(DiagnosticPairedCaseTests).Assembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
-    }
 }

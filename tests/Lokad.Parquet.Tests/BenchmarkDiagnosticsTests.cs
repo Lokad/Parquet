@@ -29,7 +29,7 @@ public sealed class BenchmarkDiagnosticsTests
             Validity = validity,
             PageVersion = FixturePageVersion.DataPageV2,
         });
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var checksumType = ChecksumType(assembly);
         var mix = ChecksumFoldMethod(checksumType, "Mix", typeof(int));
         var seed = Assert.IsType<long>(checksumType.GetField("Seed", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null));
@@ -81,7 +81,7 @@ public sealed class BenchmarkDiagnosticsTests
             Repetition = ParquetRepetition.Optional,
             Validity = validity,
         });
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var checksumType = ChecksumType(assembly);
         var mixBytes = ChecksumFoldMethod(checksumType, "MixBytes", typeof(byte[]));
         var mix = ChecksumFoldMethod(checksumType, "Mix", typeof(int));
@@ -119,7 +119,7 @@ public sealed class BenchmarkDiagnosticsTests
             PhysicalTypeCode = (int)ParquetPhysicalType.Int64,
             PhysicalValues = values,
         });
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         var checksumType = ChecksumType(assembly);
         var mixInt64 = ChecksumFoldMethod(checksumType, "MixInt64", typeof(long));
         var seed = Assert.IsType<long>(checksumType.GetField("Seed", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null));
@@ -137,7 +137,7 @@ public sealed class BenchmarkDiagnosticsTests
     public async Task CensusPassRejectsMismatchedChecksum()
     {
         var bytes = ParquetFixtureBuilder.CreateInt32(new() { Values = [1, 2, 3] });
-        var assembly = BenchmarkAssembly();
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
         await using var file = await ParquetFile.OpenAsync(new MemoryStream(bytes, writable: false));
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await RunCensusPassAsync(assembly, file, "RequiredInt32Plain", 3, 0, [file.Metadata.Schema.Columns[0]], 3, 424242L, [424242L], [0]));
@@ -184,20 +184,11 @@ public sealed class BenchmarkDiagnosticsTests
         long[] columnHashes,
         int[] nullCounts)
     {
-        var runnerType = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusRunner") ??
-            throw new InvalidOperationException("The benchmark census runner is unavailable.");
-        var workloadType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanWorkload") ??
-            throw new InvalidOperationException("The benchmark workload token is unavailable.");
-        var run = runnerType.GetMethod("RunCensusPassAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The benchmark census pass is unavailable.");
-        var task = (Task)(run.Invoke(null,
-        [
-            file, Enum.Parse(workloadType, workload), rowCount, utf8PayloadBytes,
+        var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
+        var outcome = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "RunCensusPassAsync",
+            [file, Enum.Parse(workloadType, workload), rowCount, utf8PayloadBytes,
             projection, target, expectedChecksum, columnHashes, nullCounts, null,
-            new long[projection.Length], new long[projection.Length], null,
-        ]) ?? throw new InvalidOperationException("The census pass returned nothing."));
-        await task.ConfigureAwait(false);
-        var outcome = task.GetType().GetProperty("Result")?.GetValue(task) ??
+            new long[projection.Length], new long[projection.Length], null]) ??
             throw new InvalidOperationException("The census pass produced nothing.");
         var outcomeType = outcome.GetType();
         return new CensusOutcome(
@@ -207,15 +198,8 @@ public sealed class BenchmarkDiagnosticsTests
 
     private static async Task<CommittedTruth> EstablishCommittedTruthAsync(byte[] fixtureBytes, int projectedOrdinal, string pinnedColumnHash)
     {
-        var assembly = BenchmarkAssembly();
-        var runnerType = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusRunner") ??
-            throw new InvalidOperationException("The benchmark census runner is unavailable.");
-        var establish = runnerType.GetMethod("EstablishCommittedTruthAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The committed truth oracle is unavailable.");
-        var task = (Task)(establish.Invoke(null, [fixtureBytes, projectedOrdinal, pinnedColumnHash]) ??
-            throw new InvalidOperationException("The truth oracle returned nothing."));
-        await task.ConfigureAwait(false);
-        var truth = task.GetType().GetProperty("Result")?.GetValue(task) ??
+        var assembly = BenchmarkReflection.BenchmarkAssembly();
+        var truth = await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.WorkCensusRunner", "EstablishCommittedTruthAsync", [fixtureBytes, projectedOrdinal, pinnedColumnHash]) ??
             throw new InvalidOperationException("The truth oracle produced nothing.");
         var truthType = truth.GetType();
         return new CommittedTruth(
@@ -227,12 +211,10 @@ public sealed class BenchmarkDiagnosticsTests
     }
 
     private static Type ChecksumType(Assembly assembly) =>
-        assembly.GetType("Lokad.Parquet.Benchmarks.ScanChecksum") ??
-            throw new InvalidOperationException("The benchmark checksum helper is unavailable.");
+        BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanChecksum");
 
     private static MethodInfo ChecksumFoldMethod(Type checksumType, string name, Type valueType) =>
-        checksumType.GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static, [typeof(long), valueType]) ??
-            throw new InvalidOperationException("The benchmark checksum fold is unavailable.");
+        BenchmarkReflection.RequireStaticMethod(checksumType, name, [typeof(long), valueType]);
 
     private static long CombineColumn(Type checksumType, long valueChain, long nullChain)
     {
@@ -242,23 +224,6 @@ public sealed class BenchmarkDiagnosticsTests
 
     private static string CommittedFixturePath(string fileName) =>
         Path.Combine(RepositoryTestPaths.Root, "tests", "fixtures", "apache-parquet-testing", fileName);
-
-    private static Assembly BenchmarkAssembly()
-    {
-        var testOutput = Path.GetDirectoryName(typeof(BenchmarkDiagnosticsTests).Assembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
-    }
 
     private sealed record CensusOutcome(long Checksum, int PassBatches);
 

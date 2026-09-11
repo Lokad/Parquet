@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Reflection;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1143,18 +1142,9 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
         }
         static async Task<string> ExportParityCatalogAsync(string workingDirectory)
         {
-            var testOutput = Path.GetDirectoryName(typeof(BenchmarkReportVerificationTests).Assembly.Location) ??
-                throw new InvalidOperationException("The test assembly has no output directory.");
-            var framework = Path.GetFileName(testOutput);
-            var configuration = Directory.GetParent(testOutput)?.Name ??
-                throw new InvalidOperationException("The test assembly has no configuration directory.");
-            var assembly = Assembly.LoadFrom(Path.Combine(RepositoryTestPaths.Root, "bench", "Lokad.Parquet.Benchmarks", "bin", configuration, framework, "Lokad.Parquet.Benchmarks.dll"));
-            var runner = assembly.GetType("Lokad.Parquet.Benchmarks.PairedParityRunner") ??
-                throw new InvalidOperationException("The benchmark parity runner is unavailable.");
-            var export = runner.GetMethod("WriteCatalogAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
-                throw new InvalidOperationException("The benchmark catalog export is unavailable.");
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var catalogPath = Path.Combine(workingDirectory, "artifacts", "benchmarks", "parity-catalog.json");
-            await (Task)(export.Invoke(null, [catalogPath]) ?? throw new InvalidOperationException("The benchmark catalog export returned nothing."));
+            await BenchmarkReflection.InvokeAsync(assembly, "Lokad.Parquet.Benchmarks.PairedParityRunner", "WriteCatalogAsync", [catalogPath]);
             return catalogPath;
         }
     }

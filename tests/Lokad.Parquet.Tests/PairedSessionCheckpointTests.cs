@@ -17,14 +17,14 @@ public sealed class PairedSessionCheckpointTests
         try
         {
             var path = Path.Combine(root, "session.json");
-            InvokeRecorder(BenchmarkAssembly(), "WriteSessionFileAtomic", [path, "{\"sessionId\":\"abc\"}"]);
+            BenchmarkReflection.InvokeStatic(BenchmarkReflection.BenchmarkAssembly(), "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [path, "{\"sessionId\":\"abc\"}"]);
             Assert.Equal("{\"sessionId\":\"abc\"}", File.ReadAllText(path));
             Assert.Single(Directory.GetFiles(root));
-            InvokeRecorder(BenchmarkAssembly(), "WriteSessionFileAtomic", [path, "{\"sessionId\":\"def\"}"]);
+            BenchmarkReflection.InvokeStatic(BenchmarkReflection.BenchmarkAssembly(), "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [path, "{\"sessionId\":\"def\"}"]);
             Assert.Equal("{\"sessionId\":\"def\"}", File.ReadAllText(path));
             Assert.Single(Directory.GetFiles(root));
             var nested = Path.Combine(root, "fresh", "session.json");
-            InvokeRecorder(BenchmarkAssembly(), "WriteSessionFileAtomic", [nested, "{}"]);
+            BenchmarkReflection.InvokeStatic(BenchmarkReflection.BenchmarkAssembly(), "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [nested, "{}"]);
             Assert.Equal("{}", File.ReadAllText(nested));
         }
         finally
@@ -39,15 +39,15 @@ public sealed class PairedSessionCheckpointTests
         var root = NewTempRoot();
         try
         {
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var interrupted = Path.Combine(root, "paired-windows-20260909-120000.aaaabbbb.session");
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(interrupted, "session.json"), "{\"sessionId\":\"aaaabbbb\",\"status\":\"running\"}"]);
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(interrupted, "checkpoint-00.json"), "{\"sessionId\":\"aaaabbbb\",\"order\":0,\"caseName\":\"PreopenedScan/RequiredInt32Plain\"}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(interrupted, "session.json"), "{\"sessionId\":\"aaaabbbb\",\"status\":\"running\"}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(interrupted, "checkpoint-00.json"), "{\"sessionId\":\"aaaabbbb\",\"order\":0,\"caseName\":\"PreopenedScan/RequiredInt32Plain\"}"]);
             var fresh = Path.Combine(root, "paired-windows-20260909-130000.ccccdddd.session");
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(fresh, "session.json"), "{\"sessionId\":\"ccccdddd\",\"status\":\"running\"}"]);
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(fresh, "checkpoint-00.json"), "{\"sessionId\":\"ccccdddd\",\"order\":0,\"caseName\":\"PreopenedScan/RequiredInt32Plain\"}"]);
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(fresh, "checkpoint-01.json"), "{\"sessionId\":\"ccccdddd\",\"order\":1,\"caseName\":\"WarmMetadataOpen\"}"]);
-            InvokeRecorder(assembly, "WriteSessionFileAtomic", [Path.Combine(fresh, "completed.json"), "{\"sessionId\":\"ccccdddd\",\"caseCount\":2,\"exitStatus\":0}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(fresh, "session.json"), "{\"sessionId\":\"ccccdddd\",\"status\":\"running\"}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(fresh, "checkpoint-00.json"), "{\"sessionId\":\"ccccdddd\",\"order\":0,\"caseName\":\"PreopenedScan/RequiredInt32Plain\"}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(fresh, "checkpoint-01.json"), "{\"sessionId\":\"ccccdddd\",\"order\":1,\"caseName\":\"WarmMetadataOpen\"}"]);
+            BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "WriteSessionFileAtomic", [Path.Combine(fresh, "completed.json"), "{\"sessionId\":\"ccccdddd\",\"caseCount\":2,\"exitStatus\":0}"]);
             var incomplete = ListIncomplete(assembly, root);
             Assert.Single(incomplete);
             var entry = DescribeIncomplete(incomplete[0]);
@@ -70,7 +70,7 @@ public sealed class PairedSessionCheckpointTests
         var root = NewTempRoot();
         try
         {
-            var assembly = BenchmarkAssembly();
+            var assembly = BenchmarkReflection.BenchmarkAssembly();
             var torn = Path.Combine(root, "paired-linux-20260909-120000.eeeeffff.session");
             Directory.CreateDirectory(torn);
             File.WriteAllText(Path.Combine(torn, "session.json"), "{\"sessionId\":\"eeeeffff\",\"status\":\"running\"}");
@@ -95,18 +95,9 @@ public sealed class PairedSessionCheckpointTests
         }
     }
 
-    private static object? InvokeRecorder(Assembly assembly, string method, object?[] args)
-    {
-        var recorderType = assembly.GetType("Lokad.Parquet.Benchmarks.PairedSessionRecorder") ??
-            throw new InvalidOperationException("The paired session recorder is unavailable.");
-        var target = recorderType.GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static) ??
-            throw new InvalidOperationException("The paired session recorder has no such operation.");
-        return target.Invoke(null, args);
-    }
-
     private static List<object?> ListIncomplete(Assembly assembly, string directory)
     {
-        var found = InvokeRecorder(assembly, "FindIncompleteSessionDirectories", [directory]);
+        var found = BenchmarkReflection.InvokeStatic(assembly, "Lokad.Parquet.Benchmarks.PairedSessionRecorder", "FindIncompleteSessionDirectories", [directory]);
         var entries = Assert.IsAssignableFrom<System.Collections.IEnumerable>(found);
         var result = new List<object?>();
         foreach (var entry in entries)
@@ -132,20 +123,4 @@ public sealed class PairedSessionCheckpointTests
         return root;
     }
 
-    private static Assembly BenchmarkAssembly()
-    {
-        var testOutput = Path.GetDirectoryName(typeof(PairedSessionCheckpointTests).Assembly.Location) ??
-            throw new InvalidOperationException("The test assembly has no output directory.");
-        var framework = Path.GetFileName(testOutput);
-        var configuration = Directory.GetParent(testOutput)?.Name ??
-            throw new InvalidOperationException("The test assembly has no configuration directory.");
-        return Assembly.LoadFrom(Path.Combine(
-            RepositoryTestPaths.Root,
-            "bench",
-            "Lokad.Parquet.Benchmarks",
-            "bin",
-            configuration,
-            framework,
-            "Lokad.Parquet.Benchmarks.dll"));
-    }
 }
