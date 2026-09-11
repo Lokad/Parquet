@@ -74,6 +74,12 @@ internal sealed class ParquetFixtureOptions
     public ParquetPageHeaderOverrides? PageHeaderOverrides { get; init; }
     public long? AuxiliaryOffset { get; init; }
     public long? ChunkTotalCompressedSize { get; init; }
+    public byte[]? StatisticsMinimum { get; init; }
+    public byte[]? StatisticsMaximum { get; init; }
+    public byte[]? StatisticsLegacyMinimum { get; init; }
+    public byte[]? StatisticsLegacyMaximum { get; init; }
+    public long? StatisticsNullCount { get; init; }
+    public long? StatisticsDistinctCount { get; init; }
     public long? ChunkTotalUncompressedSize { get; init; }
     public bool OmitBloomLength { get; init; }
     public bool BloomLengthWithoutOffset { get; init; }
@@ -236,6 +242,28 @@ internal static class ParquetFixtureBuilder
                             footer.Int64Field(ref metadata, 10, auxiliaryOffset);
                         if (pages.DictionaryPageOffset is int dictionaryPageOffset)
                             footer.Int64Field(ref metadata, 11, 4 + dictionaryPageOffset);
+                        if (options.StatisticsMinimum is not null || options.StatisticsMaximum is not null ||
+                            options.StatisticsLegacyMinimum is not null || options.StatisticsLegacyMaximum is not null ||
+                            options.StatisticsNullCount.HasValue || options.StatisticsDistinctCount.HasValue)
+                        {
+                            footer.StructField(ref metadata, 12, () =>
+                            {
+                                short statistics = 0;
+                                if (options.StatisticsLegacyMaximum is byte[] legacyMaximum)
+                                    footer.BinaryField(ref statistics, 1, legacyMaximum);
+                                if (options.StatisticsLegacyMinimum is byte[] legacyMinimum)
+                                    footer.BinaryField(ref statistics, 2, legacyMinimum);
+                                if (options.StatisticsNullCount is long nullCount)
+                                    footer.Int64Field(ref statistics, 3, nullCount);
+                                if (options.StatisticsDistinctCount is long distinctCount)
+                                    footer.Int64Field(ref statistics, 4, distinctCount);
+                                if (options.StatisticsMaximum is byte[] maximum)
+                                    footer.BinaryField(ref statistics, 5, maximum);
+                                if (options.StatisticsMinimum is byte[] minimum)
+                                    footer.BinaryField(ref statistics, 6, minimum);
+                                footer.Stop();
+                            });
+                        }
                         if (options.AuxiliaryOffset is long bloomOffset)
                         {
                             if (!options.BloomLengthWithoutOffset)
@@ -1256,6 +1284,13 @@ internal sealed class CompactTestWriter
         var bytes = Encoding.UTF8.GetBytes(value);
         WriteVarUInt32((uint)bytes.Length);
         _stream.Write(bytes);
+    }
+
+    public void BinaryField(ref short previous, short id, byte[] value)
+    {
+        FieldHeader(ref previous, id, CompactTestType.Binary);
+        WriteVarUInt32((uint)value.Length);
+        _stream.Write(value);
     }
 
     public void StructField(ref short previous, short id, Action body)

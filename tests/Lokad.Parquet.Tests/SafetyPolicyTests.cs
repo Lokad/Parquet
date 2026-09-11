@@ -260,6 +260,8 @@ public sealed class SafetyPolicyTests
                 "independent multi-column fixture writer shared across the test/benchmark boundary",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateBinaryColumns"] =
                 "independent binary fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Tests.CompactTestWriter.BinaryField"] =
+                "raw binary field writer for synthetic statistics extrema with one fixture caller",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.EncodeSnappyLiteral"] =
                 "literal-only test Snappy encoder behind the single copy-encoding switch",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32RowGroups"] =

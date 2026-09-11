@@ -290,10 +290,25 @@ public sealed class ParquetStatistics
         bool? isMaximumExact,
         long? nanCount)
     {
-        LegacyMinimum = legacyMinimum;
-        LegacyMaximum = legacyMaximum;
-        Minimum = minimum;
-        Maximum = maximum;
+        // Assign null directly instead of a ternary: the ternary form routed
+        // the null arm through the implicit byte-array conversion and lost absence
+        // on the Release toolchain (verified by StatisticsAbsenceTests).
+        if (legacyMinimum is null)
+            LegacyMinimum = null;
+        else
+            LegacyMinimum = new ReadOnlyMemory<byte>(legacyMinimum);
+        if (legacyMaximum is null)
+            LegacyMaximum = null;
+        else
+            LegacyMaximum = new ReadOnlyMemory<byte>(legacyMaximum);
+        if (minimum is null)
+            Minimum = null;
+        else
+            Minimum = new ReadOnlyMemory<byte>(minimum);
+        if (maximum is null)
+            Maximum = null;
+        else
+            Maximum = new ReadOnlyMemory<byte>(maximum);
         NullCount = nullCount;
         DistinctCount = distinctCount;
         IsMinimumExact = isMinimumExact;
