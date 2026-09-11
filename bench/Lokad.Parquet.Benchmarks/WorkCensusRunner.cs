@@ -467,8 +467,8 @@ internal static class WorkCensusRunner
                 1,
                 highCardPayload,
                 0,
-                ScanChecksum.CombineColumn(highCardChain, ScanChecksum.Seed),
-                [ScanChecksum.CombineColumn(highCardChain, ScanChecksum.Seed)],
+                highCardChain,
+                [highCardChain],
                 [0],
                 ScanWorkload.RequiredStringDictionary,
                 new CensusCaseLayout(CensusPhysicalType.Utf8, 0, false, "utf8"),
@@ -690,7 +690,7 @@ internal static class WorkCensusRunner
             var fixedBytes = await File.ReadAllBytesAsync(Path.Combine(
                 repositoryRoot, "tests", "fixtures", "apache-parquet-testing", "fixed_length_byte_array.parquet"));
             var fixedTruth = await EstablishCommittedTruthAsync(
-                fixedBytes, 0, "ccef1cbab37a62e63bd7be4128dc95a1808f97b2f1d7eed79755d916bcc9abd");
+                fixedBytes, 0, "ccef1cbacb37a62e63bd7be4128dc95a1808f97b2f1d7eed79755d916bcc9abd");
             await using (var fixedInspection = await ParquetFile.OpenAsync((ReadOnlyMemory<byte>)fixedBytes))
             {
                 if (fixedInspection.Metadata.Schema.Columns[0].SchemaElement.TypeLength != 4)
@@ -934,6 +934,8 @@ internal static class WorkCensusRunner
             var rentedCapacityBytes = 0L;
             var returnedCapacityBytes = 0L;
             var clearedBytes = 0L;
+            var retentionOrdinals = passSpecs[0].Ordinals.ToArray();
+            var retentionExpected = checksum;
             try
             {
 
@@ -995,6 +997,13 @@ internal static class WorkCensusRunner
                 // Retained storage still held by file-owned caches after the scans,
                 // sampled separately from the zero-after-disposal check below.
                 endOfScanRetainedBytes = pool.OutstandingBytes;
+                // The retention probes below scan the first-pass projection, so their
+                // truth checksum is the projected combination, not the full-case
+                // checksum; a narrow first pass over a wide fixture would otherwise
+                // fail its truth check against columns it never scans.
+                retentionExpected = CensusExpectedChecksum(
+                    checksum, columnHashes, allColumns.Count,
+                    retentionOrdinals.Select(ordinal => allColumns[ordinal]).ToArray());
                 await file.DisposeAsync().ConfigureAwait(false);
 
 
@@ -1023,13 +1032,13 @@ internal static class WorkCensusRunner
             // groups and checksums the same emitted rows while holding group-sized
             // reusable destinations.
             var lokadLive = await LiveSessionRetention.MeasureLokadAsync(
-                fixtureBytes, passSpecs[0].Ordinals.ToArray(), passSpecs[0].Target,
+                fixtureBytes, retentionOrdinals, passSpecs[0].Target,
                 rowRange?.Start, rowRange?.Count, rowCount, utf8PayloadBytes, workload,
-                checksum, columnHashes, nullCounts, 16);
+                retentionExpected, columnHashes, nullCounts, 16, name);
             var baselineLive = await LiveSessionRetention.MeasureBaselineAsync(
-                fixtureBytes, passSpecs[0].Ordinals.ToArray(),
+                fixtureBytes, retentionOrdinals,
                 rowRange?.Start, rowRange?.Count, rowCount, utf8PayloadBytes, workload,
-                checksum, 16);
+                retentionExpected, 16, name);
             return new WorkCensusCase(
                     name,
                     Convert.ToHexStringLower(SHA256.HashData(fixtureBytes)),
@@ -1564,8 +1573,23 @@ internal static class WorkCensusRunner
         int allColumnCount,
         IReadOnlyList<ParquetColumn> projection)
     {
+        // The stored full checksum combines columns in stored order, so it only
+        // stands for a projection that selects every column in stored order; any
+        // narrower or reordered projection combines its own columns in scan order.
         if (projection.Count == allColumnCount)
-            return fullChecksum;
+        {
+            var identity = true;
+            for (var ordinal = 0; ordinal < projection.Count; ordinal++)
+            {
+                if (projection[ordinal].Ordinal != ordinal)
+                {
+                    identity = false;
+                    break;
+                }
+            }
+            if (identity)
+                return fullChecksum;
+        }
         return ScanChecksum.CombineColumns(projection.Select(column => columnHashes[column.Ordinal]).ToArray());
     }
 

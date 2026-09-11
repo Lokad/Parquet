@@ -9,7 +9,7 @@ public sealed class LiveSessionRetentionTests
     {
         var fixture = await CreateInt32FixtureAsync(64);
         var measurement = await MeasureLokadAsync(
-            fixture, null, null, fixture.RowCount, fixture.RowCount, 2, fixture.Checksum);
+            fixture, "RequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, fixture.Checksum, "FullScan", [0]);
         Assert.Equal(fixture.Checksum, measurement.Checksum);
     }
 
@@ -19,7 +19,7 @@ public sealed class LiveSessionRetentionTests
         var fixture = await CreateInt32FixtureAsync(64);
         var expected = RangeOracle(10, 20);
         var measurement = await MeasureLokadAsync(
-            fixture, 10L, 20L, 20, fixture.RowCount, 2, expected);
+            fixture, "RequiredInt32Plain", 10L, 20L, 20, fixture.RowCount, 2, expected, "RowRange", [0]);
         Assert.Equal(expected, measurement.Checksum);
         Assert.NotEqual(fixture.Checksum, measurement.Checksum);
     }
@@ -29,7 +29,7 @@ public sealed class LiveSessionRetentionTests
     {
         var fixture = await CreateInt32FixtureAsync(64);
         var measurement = await MeasureBaselineAsync(
-            fixture, null, null, fixture.RowCount, fixture.RowCount, 2, fixture.Checksum);
+            fixture, "RequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, fixture.Checksum, "FullScan", [0]);
         Assert.Equal(fixture.Checksum, measurement.Checksum);
     }
 
@@ -39,9 +39,84 @@ public sealed class LiveSessionRetentionTests
         var fixture = await CreateInt32FixtureAsync(64);
         var expected = RangeOracle(10, 20);
         var measurement = await MeasureBaselineAsync(
-            fixture, 10L, 20L, 20, fixture.RowCount, 2, expected);
+            fixture, "RequiredInt32Plain", 10L, 20L, 20, fixture.RowCount, 2, expected, "RowRange", [0]);
         Assert.Equal(expected, measurement.Checksum);
         Assert.NotEqual(fixture.Checksum, measurement.Checksum);
+    }
+
+    [Fact]
+    public async Task LokadLiveProbeMatchesNarrowProjectionTruth()
+    {
+        // B01: the probes scan the first-pass projection, so a narrow projection
+        // over a wide fixture checks the projected combination, not the full checksum.
+        var fixture = await CreateFixtureAsync("EightRequiredInt32Plain", 64);
+        var projection = new int[] { 0 };
+        var expected = await ProjectedChecksumAsync(fixture, projection);
+        Assert.NotEqual(fixture.Checksum, expected);
+        var measurement = await MeasureLokadAsync(
+            fixture, "EightRequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, expected, "NarrowProjection", projection);
+        Assert.Equal(expected, measurement.Checksum);
+    }
+
+    [Fact]
+    public async Task BaselineLiveProbeMatchesNarrowProjectionTruth()
+    {
+        var fixture = await CreateFixtureAsync("EightRequiredInt32Plain", 64);
+        var projection = new int[] { 0 };
+        var expected = await ProjectedChecksumAsync(fixture, projection);
+        Assert.NotEqual(fixture.Checksum, expected);
+        var measurement = await MeasureBaselineAsync(
+            fixture, "EightRequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, expected, "NarrowProjection", projection);
+        Assert.Equal(expected, measurement.Checksum);
+    }
+
+    [Fact]
+    public async Task LokadLiveProbeMatchesReorderedProjectionTruth()
+    {
+        // Column combination is order-sensitive, so a reordered projection checks
+        // the combination in scan order rather than the stored full checksum.
+        var fixture = await CreateFixtureAsync("TwoRequiredInt32Plain", 64);
+        var projection = new int[] { 1, 0 };
+        var expected = await ProjectedChecksumAsync(fixture, projection);
+        Assert.NotEqual(fixture.Checksum, expected);
+        var measurement = await MeasureLokadAsync(
+            fixture, "TwoRequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, expected, "ReorderedProjection", projection);
+        Assert.Equal(expected, measurement.Checksum);
+    }
+
+    [Fact]
+    public async Task BaselineLiveProbeMatchesReorderedProjectionTruth()
+    {
+        var fixture = await CreateFixtureAsync("TwoRequiredInt32Plain", 64);
+        var projection = new int[] { 1, 0 };
+        var expected = await ProjectedChecksumAsync(fixture, projection);
+        Assert.NotEqual(fixture.Checksum, expected);
+        var measurement = await MeasureBaselineAsync(
+            fixture, "TwoRequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 2, expected, "ReorderedProjection", projection);
+        Assert.Equal(expected, measurement.Checksum);
+    }
+
+    [Fact]
+    public async Task LokadProbeFailureNamesCensusCase()
+    {
+        var fixture = await CreateInt32FixtureAsync(64);
+        // Probing an async method through reflection surfaces the original failure,
+        // so the census case name is asserted on the probe error itself.
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await MeasureLokadAsync(
+                fixture, "RequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 1, fixture.Checksum + 1, "NarrowInt32Plain", [0]));
+        Assert.Contains("NarrowInt32Plain", failure.Message, StringComparison.Ordinal);
+        Assert.NotNull(failure.InnerException);
+    }
+
+    [Fact]
+    public async Task BaselineProbeFailureNamesCensusCase()
+    {
+        var fixture = await CreateInt32FixtureAsync(64);
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await MeasureBaselineAsync(
+                fixture, "RequiredInt32Plain", null, null, fixture.RowCount, fixture.RowCount, 1, fixture.Checksum + 1, "NarrowInt32Plain", [0]));
+        Assert.Contains("NarrowInt32Plain", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -69,7 +144,10 @@ public sealed class LiveSessionRetentionTests
     }
 
 
-    private static async Task<FixtureSnapshot> CreateInt32FixtureAsync(int rowCount)
+    private static Task<FixtureSnapshot> CreateInt32FixtureAsync(int rowCount) =>
+        CreateFixtureAsync("RequiredInt32Plain", rowCount);
+
+    private static async Task<FixtureSnapshot> CreateFixtureAsync(string workload, int rowCount)
     {
         var assembly = BenchmarkAssembly();
         var fixtureType = assembly.GetType("Lokad.Parquet.Benchmarks.ScanFixture") ??
@@ -78,7 +156,7 @@ public sealed class LiveSessionRetentionTests
             throw new InvalidOperationException("The benchmark workload token is unavailable.");
         var create = fixtureType.GetMethod("CreateAsync", BindingFlags.NonPublic | BindingFlags.Static) ??
             throw new InvalidOperationException("The benchmark fixture writer has no creation method.");
-        var task = (Task)(create.Invoke(null, [Enum.Parse(workloadType, "RequiredInt32Plain"), rowCount]) ?? throw new InvalidOperationException("The benchmark fixture creation returned nothing."));
+        var task = (Task)(create.Invoke(null, [Enum.Parse(workloadType, workload), rowCount]) ?? throw new InvalidOperationException("The benchmark fixture creation returned nothing."));
         await task.ConfigureAwait(false);
         var fixture = task.GetType().GetProperty("Result")?.GetValue(task) ??
             throw new InvalidOperationException("The benchmark fixture creation returned nothing.");
@@ -114,7 +192,7 @@ public sealed class LiveSessionRetentionTests
     }
 
     private static async Task<MeasuredSession> MeasureLokadAsync(
-        FixtureSnapshot fixture, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum)
+        FixtureSnapshot fixture, string workload, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum, string caseName, int[] projection)
     {
         var assembly = BenchmarkAssembly();
         var retention = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionRetention") ??
@@ -127,9 +205,9 @@ public sealed class LiveSessionRetentionTests
         var nulls = rangeStart.HasValue ? new int[] { 0 } : fixture.NullCounts;
         var task = (Task)(measure.Invoke(null,
         [
-            fixture.Bytes, new int[] { 0 }, rowCount, rangeStart, rangeCount, emittedRows, 0,
-            Enum.Parse(workloadType, "RequiredInt32Plain"), expectedChecksum,
-            hashes, nulls, repetitions,
+            fixture.Bytes, projection, rowCount, rangeStart, rangeCount, emittedRows, 0,
+            Enum.Parse(workloadType, workload), expectedChecksum,
+            hashes, nulls, repetitions, caseName,
         ]) ?? throw new InvalidOperationException("The benchmark live probe returned nothing."));
         await task.ConfigureAwait(false);
         var measurement = task.GetType().GetProperty("Result")?.GetValue(task) ??
@@ -138,7 +216,7 @@ public sealed class LiveSessionRetentionTests
     }
 
     private static async Task<MeasuredSession> MeasureBaselineAsync(
-        FixtureSnapshot fixture, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum)
+        FixtureSnapshot fixture, string workload, long? rangeStart, long? rangeCount, int emittedRows, int rowCount, int repetitions, long expectedChecksum, string caseName, int[] projection)
     {
         var assembly = BenchmarkAssembly();
         var retention = assembly.GetType("Lokad.Parquet.Benchmarks.LiveSessionRetention") ??
@@ -149,13 +227,28 @@ public sealed class LiveSessionRetentionTests
             throw new InvalidOperationException("The benchmark baseline live probe is unavailable.");
         var task = (Task)(measure.Invoke(null,
         [
-            fixture.Bytes, new int[] { 0 }, rangeStart, rangeCount, emittedRows, 0,
-            Enum.Parse(workloadType, "RequiredInt32Plain"), expectedChecksum, repetitions,
+            fixture.Bytes, projection, rangeStart, rangeCount, emittedRows, 0,
+            Enum.Parse(workloadType, workload), expectedChecksum, repetitions, caseName,
         ]) ?? throw new InvalidOperationException("The benchmark live probe returned nothing."));
         await task.ConfigureAwait(false);
         var measurement = task.GetType().GetProperty("Result")?.GetValue(task) ??
             throw new InvalidOperationException("The benchmark live probe returned nothing.");
         return new MeasuredSession(measurement);
+    }
+
+    private static async Task<long> ProjectedChecksumAsync(FixtureSnapshot fixture, int[] projection)
+    {
+        // The production projection oracle resolves the expected checksum for an
+        // arbitrary projection, mirroring how the census derives retention truth.
+        await using var file = await ParquetFile.OpenAsync(fixture.Bytes, new ParquetReaderOptions(), CancellationToken.None);
+        var columns = file.Metadata.Schema.Columns;
+        var assembly = BenchmarkAssembly();
+        var runner = assembly.GetType("Lokad.Parquet.Benchmarks.WorkCensusRunner") ??
+            throw new InvalidOperationException("The benchmark census runner is unavailable.");
+        var oracle = runner.GetMethod("CensusExpectedChecksum", BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("The benchmark projection oracle is unavailable.");
+        return Assert.IsType<long>(oracle.Invoke(null,
+            [fixture.Checksum, fixture.ColumnChecksums, columns.Count, projection.Select(ordinal => columns[ordinal]).ToArray()]));
     }
 
     private static Assembly BenchmarkAssembly()

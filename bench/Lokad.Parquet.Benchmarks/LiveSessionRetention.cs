@@ -35,6 +35,7 @@ public static class LiveSessionRetention
     /// <param name="expectedColumnHashes">The per-column truth hashes indexed by ordinal.</param>
     /// <param name="expectedNullCounts">The per-column truth null counts indexed by ordinal.</param>
     /// <param name="repetitions">The number of truth-checked scans.</param>
+    /// <param name="caseName">The census case naming probe diagnostics.</param>
     /// <returns>Live owned storage, post-disposal growth and the verified checksum.</returns>
     public static async Task<LiveSessionMeasurement> MeasureLokadAsync(
         byte[] fixtureBytes,
@@ -48,13 +49,15 @@ public static class LiveSessionRetention
         long expectedChecksum,
         long[] expectedColumnHashes,
         int[] expectedNullCounts,
-        int repetitions)
+        int repetitions,
+        string caseName)
     {
         ArgumentNullException.ThrowIfNull(fixtureBytes);
         ArgumentNullException.ThrowIfNull(projectionOrdinals);
         ArgumentNullException.ThrowIfNull(expectedColumnHashes);
         ArgumentNullException.ThrowIfNull(expectedNullCounts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(repetitions);
+        ArgumentException.ThrowIfNullOrWhiteSpace(caseName);
         if ((rowRangeStart.HasValue || rowRangeCount.HasValue) && (!rowRangeStart.HasValue || !rowRangeCount.HasValue))
             throw new ArgumentException("A live-session range needs both its start and its count.", nameof(rowRangeCount));
         var heapBefore = CollectHeapBytes();
@@ -77,11 +80,18 @@ public static class LiveSessionRetention
             var checksum = ScanChecksum.Seed;
             for (var repetition = 0; repetition < repetitions; repetition++)
             {
-                var outcome = await WorkCensusRunner.RunCensusPassAsync(
-                    file, workload, emittedRowCount, utf8PayloadBytes, columns, targetRowCount,
-                    expectedChecksum, expectedColumnHashes, expectedNullCounts, rowRange,
-                    valueChains, nullChains, sink);
-                checksum = outcome.Checksum;
+                try
+                {
+                    var outcome = await WorkCensusRunner.RunCensusPassAsync(
+                        file, workload, emittedRowCount, utf8PayloadBytes, columns, targetRowCount,
+                        expectedChecksum, expectedColumnHashes, expectedNullCounts, rowRange,
+                        valueChains, nullChains, sink);
+                    checksum = outcome.Checksum;
+                }
+                catch (InvalidOperationException exception)
+                {
+                    throw new InvalidOperationException($"The Lokad live-session probe failed for {workload} in census case {caseName}.", exception);
+                }
             }
 
             var heapLive = CollectHeapBytes();
@@ -120,6 +130,7 @@ public static class LiveSessionRetention
     /// <param name="workload">The workload token selecting the consumer.</param>
     /// <param name="expectedChecksum">The truth checksum verified on every repetition.</param>
     /// <param name="repetitions">The number of truth-checked scans.</param>
+    /// <param name="caseName">The census case naming probe diagnostics.</param>
     /// <returns>Live owned storage, post-disposal growth and the verified checksum.</returns>
     public static async Task<LiveSessionMeasurement> MeasureBaselineAsync(
         byte[] fixtureBytes,
@@ -130,11 +141,13 @@ public static class LiveSessionRetention
         int utf8PayloadBytes,
         ScanWorkload workload,
         long expectedChecksum,
-        int repetitions)
+        int repetitions,
+        string caseName)
     {
         ArgumentNullException.ThrowIfNull(fixtureBytes);
         ArgumentNullException.ThrowIfNull(projectionOrdinals);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(repetitions);
+        ArgumentException.ThrowIfNullOrWhiteSpace(caseName);
         if ((rowRangeStart.HasValue || rowRangeCount.HasValue) && (!rowRangeStart.HasValue || !rowRangeCount.HasValue))
             throw new ArgumentException("A live-session range needs both its start and its count.", nameof(rowRangeCount));
         var heapBefore = CollectHeapBytes();
@@ -172,7 +185,7 @@ public static class LiveSessionRetention
                     reader, fields, workload, emittedRowCount, utf8PayloadBytes, rangeStart, rangeCount,
                     valueChains, nullChains, destinations, sink);
                 if (checksum != expectedChecksum)
-                    throw new InvalidOperationException($"The baseline live-session truth check failed for {workload}.");
+                    throw new InvalidOperationException($"The baseline live-session truth check failed for {workload} in census case {caseName}.");
             }
 
             var heapLive = CollectHeapBytes();
@@ -373,7 +386,7 @@ public static class LiveSessionRetention
                             rows++;
                     }
                 }
-                else if (!multi && workload == ScanWorkload.NullableInt32Plain)
+                else if (!multi && fields[column].IsNullable)
                 {
                     await group.ReadAsync<int>(fields[column], destinations.NullableIntegers[column]);
                     for (var row = 0; row < groupRowCount; row++)

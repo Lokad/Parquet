@@ -99,6 +99,14 @@
   recording per-pass time, batch counts, managed allocation, and GC counts in
   schema-4 snapshots. CRC-bearing pages are measured through committed producer
   fixtures and dedicated dictionary lanes with page-CRC validation.
+- Verify live-session retention probes against the first-pass projected checksum instead of
+  the full-case checksum, name the census case in probe diagnostics, and combine reordered
+  projections in scan order; the stored full checksum now stands only for identity-ordered
+  full projections, with narrow, reordered, and range projection coverage.
+- Correct census truth details exposed by the first completed run: pass the raw UTF-8 byte
+  chain as the high-cardinality string oracle, select baseline nullable-INT32 destinations
+  by schema nullability, and re-pin the committed fixed-width fixture hash to the value
+  both readers mutually verify.
 
 ## 0.1.0 - 2026-09-02
 
