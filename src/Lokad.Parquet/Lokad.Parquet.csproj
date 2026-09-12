@@ -13,13 +13,13 @@
     <Description>A high-performance, dependency-free, read-only Parquet library for .NET 10.</Description>
     <Authors>Lokad</Authors>
     <Company>Lokad</Company>
-    <Version>0.1.0</Version>
-    <AssemblyVersion>0.1.0</AssemblyVersion>
-    <FileVersion>0.1.0</FileVersion>
+    <Version>0.2.0</Version>
+    <AssemblyVersion>0.2.0</AssemblyVersion>
+    <FileVersion>0.2.0</FileVersion>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
     <PackageIcon>icon.png</PackageIcon>
-    <PackageReleaseNotes>See https://github.com/Lokad/Parquet/blob/master/CHANGELOG.md for release notes.</PackageReleaseNotes>
+    <PackageReleaseNotes>See https://github.com/Lokad/Parquet/blob/v0.2.0/CHANGELOG.md for release notes.</PackageReleaseNotes>
     <PackageTags>parquet;columnar;analytics;serialization;performance;dotnet</PackageTags>
     <PackageProjectUrl>https://github.com/Lokad/Parquet</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Lokad/Parquet.git</RepositoryUrl>
