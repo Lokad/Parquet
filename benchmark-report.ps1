@@ -36,6 +36,27 @@ function Assert-ReportCondition([bool] $Condition, [string] $Message) {
     }
 }
 
+# Recomputed-transcendental comparison: integer division is exact, so a quotient
+# is identical everywhere and only Math.Log/Math.Exp/Math.Pow can round the last
+# bit differently across runtimes (observed: one ULP on Linux-measured lanes
+# rechecked on Windows). Bitwise equality still accepts everything it used to;
+# beyond that, both sides must be finite, share a sign, and sit within two ULPs.
+# Tamper margins elsewhere sit fifteen orders of magnitude above this.
+function Test-ReportRecomputedDouble([double] $Recomputed, [double] $Stored) {
+    if ($Recomputed -eq $Stored) {
+        return $true
+    }
+    if ([double]::IsNaN($Recomputed) -or [double]::IsInfinity($Recomputed) -or [double]::IsNaN($Stored) -or [double]::IsInfinity($Stored)) {
+        return $false
+    }
+    $recomputedBits = [BitConverter]::DoubleToInt64Bits($Recomputed)
+    $storedBits = [BitConverter]::DoubleToInt64Bits($Stored)
+    if (($recomputedBits -bxor $storedBits) -lt 0) {
+        return $false
+    }
+    return ([Math]::Abs($recomputedBits - $storedBits) -le 2)
+}
+
 # One-sided 95% Student-t quantile shared with the paired runner: exact textbook
 # values to df 30, then the same bounded Cornish-Fisher expansion the schema-8
 # runner uses. Snapshots before schema 8 used a flat 1.645 fallback past df 30.
@@ -227,7 +248,7 @@ foreach ($run in $runs) {
             $recomputed = [Math]::Log($lokad / $baseline)
             Assert-ReportCondition (-not ([double]::IsNaN($recomputed) -or [double]::IsInfinity($recomputed))) `
                 "$caseName has an observation with a non-finite recomputed log ratio."
-            Assert-ReportCondition ($null -ne $observation.logRatio -and $recomputed -eq $observation.logRatio) `
+            Assert-ReportCondition ($null -ne $observation.logRatio -and (Test-ReportRecomputedDouble $recomputed $observation.logRatio)) `
                 "$caseName observation log ratio does not match its raw timings."
             if ($observation.order -eq "AB") {
                 $abSum += $recomputed
@@ -252,13 +273,13 @@ foreach ($run in $runs) {
         foreach ($log in $logs) { $sumSquaredDeviation += [Math]::Pow($log - $meanLog, 2) }
         $standardError = [Math]::Sqrt($sumSquaredDeviation / ($logs.Count - 1)) / [Math]::Sqrt($logs.Count)
         $upper = [Math]::Exp($meanLog + (Get-StudentT95Quantile ($logs.Count - 1) $useLegacyInterval) * $standardError)
-        Assert-ReportCondition ($upper -eq $case[0].upper95Ratio) `
+        Assert-ReportCondition (Test-ReportRecomputedDouble $upper $case[0].upper95Ratio) `
             "$caseName upper bound does not match recomputed evidence."
         Assert-ReportCondition (-not ([double]::IsNaN($point) -or [double]::IsInfinity($point))) `
             "$caseName has a non-finite recomputed point ratio."
         Assert-ReportCondition ((-not ([double]::IsNaN($case[0].pointRatio) -or [double]::IsInfinity($case[0].pointRatio))) -and (-not ([double]::IsNaN($case[0].upper95Ratio) -or [double]::IsInfinity($case[0].upper95Ratio)))) `
             "$caseName has a non-finite recorded ratio."
-        Assert-ReportCondition ($point -eq $case[0].pointRatio) `
+        Assert-ReportCondition (Test-ReportRecomputedDouble $point $case[0].pointRatio) `
             "$caseName point ratio does not match its observations."
         Assert-ReportCondition ($case[0].passed -eq ($case[0].upper95Ratio -le 1.05)) `
             "$caseName recorded gate is inconsistent."

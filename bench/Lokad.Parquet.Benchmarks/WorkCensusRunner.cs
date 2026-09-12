@@ -995,7 +995,9 @@ internal static class WorkCensusRunner
             var publicBatchCount = 0;
             var totalMoves = 0;
             var synchronousMoves = 0;
-            var logicalOutputBytes = 0L;
+            // Case-level decoded layout, not a sum over passes: each pass carries
+            // its own projection layout in its own record.
+            var logicalOutputBytes = CensusLayout.LogicalOutputBytes(layout.PhysicalType, layout.TypeWidthBytes, layout.Nullable, rowCount, columnCount, utf8PayloadBytes, binaryPayloadBytes);
             var decodedBatches = 0;
             var consumerUtf8Bytes = 0L;
             var peakPooledBytes = 0L;
@@ -1051,7 +1053,6 @@ internal static class WorkCensusRunner
                     synchronousMoves += outcome.SynchronousMoves;
                     consumerUtf8Bytes += outcome.ConsumerUtf8Bytes;
                     decodedBatches = checked(decodedBatches + outcome.PassBatches * columns.Length);
-                    logicalOutputBytes += logicalBytes;
                     var passPeakBytes = Math.Max(pool.PeakBytes, carryBytes);
                     peakPooledBytes = Math.Max(peakPooledBytes, passPeakBytes);
                     passPeaks.Add(new CensusPassMeasurement(
@@ -1826,7 +1827,7 @@ internal static class WorkCensusRunner
 /// measured at observed events except DecodedColumnBatches and LogicalOutputBytes,
 /// which are derived from inputs; per-field notes say which is which.</summary>
 /// <param name="DecodedColumnBatches">Derived estimate of internal batches (public batches times projected columns); projected or realigned scans consume fewer, larger source batches.</param>
-/// <param name="LogicalOutputBytes">Derived decoded-layout size across both passes: value bytes plus validity bitmap bytes where lanes can produce nulls, or UTF-8 payload plus offsets.</param>
+/// <param name="LogicalOutputBytes">Derived decoded-layout size of the case projection: value bytes plus validity bitmap bytes where lanes can produce nulls, or UTF-8 payload plus offsets.</param>
 /// <param name="SourceCopiedBytes">Measured bytes delivered by the counting stream. On the measured stream-subclass path every read lands in a rented pool buffer, so deliveries coincide with reads; exact-MemoryStream and direct-memory borrows bypass this stream.</param>
 /// <param name="PooledBytesCleared">Measured at pool-return events: returns always carry full-length arrays (asserted by the observer) and the pool clears whole returned arrays.</param>
 /// <param name="EndOfScanRetainedPoolBytes">Measured pooled bytes still retained by file-owned caches after the scans, before file disposal.</param>

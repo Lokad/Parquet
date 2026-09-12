@@ -281,7 +281,8 @@ reconciliation, without measuring:
 The reconciler takes the workload catalog exported by the benchmark binary, so
 the catalog lives in exactly one place. It recomputes each point estimate and each
 upper 95% bound from the retained raw observations and rejects any stored value
-that differs bit-for-bit, re-derives the gate outcomes, and checks fixture and
+outside two units in the last place (cross-runtime transcendental rounding;
+tamper margins sit far above this), re-derives the gate outcomes, and checks fixture and
 dimension identity across sessions and the census; only the raw observations
 themselves stay with the runner. Every session must report Windows or Linux.
 

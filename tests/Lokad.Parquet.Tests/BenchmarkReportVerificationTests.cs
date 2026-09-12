@@ -657,6 +657,33 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
     }
 
     [Fact]
+    public void SingleUlpLogRatioDriftIsAccepted()
+    {
+        // Cross-runtime transcendentals can round the last bit differently;
+        // one ULP of drift on a stored log ratio must still verify.
+        var outcome = VerifyAfterPairedMutation(_quartets.V8Root, 0, "PreopenedScan/RequiredInt32Plain", static target =>
+        {
+            var observations = Assert.IsType<JsonArray>(target["observations"]);
+            var first = Assert.IsType<JsonObject>(observations[0]);
+            var stored = Assert.IsAssignableFrom<JsonValue>(first["logRatio"]).GetValue<double>();
+            first["logRatio"] = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(stored) + 1);
+        });
+        Assert.Equal(0, outcome.ExitCode);
+    }
+
+    [Fact]
+    public void SingleUlpUpperBoundDriftIsAccepted()
+    {
+        // One ULP of drift on a stored upper bound must still verify.
+        var outcome = VerifyAfterPairedMutation(_quartets.V8Root, 0, "PreopenedScan/RequiredInt32Plain", static target =>
+        {
+            var stored = Assert.IsAssignableFrom<JsonValue>(target["upper95Ratio"]).GetValue<double>();
+            target["upper95Ratio"] = BitConverter.Int64BitsToDouble(BitConverter.DoubleToInt64Bits(stored) + 1);
+        });
+        Assert.Equal(0, outcome.ExitCode);
+    }
+
+    [Fact]
     public void BumpedStoredUpperBoundIsRejected()
     {
         var outcome = VerifyAfterPairedMutation(_quartets.V8Root, 0, "PreopenedScan/RequiredInt32Plain", static target =>
