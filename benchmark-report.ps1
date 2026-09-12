@@ -657,7 +657,7 @@ foreach ($entry in $census.cases) {
 }
 
 $lines.Add("")
-$lines.Add("Per-session allocation normalizes each session by its own operation, row and column counts: operations per block vary across sessions, so pooled bytes per observation would mix denominators. The allocation, GC and CPU budgets below gate only the Lokad scan lanes; string lanes report variable-width bytes without a fixed-width cell gate, and the parity claim stays a separate gate on the paired ratios.")
+$lines.Add("Per-session allocation normalizes each session by its own operation, row and column counts: operations per block vary across sessions, so per-observation bytes would mix denominators. The allocation, GC and CPU budgets below gate only the Lokad scan lanes; string lanes report variable-width bytes without a fixed-width cell gate, and the parity claim stays a separate gate on the paired ratios.")
 $lines.Add("")
 $lines.Add("| Workload | Session | Lokad B/op | Lokad B/cell | Parquet.NET B/op | Parquet.NET B/cell | Lokad GC 0/1/2 | Parquet.NET GC 0/1/2 | Alloc | GC | CPU |")
 $lines.Add("|---|---|---|---|---|---|---|---|---|---|---|")
@@ -691,8 +691,11 @@ foreach ($caseName in $caseNames) {
             }
             $lokadBOp = $lokadBytes / $sessionOperations
             $baselineBOp = $baselineBytes / $sessionOperations
-            $lokadBCell = ($lokadBytes / $allocationCase.observations.Count) / $sessionCells
-            $baselineBCell = ($baselineBytes / $allocationCase.observations.Count) / $sessionCells
+            # Per-cell rates divide the per-operation rate by the fixture cells:
+            # one observation decodes operationsPerBlock full scans, so per-observation
+            # bytes over fixture cells would undercount operations by that factor.
+            $lokadBCell = $lokadBOp / $sessionCells
+            $baselineBCell = $baselineBOp / $sessionCells
             $allocOutcome = "n/a"
             if ($isFixedWidth) {
                 $allocOutcome = "pass"

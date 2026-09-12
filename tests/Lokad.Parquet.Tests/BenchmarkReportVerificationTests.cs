@@ -1499,10 +1499,10 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
             Assert.Equal(0, outcome.ExitCode);
             var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
             Assert.DoesNotContain("Lokad mean B/obs", document);
-            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
-            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
-            Assert.Contains("| Required INT32, PLAIN | Linux 1 | 50.000 | 0.0244 | 100.000 | 0.0488 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
-            Assert.Contains("| Required INT32, PLAIN | Linux 2 | 50.000 | 0.0244 | 100.000 | 0.0488 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 50.000 | 0.0008 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0008 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Linux 1 | 50.000 | 0.0008 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Linux 2 | 50.000 | 0.0008 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
         }
         finally
         {
@@ -1521,14 +1521,14 @@ public sealed class BenchmarkReportVerificationTests : IClassFixture<BenchmarkRe
             var cases = Assert.IsType<JsonArray>(snapshot["cases"]);
             var observations = Assert.IsType<JsonArray>(Assert.IsType<JsonObject>(cases[0])["observations"]);
             foreach (var entry in observations)
-                Assert.IsType<JsonObject>(entry)["lokadAllocatedBytes"] = 16000;
+                Assert.IsType<JsonObject>(entry)["lokadAllocatedBytes"] = 160000;
             File.WriteAllText(path, snapshot.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
             var outcome = BenchmarkReportQuartet.InvokeReport(root, false);
             Assert.NotEqual(0, outcome.ExitCode);
-            Assert.Contains("PreopenedScan/RequiredInt32Plain (Windows 1) allocates 0.2441 fixed-width B/cell, above the 0.10 budget", outcome.Output);
+            Assert.Contains("PreopenedScan/RequiredInt32Plain (Windows 1) allocates 0.1526 fixed-width B/cell, above the 0.10 budget", outcome.Output);
             var document = File.ReadAllText(Path.Combine(root, "BENCHMARKS.md"));
-            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 1000.000 | 0.2441 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | FAIL | pass | pass |", document);
-            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0122 | 100.000 | 0.0244 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 1 | 10000.000 | 0.1526 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | FAIL | pass | pass |", document);
+            Assert.Contains("| Required INT32, PLAIN | Windows 2 | 50.000 | 0.0008 | 100.000 | 0.0015 | 0/0/0 | 0/0/0 | pass | pass | pass |", document);
         }
         finally
         {
