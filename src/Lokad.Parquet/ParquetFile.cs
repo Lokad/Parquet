@@ -13,10 +13,12 @@ public sealed class ParquetFile : IAsyncDisposable
 
     private readonly IParquetRandomAccessSource _source;
     private readonly ParquetSourceOwnership _sourceOwnership;
-    private readonly ParquetScanMemoryBudget _scanMemoryBudget;
-    private readonly PooledArrayOwnerCache<byte> _pagePayloadCache;
-    private readonly ColumnCacheProvider _cacheProvider;
-    private readonly IColumnValueCache?[] _columnValueCaches;
+    // Publication flag for the lazy scan state: written last under the lifetime
+    // lock, so observing a budget also observes the caches built before it.
+    private volatile ParquetScanMemoryBudget? _scanMemoryBudget;
+    private PooledArrayOwnerCache<byte>? _pagePayloadCache;
+    private ColumnCacheProvider? _cacheProvider;
+    private IColumnValueCache?[]? _columnValueCaches;
     private readonly object _lifetimeLock = new();
     private CancellationTokenSource? _disposeCancellation;
     private Action? _activeScan;
@@ -33,10 +35,6 @@ public sealed class ParquetFile : IAsyncDisposable
     {
         _source = source;
         _sourceOwnership = sourceOwnership;
-        _scanMemoryBudget = new ParquetScanMemoryBudget(options.MaximumScanPooledBytes);
-        _pagePayloadCache = new PooledArrayOwnerCache<byte>(_scanMemoryBudget);
-        _cacheProvider = new ColumnCacheProvider(this);
-        _columnValueCaches = new IColumnValueCache?[metadata.Schema.Columns.Count];
         Options = options;
         Metadata = metadata;
         Length = source.Length;
@@ -221,7 +219,7 @@ public sealed class ParquetFile : IAsyncDisposable
             Exception? failure = null;
             try
             {
-                _pagePayloadCache.Dispose();
+                _pagePayloadCache?.Dispose();
             }
             catch (Exception exception) when (failure is null)
             {
@@ -333,7 +331,7 @@ public sealed class ParquetFile : IAsyncDisposable
 
             try
             {
-                _pagePayloadCache.Dispose();
+                _pagePayloadCache?.Dispose();
             }
             catch (Exception exception) when (failure is null)
             {
@@ -433,23 +431,55 @@ public sealed class ParquetFile : IAsyncDisposable
 
     internal IParquetRandomAccessSource Source => _source;
 
-    internal ParquetScanMemoryBudget ScanMemoryBudget => _scanMemoryBudget;
+    // Reads the published scan budget, building scan state on first use. Observing
+    // the budget volatile-read also observes the caches built before it, so later
+    // field reads in the same call need no further synchronization.
+    private ParquetScanMemoryBudget ObservedScanBudget()
+    {
+        var budget = _scanMemoryBudget;
+        if (budget is null)
+        {
+            EnsureScanState();
+            budget = _scanMemoryBudget ??
+                throw new InvalidOperationException("A scan operation requires a registered scan.");
+        }
+        return budget;
+    }
 
-    internal PooledArrayOwnerCache<byte> PagePayloadCache => _pagePayloadCache;
+    internal ParquetScanMemoryBudget ScanMemoryBudget => ObservedScanBudget();
+
+    internal PooledArrayOwnerCache<byte> PagePayloadCache
+    {
+        get
+        {
+            ObservedScanBudget();
+            return _pagePayloadCache ?? throw new InvalidOperationException("A scan operation requires a registered scan.");
+        }
+    }
 
     internal PooledArrayOwner<T> RentColumnValues<T>(ParquetColumn column, int length)
     {
-        var existing = _columnValueCaches[column.Ordinal];
+        var budget = ObservedScanBudget();
+        var caches = _columnValueCaches ??
+            throw new InvalidOperationException("A scan operation requires a registered scan.");
+        var existing = caches[column.Ordinal];
         if (existing is null)
         {
-            var created = new PooledArrayOwnerCache<T>(_scanMemoryBudget);
-            _columnValueCaches[column.Ordinal] = created;
+            var created = new PooledArrayOwnerCache<T>(budget);
+            caches[column.Ordinal] = created;
             return created.Rent(length);
         }
         return existing.Rent<T>(length);
     }
 
-    internal IColumnValueCacheProvider CacheProvider => _cacheProvider;
+    internal IColumnValueCacheProvider CacheProvider
+    {
+        get
+        {
+            ObservedScanBudget();
+            return _cacheProvider ?? throw new InvalidOperationException("A scan operation requires a registered scan.");
+        }
+    }
 
     private sealed class ColumnCacheProvider(ParquetFile file) : IColumnValueCacheProvider
     {
@@ -463,17 +493,20 @@ public sealed class ParquetFile : IAsyncDisposable
     // per scan start; wide projections use a sorted copy for binary search.
     internal void EvictIdleColumnCaches(ReadOnlySpan<int> keepOrdinals)
     {
+        ObservedScanBudget();
+        var caches = _columnValueCaches ??
+            throw new InvalidOperationException("A scan operation requires a registered scan.");
         int[]? sorted = null;
         if (keepOrdinals.Length > 16)
         {
             sorted = keepOrdinals.ToArray();
             Array.Sort(sorted);
         }
-        for (var ordinal = 0; ordinal < _columnValueCaches.Length; ordinal++)
+        for (var ordinal = 0; ordinal < caches.Length; ordinal++)
         {
             if (IsKept(keepOrdinals, sorted, ordinal))
                 continue;
-            _columnValueCaches[ordinal]?.EvictIdle();
+            caches[ordinal]?.EvictIdle();
         }
 
         static bool IsKept(ReadOnlySpan<int> keepOrdinals, int[]? sorted, int ordinal)
@@ -503,6 +536,8 @@ public sealed class ParquetFile : IAsyncDisposable
 
     private void DisposeColumnValueCaches()
     {
+        if (_columnValueCaches is null)
+            return;
         Exception? failure = null;
         foreach (var cache in _columnValueCaches)
         {
@@ -539,7 +574,28 @@ public sealed class ParquetFile : IAsyncDisposable
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_activeScan is not null)
                 throw new InvalidOperationException("Only one scan may be active on a Parquet file.");
+            EnsureScanState();
             _activeScan = onFileDisposed;
+        }
+    }
+
+    // Scan-only pooled state is built on the first scan setup, under the lifetime
+    // lock: metadata-only opens never pay for it, disposal drains scan operations
+    // before releasing it, and the single lane keeps setup ordered, so rents always
+    // observe it once any lane starts. The lock is reentrant for the RegisterScan call.
+    internal void EnsureScanState()
+    {
+        if (_scanMemoryBudget is not null)
+            return;
+        lock (_lifetimeLock)
+        {
+            if (_scanMemoryBudget is not null)
+                return;
+            var budget = new ParquetScanMemoryBudget(Options.MaximumScanPooledBytes);
+            _pagePayloadCache = new PooledArrayOwnerCache<byte>(budget);
+            _cacheProvider = new ColumnCacheProvider(this);
+            _columnValueCaches = new IColumnValueCache?[Metadata.Schema.Columns.Count];
+            _scanMemoryBudget = budget;
         }
     }
 

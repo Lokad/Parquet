@@ -48,6 +48,9 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         }
 
         var plan = BuildPlan();
+        // Scan state initializes once per file ahead of cursor creation; rejected
+        // requests above leave no scan side effects behind.
+        _file.EnsureScanState();
         // The single lane is acquired before idle caches are evicted, so a rejected
         // overlapping request leaves no cache side effects behind.
         // Services carry only the file and options; the budget and caches derive from

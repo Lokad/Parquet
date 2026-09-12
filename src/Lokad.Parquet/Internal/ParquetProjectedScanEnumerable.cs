@@ -91,8 +91,6 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             }
 
             _file = file;
-            _memoryBudget = file.ScanMemoryBudget;
-            _pagePayloadCache = file.PagePayloadCache;
             var ordinals = ResolveProjection(file, options);
             ParquetScanEnumerable.ValidateTargetBatchRowCount(file, options);
             _enumerators = new ParquetScanEnumerable.ColumnCursor[ordinals.Length];
@@ -100,6 +98,11 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _sourceOffsets = new int[ordinals.Length];
             var selectedRowGroups = ParquetScanEnumerable.BuildRowGroups(file, options);
             ParquetScanEnumerable.PreflightSelectedChunks(file, selectedRowGroups, ordinals);
+            // Scan state initializes once per file ahead of cursor creation; rejected
+            // requests above leave no scan side effects behind.
+            file.EnsureScanState();
+            _memoryBudget = file.ScanMemoryBudget;
+            _pagePayloadCache = file.PagePayloadCache;
             try
             {
                 (_cancellationToken, _linkedCancellation, _userLinkedCancellation) = ScanCancellation.Compose(
