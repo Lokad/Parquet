@@ -44,7 +44,7 @@ public sealed class ScanBatchAllocationTests
             new RequiredInt32FixtureColumn { Name = "left", Pages = leftPages.ToArray() },
             new RequiredInt32FixtureColumn { Name = "right", Pages = rightPages.ToArray() },
         ]);
-        await MeasureBatches(bytes, new[] { 0, 1 }, 128, 2_500, "misaligned-two-int32");
+        await MeasureBatches(bytes, new[] { 0, 1 }, 128, 1_200, "misaligned-two-int32");
     }
 
     [Fact]

@@ -20,6 +20,26 @@ public sealed class RentOrdinalFailureTests
     }
 
     [Fact]
+    public async Task MisalignedProjectedRentOrdinalFailuresReturnPriorRents()
+    {
+        // Misaligned pages mix per-column transfers with projected copies, so each
+        // rent ordinal fails at a different point of that interleaving: every prior
+        // rent must still be returned, including staged transfer ownership.
+        var bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(
+        [
+            new RequiredInt32FixtureColumn { Name = "a", Pages = [[1, 2, 3, 4, 5, 6]] },
+            new RequiredInt32FixtureColumn { Name = "b", Pages = [[1, 2], [3, 4, 5, 6]] },
+        ]);
+        var totalRents = await CountRentsAsync(bytes, true);
+        Assert.True(totalRents > 2);
+        var capped = Math.Min(totalRents, 20);
+        for (var ordinal = 1; ordinal <= capped; ordinal++)
+        {
+            await AssertOrdinalBalancedAsync(bytes, ordinal, true);
+        }
+    }
+
+    [Fact]
     public async Task ProjectedRentOrdinalFailuresReturnPriorRents()
     {
         var bytes = ParquetFixtureBuilder.CreateRequiredInt32Columns(

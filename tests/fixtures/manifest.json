@@ -6,7 +6,7 @@
       "origin": "Original test generator in this repository",
       "license": "MIT",
       "generator": "tests/Lokad.Parquet.Tests/ParquetFixtureBuilder.cs",
-      "generatorSha256": "b78e9dedfe13fff3f089d23b68651e329a9d3592dbe62d02decf9eb24de8ee1c",
+      "generatorSha256": "db7c01e687fbfb0c88b54b94e7ad1fed2c43d010023f24ae958a728284de9f16",
       "generation": "Fixtures are generated in memory by individual tests; no binary input is committed.",
       "committedBinary": false
     },

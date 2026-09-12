@@ -264,6 +264,8 @@ public sealed class SafetyPolicyTests
                 "independent fixture writer shared across the test/benchmark boundary",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateRequiredInt32Columns"] =
                 "independent multi-column fixture writer shared across the test/benchmark boundary",
+            ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateNullableInt32Columns"] =
+                "independent nullable multi-column fixture writer for mixed projected batches",
             ["Lokad.Parquet.Tests.ParquetFixtureBuilder.CreateBinaryColumns"] =
                 "independent binary fixture writer shared across the test/benchmark boundary",
             ["Lokad.Parquet.Tests.CompactTestWriter.BinaryField"] =

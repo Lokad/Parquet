@@ -29,6 +29,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
         {
             Retained,
             Transferred,
+            Mixed,
         }
 
         private readonly ParquetFile _file;
@@ -242,6 +243,14 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                         _sourceOffsets[index] = 0;
                         continue;
                     }
+                    // Mixed batches reuse the same per-column predicate as creation:
+                    // offsets are untouched by CreateBatch, so the verdict agrees.
+                    if (sourceBatchDisposition == SourceBatchDisposition.Mixed && CanTransferSourceBatch(index, count))
+                    {
+                        _sourceBatches[index] = null;
+                        _sourceOffsets[index] = 0;
+                        continue;
+                    }
                     _sourceOffsets[index] += count;
                     var source = _sourceBatches[index] ??
                         throw new InvalidOperationException("An aligned source batch is missing.");
@@ -334,6 +343,16 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 return low;
             }
 
+            // One column covers the batch exactly when the batch starts at its
+            // first row and the column holds no more rows. Shared by creation and
+            // the post-creation ownership walk, which sees identical offsets.
+            bool CanTransferSourceBatch(int index, int batchRowCount)
+            {
+                var source = _sourceBatches[index] ??
+                    throw new InvalidOperationException("An aligned source batch is missing.");
+                return _sourceOffsets[index] == 0 && source.RowCount == batchRowCount;
+            }
+
             ParquetBatch CreateBatch(
             long rowOffset,
             int rowGroupOrdinal,
@@ -371,12 +390,22 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 var ownerStore = new IDisposable[_sourceBatches.Length * 3];
                 var ownerCount = 0;
                 var columns = new ParquetColumnBatch[_sourceBatches.Length];
+                var transferredAny = false;
                 try
                 {
                     for (var index = 0; index < columns.Length; index++)
                     {
                         var source = _sourceBatches[index] ??
                             throw new InvalidOperationException("An aligned source batch is missing.");
+                        if (CanTransferSourceBatch(index, rowCount))
+                        {
+                            // This column already covers the batch exactly: move its
+                            // storage into the public batch instead of copying it.
+                            columns[index] = source.Column;
+                            ownerStore[ownerCount++] = source;
+                            transferredAny = true;
+                            continue;
+                        }
                         columns[index] = CopyColumn(
                             source.Column,
                             _sourceOffsets[index],
@@ -385,6 +414,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                             ownerStore,
                             ref ownerCount);
                     }
+                    if (transferredAny)
+                        sourceBatchDisposition = SourceBatchDisposition.Mixed;
                     return new ParquetBatch(
                         rowOffset,
                         rowGroupOrdinal,

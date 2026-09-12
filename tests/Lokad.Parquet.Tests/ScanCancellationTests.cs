@@ -117,10 +117,10 @@ public sealed class ScanCancellationTests
     [Fact]
     public async Task CancelledProjectedCopyDoesNotYieldBatch()
     {
-        // Uneven pages force projected copies (never transfers) of two rows. The int[2]
-        // rents on this path are the second cursor emission and then the two projected
-        // copies, so cancelling on the third lands inside the last copy, after every
-        // earlier check on that path, and only the pre-publication boundary observes it.
+        // Uneven pages force a mixed projected batch of two rows: the six-row
+        // column copies while the two-row page transfers. The int[2] rents are
+        // the cursor emission and then the projected copy, so cancelling on the
+        // second lands inside the copy and only the pre-publication boundary observes it.
         var outstanding = new PoolOutstandingArrays();
         using var cancellation = new CancellationTokenSource();
         var copyRents = 0;
@@ -129,7 +129,7 @@ public sealed class ScanCancellationTests
         {
             outstanding.NoteRent(array);
 
-            if (array is int[] && requested == 2 && ++copyRents == 3)
+            if (array is int[] && requested == 2 && ++copyRents == 2)
             {
                 cancellation.Cancel();
             }
@@ -150,7 +150,7 @@ public sealed class ScanCancellationTests
             await using var scan = file.ScanAsync(options, cancellation.Token).GetAsyncEnumerator();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await scan.MoveNextAsync());
             Assert.True(cancellation.IsCancellationRequested);
-            Assert.Equal(3, copyRents);
+            Assert.Equal(2, copyRents);
         }
         finally
         {
@@ -181,9 +181,9 @@ public sealed class ScanCancellationTests
     [Fact]
     public async Task FileDisposalDuringProjectedCopySurfacesObjectDisposed()
     {
-        // Disposing the file from inside the last projected copy rent means the
-        // resulting cancellation surfaces after every earlier check on that path.
-        // It must surface as a file-disposal error rather than a user cancellation.
+        // Mixed batches copy the six-row column while the two-row page transfers, so
+        // disposing the file from inside that copy rent surfaces after every earlier
+        // check; it must surface as a file-disposal error, not a user cancellation.
         var outstanding = new PoolOutstandingArrays();
         var copyRents = 0;
         ParquetFile? file = null;
@@ -193,7 +193,7 @@ public sealed class ScanCancellationTests
         {
             outstanding.NoteRent(array);
 
-            if (array is int[] && requested == 2 && ++copyRents == 3 && file is not null)
+            if (array is int[] && requested == 2 && ++copyRents == 2 && file is not null)
             {
                 disposeTask = file.DisposeAsync().AsTask();
             }
@@ -214,7 +214,7 @@ public sealed class ScanCancellationTests
             await using var scan = file.ScanAsync(options).GetAsyncEnumerator();
             ObjectDisposedException failure = await Assert.ThrowsAsync<ObjectDisposedException>(async () => await scan.MoveNextAsync());
             Assert.Contains("ParquetFile", failure.ObjectName ?? string.Empty, StringComparison.Ordinal);
-            Assert.Equal(3, copyRents);
+            Assert.Equal(2, copyRents);
             await disposeTask;
             await file.DisposeAsync();
         }

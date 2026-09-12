@@ -117,8 +117,18 @@ internal sealed class FixtureBinaryColumn
     public required string Name { get; init; }
     public required int PhysicalTypeCode { get; init; }
     public int? TypeLength { get; init; }
-    public required Array PhysicalValues { get; init; }
+    public Array? PhysicalValues { get; init; }
+    // Per-page value payloads for multi-page chunks; exactly one of
+    // PhysicalValues and Pages carries the rows.
+    public byte[][][]? Pages { get; init; }
     public ParquetCompressionCodec FooterCodec { get; init; } = ParquetCompressionCodec.Uncompressed;
+}
+
+internal sealed class NullableInt32FixtureColumn
+{
+    public required string Name { get; init; }
+    public required int[][] Pages { get; init; }
+    public required bool[][] ValidityPages { get; init; }
 }
 
 internal sealed class FixtureRowGroupFooter
@@ -426,37 +436,168 @@ internal static class ParquetFixtureBuilder
         return CompleteFile(file, footer);
     }
 
+    public static byte[] CreateNullableInt32Columns(NullableInt32FixtureColumn[] columns)
+    {
+        if (columns.Length == 0)
+            throw new ArgumentException("A generated fixture needs at least one column.", nameof(columns));
+        var rowCount = columns[0].Pages.Sum(static page => page.Length);
+        if (columns.Any(column => column.Pages.Length == 0 ||
+                column.Pages.Sum(static page => page.Length) != rowCount))
+            throw new ArgumentException("Every generated column needs pages with the same aggregate row count.", nameof(columns));
+        if (columns.Any(static column => column.ValidityPages.Length != column.Pages.Length))
+            throw new ArgumentException("Every generated column needs validity for each page.", nameof(columns));
+        for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
+        {
+            for (var pageIndex = 0; pageIndex < columns[columnIndex].Pages.Length; pageIndex++)
+            {
+                if (columns[columnIndex].ValidityPages[pageIndex].Length != columns[columnIndex].Pages[pageIndex].Length)
+                    throw new ArgumentException("Every generated page needs one validity bit per value.", nameof(columns));
+            }
+        }
+
+        var chunks = new byte[columns.Length][];
+        for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
+        {
+            using var chunk = new MemoryStream();
+            for (var pageIndex = 0; pageIndex < columns[columnIndex].Pages.Length; pageIndex++)
+            {
+                var page = CreateInt32Page(
+                    columns[columnIndex].Pages[pageIndex],
+                    (int)ParquetPhysicalType.Int32,
+                    null,
+                    ParquetRepetition.Optional,
+                    columns[columnIndex].ValidityPages[pageIndex],
+                    FixturePageVersion.DataPageV1,
+                    null,
+                    null,
+                    FixtureDictionaryMode.BeforeDataPage,
+                    false,
+                    false,
+                    null,
+                    false,
+                    false,
+                    ParquetCompressionCodec.Uncompressed,
+                    FixtureCrcMode.Valid,
+                    null);
+                chunk.Write(page.Bytes);
+            }
+
+            chunks[columnIndex] = chunk.ToArray();
+        }
+
+        using var file = new MemoryStream();
+        file.Write(Magic);
+        var chunkOffsets = new long[chunks.Length];
+        for (var columnIndex = 0; columnIndex < chunks.Length; columnIndex++)
+        {
+            chunkOffsets[columnIndex] = file.Position;
+            file.Write(chunks[columnIndex]);
+        }
+
+        var footer = new CompactTestWriter();
+        short previous = 0;
+        footer.Int32Field(ref previous, 1, 1);
+        footer.ListField(ref previous, 2, CompactTestType.Struct, columns.Length + 1, () =>
+        {
+            short root = 0;
+            footer.StringField(ref root, 4, "schema");
+            footer.Int32Field(ref root, 5, columns.Length);
+            footer.Stop();
+            foreach (var column in columns)
+            {
+                short leaf = 0;
+                footer.Int32Field(ref leaf, 1, (int)ParquetPhysicalType.Int32);
+                footer.Int32Field(ref leaf, 3, (int)ParquetRepetition.Optional);
+                footer.StringField(ref leaf, 4, column.Name);
+                footer.Stop();
+            }
+        });
+        footer.Int64Field(ref previous, 3, rowCount);
+        footer.ListField(ref previous, 4, CompactTestType.Struct, 1, () =>
+        {
+            short rowGroup = 0;
+            footer.ListField(ref rowGroup, 1, CompactTestType.Struct, columns.Length, () =>
+            {
+                for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
+                {
+                    short chunk = 0;
+                    footer.Int64Field(ref chunk, 2, chunkOffsets[columnIndex]);
+                    footer.StructField(ref chunk, 3, () =>
+                    {
+                        short metadata = 0;
+                        footer.Int32Field(ref metadata, 1, (int)ParquetPhysicalType.Int32);
+                        footer.Int32ListField(ref metadata, 2, [(int)ParquetEncoding.Plain]);
+                        footer.StringListField(ref metadata, 3, [columns[columnIndex].Name]);
+                        footer.Int32Field(ref metadata, 4, (int)ParquetCompressionCodec.Uncompressed);
+                        footer.Int64Field(ref metadata, 5, rowCount);
+                        footer.Int64Field(ref metadata, 6, chunks[columnIndex].Length);
+                        footer.Int64Field(ref metadata, 7, chunks[columnIndex].Length);
+                        footer.Int64Field(ref metadata, 9, chunkOffsets[columnIndex]);
+                        footer.Stop();
+                    });
+                    footer.Stop();
+                }
+            });
+            footer.Int64Field(ref rowGroup, 2, chunks.Sum(static chunk => (long)chunk.Length));
+            footer.Int64Field(ref rowGroup, 3, rowCount);
+            footer.Int64Field(ref rowGroup, 6, chunks.Sum(static chunk => (long)chunk.Length));
+            footer.Stop();
+        });
+        footer.Stop();
+        return CompleteFile(file, footer);
+    }
+
     public static byte[] CreateBinaryColumns(FixtureBinaryColumn[] columns)
     {
         if (columns.Length == 0)
             throw new ArgumentException("A generated fixture needs at least one column.", nameof(columns));
-        var rowCount = columns[0].PhysicalValues.Length;
-        if (columns.Any(column => column.PhysicalValues.Length != rowCount))
+        static int BinaryRowCount(FixtureBinaryColumn column)
+        {
+            if (column.Pages is not null)
+            {
+                if (column.PhysicalValues is not null)
+                    throw new ArgumentException("A generated binary column takes values or pages, not both.", nameof(columns));
+                return column.Pages.Sum(static page => page.Length);
+            }
+            if (column.PhysicalValues is not null)
+                return column.PhysicalValues.Length;
+            throw new ArgumentException("A generated binary column needs values or pages.", nameof(columns));
+        }
+
+        var rowCount = BinaryRowCount(columns[0]);
+        if (columns.Any(column => BinaryRowCount(column) != rowCount))
             throw new ArgumentException("Every generated column needs the same row count.", nameof(columns));
 
         var chunks = new byte[columns.Length][];
         for (var columnIndex = 0; columnIndex < columns.Length; columnIndex++)
         {
             var column = columns[columnIndex];
-            var page = CreateInt32Page(
-                column.PhysicalValues,
-                column.PhysicalTypeCode,
-                column.TypeLength,
-                ParquetRepetition.Required,
-                null,
-                FixturePageVersion.DataPageV1,
-                null,
-                null,
-                FixtureDictionaryMode.BeforeDataPage,
-                false,
-                false,
-                null,
-                false,
-                false,
-                ParquetCompressionCodec.Uncompressed,
-                FixtureCrcMode.Absent,
-                null);
-            chunks[columnIndex] = page.Bytes;
+            Array[] pages = column.Pages is null ? [column.PhysicalValues ?? throw new ArgumentException("A generated binary column needs values or pages.", nameof(columns))] : column.Pages;
+            using var chunk = new MemoryStream();
+            foreach (Array pageValues in pages)
+            {
+                var page = CreateInt32Page(
+                    pageValues,
+                    column.PhysicalTypeCode,
+                    column.TypeLength,
+                    ParquetRepetition.Required,
+                    null,
+                    FixturePageVersion.DataPageV1,
+                    null,
+                    null,
+                    FixtureDictionaryMode.BeforeDataPage,
+                    false,
+                    false,
+                    null,
+                    false,
+                    false,
+                    ParquetCompressionCodec.Uncompressed,
+                    FixtureCrcMode.Absent,
+                    null);
+                chunk.Write(page.Bytes);
+            }
+
+            chunks[columnIndex] = chunk.ToArray();
         }
 
         using var file = new MemoryStream();
