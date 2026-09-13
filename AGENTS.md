@@ -44,3 +44,7 @@ NuGet packages must be produced in `Release` and are written to
 Benchmarks must also run in `Release`; use `./bench.ps1` rather than a Debug
 invocation. Qualification is single-logical-processor. Linux evidence must be
 built and run from a native Linux filesystem, never a Windows-backed WSL path.
+
+## CI
+
+Anonymous GitHub API calls are capped at 60/hour: space CI status checks minutes apart, never poll in a tight loop.
