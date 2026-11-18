@@ -317,24 +317,33 @@ public sealed class ParquetWriterTests
         var decompress = RequireMethod(decoder, "Decompress").CreateDelegate<Decompress>();
         var positions = new int[Assert.IsType<int>(encoder.GetField("HashEntries", BindingFlags.Public | BindingFlags.Static)?.GetRawConstantValue())];
         var random = new Random(11);
-        foreach (var size in new[] { 0, 1, 59, 60, 61, 255, 256, 257, 65_535, 65_536, 262_144 })
+        foreach (var size in new[] { 0, 1, 3, 4, 5, 32, 33, 59, 60, 61, 255, 256, 257, 65_535, 65_536, 262_144 })
         {
             var input = new byte[size];
-            var compressed = new byte[maximumLength(size)];
-            var actual = new byte[size];
             random.NextBytes(input);
-            var length = compress(input, compressed, positions, default);
+            var length = RoundTrip(input);
             if (size > 0)
                 Assert.True(length > size);
-            decompress(compressed.AsSpan(0, length), actual, default);
-            Assert.Equal(input, actual);
 
             Array.Fill(input, (byte)0xAB);
-            length = compress(input, compressed, positions, default);
+            length = RoundTrip(input);
             if (size >= 59)
                 Assert.True(length < size);
+        }
+
+        // After the first copy of "abcd", the next four-byte match starts
+        // at the final "d" of that copy, so that window must be indexed.
+        var adjacentMatches = "abcd!wabcdxyz?dxyz#"u8;
+        Assert.InRange(RoundTrip(adjacentMatches), 1, adjacentMatches.Length);
+
+        int RoundTrip(ReadOnlySpan<byte> input)
+        {
+            var compressed = new byte[maximumLength(input.Length)];
+            var actual = new byte[input.Length];
+            var length = compress(input, compressed, positions, default);
             decompress(compressed.AsSpan(0, length), actual, default);
-            Assert.Equal(input, actual);
+            Assert.True(input.SequenceEqual(actual));
+            return length;
         }
 
         static MethodInfo RequireMethod(Type type, string name) =>
