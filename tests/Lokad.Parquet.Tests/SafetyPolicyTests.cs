@@ -220,6 +220,8 @@ public sealed class SafetyPolicyTests
                 "benchmark workspace qualification entry point",
             ["Lokad.Parquet.ParquetErrorLocation.AtRowGroup"] =
                 "row-group error scope with a single row-group-level use",
+            ["Lokad.Parquet.ParquetErrorLocation.AtColumn"] =
+                "column error scope shared by projection validation and exception-location coverage",
             ["Lokad.Parquet.ParquetErrorLocation.AtRowGroupColumnPage"] =
                 "offset-less page error scope with a single batch-limit use",
             ["Lokad.Parquet.Internal.RleBitPackedHybridDecoder.DecodeBitWidthOneToBitmap"] =

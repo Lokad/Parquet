@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Lokad.Parquet.Internal;
 
 namespace Lokad.Parquet;
 
@@ -7,33 +8,6 @@ internal sealed class BatchLifetime
     public bool IsDisposed { get; private set; }
     public void Dispose() => IsDisposed = true;
     public void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(IsDisposed, typeof(ParquetBatch));
-}
-
-// Shared owner-release policy for batch disposal: every owner is released and the
-// first failure is preserved for the caller to rethrow.
-internal static class BatchOwnerDisposal
-{
-    internal static void DisposeAll(IDisposable[] owners)
-    {
-        Exception? failure = null;
-        foreach (var owner in owners)
-        {
-            try
-            {
-                owner.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
-        }
-
-        if (failure is not null)
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-    }
 }
 
 internal sealed class DecodedColumnBatch : IDisposable
@@ -74,7 +48,7 @@ internal sealed class DecodedColumnBatch : IDisposable
         if (Lifetime.IsDisposed)
             return;
         Lifetime.Dispose();
-        BatchOwnerDisposal.DisposeAll(Owners);
+        OwnerDisposal.DisposeAll(Owners);
     }
 }
 
@@ -291,6 +265,6 @@ public sealed class ParquetBatch : IDisposable
         if (_lifetime.IsDisposed)
             return;
         _lifetime.Dispose();
-        BatchOwnerDisposal.DisposeAll(_owners);
+        OwnerDisposal.DisposeAll(_owners);
     }
 }

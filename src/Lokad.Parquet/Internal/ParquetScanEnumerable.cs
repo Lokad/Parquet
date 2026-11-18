@@ -29,32 +29,15 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 throw new ArgumentException("At least one column must be projected.", "options");
             if (_options.Columns.Count != 1)
                 throw new ParquetUnsupportedFeatureException("This scan path currently supports one projected column.");
-            var selected = _options.Columns[0];
-            var columnOrdinal = selected.Ordinal;
-            if ((uint)columnOrdinal >= (uint)_file.Metadata.Schema.Columns.Count)
-                throw new ArgumentOutOfRangeException("options", "A projected column ordinal is outside the schema.");
-            var column = _file.Metadata.Schema.Columns[columnOrdinal];
-            if (!ReferenceEquals(selected, column))
-                throw new ArgumentException("A projected column descriptor belongs to another file.", "options");
-            if (!column.IsReadable)
-                throw new ParquetUnsupportedFeatureException(
-                    column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(column.Ordinal));
+            var column = ValidateProjectedColumn(_file, _options.Columns[0]);
             ValidateTargetBatchRowCount(_file, _options);
             var rowGroups = BuildRowGroups(_file, _options);
-            // Same upfront policy as the projected coordinator: metadata-known
-            // chunk failures surface here, before any rows or payload reads.
-            PreflightSelectedChunks(_file, rowGroups, [columnOrdinal]);
+            PreflightSelectedChunks(_file, rowGroups, [column.Ordinal]);
             return new ScanPlan(column, rowGroups);
         }
 
         var plan = BuildPlan();
-        // Scan state initializes once per file ahead of cursor creation; rejected
-        // requests above leave no scan side effects behind.
-        _file.EnsureScanState();
-        // The single lane is acquired before idle caches are evicted, so a rejected
-        // overlapping request leaves no cache side effects behind.
-        // Services carry only the file and options; the budget and caches derive from
-        // the file so the two can never disagree.
+        // Register before evicting idle caches so a rejected overlap leaves them alone.
         var cursor = new ColumnCursor(
             new ScanCursorServices(_file, _options),
             plan.Column,
@@ -138,37 +121,52 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
         return plans;
     }
 
-    // Metadata-only support check for one selected column chunk: external and
-    // encrypted chunks plus codecs outside uncompressed/Snappy are rejected.
-    // No payload is read; corruption discovered during decoding still surfaces
-    // mid-scan with page identity.
-    internal static void PreflightChunk(ParquetFile file, ParquetRowGroup rowGroup, int columnOrdinal)
+    internal static ParquetColumn ValidateProjectedColumn(ParquetFile file, ParquetColumn selected)
     {
-        var chunk = rowGroup.Columns[columnOrdinal];
-        if (chunk.ExternalFilePath is not null)
+        var ordinal = selected.Ordinal;
+        var schema = file.Metadata.Schema.Columns;
+        if ((uint)ordinal >= (uint)schema.Count)
+            throw new ArgumentOutOfRangeException("options", "A projected column ordinal is outside the schema.");
+        var column = schema[ordinal];
+        if (!ReferenceEquals(selected, column))
+            throw new ArgumentException("A projected column descriptor belongs to another file.", "options");
+        if (!column.IsReadable)
             throw new ParquetUnsupportedFeatureException(
-                "External column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(rowGroup.Ordinal, columnOrdinal));
-        if (chunk.HasCryptoMetadata || chunk.HasEncryptedMetadata || file.Metadata.IsEncrypted)
-            throw new ParquetUnsupportedFeatureException(
-                "Encrypted column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(rowGroup.Ordinal, columnOrdinal));
-        if (chunk.CompressionCodec is not ParquetCompressionCodec.Uncompressed and not ParquetCompressionCodec.Snappy)
-            throw new ParquetUnsupportedFeatureException(
-                "This scan path currently requires an uncompressed or Snappy column chunk.", ParquetErrorLocation.AtRowGroupColumn(rowGroup.Ordinal, columnOrdinal));
+                column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(ordinal));
+        return column;
     }
 
-    // Runs once at enumeration start, before any cursor, registration, or cache
-    // work: the projected coordinator calls it from its enumerator constructor
-    // and the single-column plan calls it from BuildPlan. Only selected chunks
-    // of selected row groups are checked, so excluded groups, empty selections,
-    // and unselected columns never fail here.
-    internal static void PreflightSelectedChunks(ParquetFile file, ScanRowGroup[] rowGroups, int[] ordinalsInProjectionOrder)
+    // Reject unsupported selected chunks before registering the scan or reading payloads.
+    internal static void PreflightSelectedChunks(ParquetFile file, ScanRowGroup[] rowGroups, ReadOnlySpan<int> ordinalsInProjectionOrder)
     {
         foreach (var plan in rowGroups)
         {
             if (plan.Count == 0)
                 continue;
             foreach (var ordinal in ordinalsInProjectionOrder)
-                PreflightChunk(file, plan.RowGroup, ordinal);
+            {
+                var chunk = plan.RowGroup.Columns[ordinal];
+                if (chunk.ExternalFilePath is not null)
+                    throw new ParquetUnsupportedFeatureException(
+                        "External column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(plan.RowGroup.Ordinal, ordinal));
+                if (chunk.HasCryptoMetadata || chunk.HasEncryptedMetadata || file.Metadata.IsEncrypted)
+                    throw new ParquetUnsupportedFeatureException(
+                        "Encrypted column chunks are unsupported.", ParquetErrorLocation.AtRowGroupColumn(plan.RowGroup.Ordinal, ordinal));
+                if (chunk.CompressionCodec is not ParquetCompressionCodec.Uncompressed and not ParquetCompressionCodec.Snappy)
+                    throw new ParquetUnsupportedFeatureException(
+                        "This scan path currently requires an uncompressed or Snappy column chunk.", ParquetErrorLocation.AtRowGroupColumn(plan.RowGroup.Ordinal, ordinal));
+            }
+        }
+    }
+
+    internal static void CopyBinaryOffsets(ReadOnlySpan<int> source, Span<int> destination, CancellationToken cancellationToken)
+    {
+        var baseOffset = source[0];
+        for (var index = 0; index < source.Length; index++)
+        {
+            if ((index & 1023) == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+            destination[index] = source[index] - baseOffset;
         }
     }
 
@@ -211,7 +209,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
     }
 
     // Concrete internal cursor: disposal is synchronous, so coordinators release it directly without blocking fallback waits.
-    internal sealed class ColumnCursor
+    internal sealed class ColumnCursor : IDisposable
     {
         // One explicit checked page plan per page: PreflightPageHeader validates the
         // header once and records the classification, so post-payload dispatch consumes
@@ -279,14 +277,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             void OnFileDisposed()
             {
                 _fileDisposed = true;
-                _terminated = true;
-                Exception? failure = null;
-                try { DisposePage(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-                try { _dictionaryDecoder.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-                try { _linkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-                try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-                if (failure is not null)
-                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+                Terminate(fileDisposing: true);
             }
 
             _file = services.File;
@@ -374,7 +365,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
 
                         if (!MoveToNextRowGroup())
                         {
-                            Terminate();
+                            Terminate(fileDisposing: false);
                             return false;
                         }
                     }
@@ -386,13 +377,13 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             {
                 // Best-effort termination preserves the primary cancellation for
                 // conversion into a file-disposal error below.
-                try { Terminate(); } catch (Exception) { }
+                try { Terminate(fileDisposing: false); } catch (Exception) { }
                 throw new ObjectDisposedException(nameof(ParquetFile));
             }
             catch
             {
                 // Best-effort termination preserves the primary scan error.
-                try { Terminate(); } catch (Exception) { }
+                try { Terminate(fileDisposing: false); } catch (Exception) { }
                 throw;
             }
             finally
@@ -409,7 +400,6 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     _plan = _rowGroups[_planIndex];
                     if (_plan.Count == 0)
                         continue;
-                    PreflightChunk(_file, _plan.RowGroup, _column.Ordinal);
                     var chunk = _plan.RowGroup.Columns[_column.Ordinal];
 
                     _pageOffset = chunk.DictionaryPageOffset.HasValue
@@ -1011,8 +1001,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                     payload = payloadLength == 0
                         ? null
                         : PooledArrayOwner<byte>.Rent(payloadLength, _memoryBudget);
-                    for (var i = 0; i <= count; i++)
-                        offsets.Memory.Span[i] = sourceOffsets[sourceIndex + i] - baseOffset;
+                    CopyBinaryOffsets(sourceOffsets.Slice(sourceIndex, count + 1), offsets.Memory.Span, _cancellationToken);
                     if (payload is not null)
                         (_pageBinaryPayload ??
                             throw new InvalidOperationException("A decoded BYTE_ARRAY page has no payload."))
@@ -1988,7 +1977,7 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             if (!_disposed)
             {
                 _disposed = true;
-                Terminate();
+                Terminate(fileDisposing: false);
             }
         }
 
@@ -1998,11 +1987,11 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
             try { _pagePayloadLease.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             try { _pageValues.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             try { _pageValidity.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-            try { _pageBinaryOffsets?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            OwnerDisposal.Dispose(_pageBinaryOffsets, ref failure);
             _pageBinaryOffsets = null;
-            try { _pageBinaryPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            OwnerDisposal.Dispose(_pageBinaryPayload, ref failure);
             _pageBinaryPayload = null;
-            try { _pageFixedPayload?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            OwnerDisposal.Dispose(_pageFixedPayload, ref failure);
             _pageFixedPayload = null;
             _pageFixedWidth = 0;
             _pagePayloadSliceRows = 0;
@@ -2012,26 +2001,22 @@ internal sealed class ParquetScanEnumerable : IAsyncEnumerable<ParquetBatch>
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
 
-        // Teardown exception policy. Standalone teardown releases every owned resource,
-        // preserves the first cleanup failure, and always releases scan registration.
-        // Rollback while another error is already in flight is best-effort exhaustive
-        // and preserves that primary error instead of masking it with teardown diagnostics.
-        private void Terminate()
+        private void Terminate(bool fileDisposing)
         {
-            if (_terminated)
+            if (_terminated && !fileDisposing)
                 return;
             _terminated = true;
             Exception? failure = null;
-            try { DisposePage(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-            try { _dictionaryDecoder.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-            // Unregistration belongs to the single termination.
-            if (_lifetimeOwnership == ScanLifetimeOwnership.Enumerator)
+            try { DisposePage(); } catch (Exception exception) { failure = exception; }
+            OwnerDisposal.Dispose(_dictionaryDecoder, ref failure);
+            // File disposal clears the registration before invoking this callback.
+            if (!fileDisposing && _lifetimeOwnership == ScanLifetimeOwnership.Enumerator)
             {
                 try { _file.UnregisterScan(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
             }
 
-            try { _linkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-            try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            OwnerDisposal.Dispose(_linkedCancellation, ref failure);
+            OwnerDisposal.Dispose(_userLinkedCancellation, ref failure);
             if (failure is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }

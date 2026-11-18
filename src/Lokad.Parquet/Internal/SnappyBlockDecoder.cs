@@ -70,31 +70,19 @@ internal static class SnappyBlockDecoder
             cancellationToken.ThrowIfCancellationRequested();
             if (distance == 1)
             {
-                // A distance-one copy repeats a single byte: one fill replaces
-                // the whole per-byte loop.
                 destination.Slice(outputOffset, length).Fill(destination[outputOffset - 1]);
             }
             else if (distance >= length)
             {
-                // Non-overlapping copies move in one block.
                 destination.Slice(outputOffset - distance, length).CopyTo(destination.Slice(outputOffset, length));
             }
             else
             {
-                // Overlapping copies double the reproduced prefix, so every
-                // block copy reads only already-written bytes and stays
-                // overlap-safe. Chunks are capped so cancellation is observed
-                // at the same 4 KiB granularity as the retired byte loop.
+                // Copy only bytes already produced. A copy tag emits at most 64 bytes.
                 var produced = 0;
                 while (produced < length)
                 {
-                    if (produced != 0)
-                        cancellationToken.ThrowIfCancellationRequested();
-                    var chunk = distance + produced;
-                    if (chunk > length - produced)
-                        chunk = length - produced;
-                    if (chunk > 4096)
-                        chunk = 4096;
+                    var chunk = Math.Min(distance + produced, length - produced);
                     destination.Slice(outputOffset - distance, chunk).CopyTo(destination.Slice(outputOffset + produced, chunk));
                     produced += chunk;
                 }

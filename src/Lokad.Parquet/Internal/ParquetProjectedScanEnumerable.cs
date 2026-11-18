@@ -58,7 +58,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 var ordinals = new int[options.Columns.Count];
                 if (ordinals.Length < 2)
                     throw new InvalidOperationException("The projected scan coordinator requires at least two columns.");
-                // Linear duplicate detection for wide projections; the nested loop keeps small projections allocation-free.
+                // Use a set for wide projections and reuse the ordinal array for small ones.
                 HashSet<int>? seen = ordinals.Length > 16 ? new HashSet<int>(ordinals.Length) : null;
                 for (var index = 0; index < ordinals.Length; index++)
                 {
@@ -78,14 +78,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                                 throw new ArgumentException("Duplicate projected columns are not permitted.", nameof(options));
                         }
                     }
-                    if ((uint)ordinal >= (uint)file.Metadata.Schema.Columns.Count)
-                        throw new ArgumentOutOfRangeException(nameof(options), "A projected column ordinal is outside the schema.");
-                    var column = file.Metadata.Schema.Columns[ordinal];
-                    if (!ReferenceEquals(selected, column))
-                        throw new ArgumentException("A projected column descriptor belongs to another file.", nameof(options));
-                    if (!column.IsReadable)
-                        throw new ParquetUnsupportedFeatureException(
-                            column.UnsupportedReason ?? "The projected column is unsupported.", ParquetErrorLocation.AtColumn(ordinal));
+                    ParquetScanEnumerable.ValidateProjectedColumn(file, selected);
                 }
                 return ordinals;
             }
@@ -98,9 +91,6 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             _sourceOffsets = new int[ordinals.Length];
             var selectedRowGroups = ParquetScanEnumerable.BuildRowGroups(file, options);
             ParquetScanEnumerable.PreflightSelectedChunks(file, selectedRowGroups, ordinals);
-            // Scan state initializes once per file ahead of cursor creation; rejected
-            // requests above leave no scan side effects behind.
-            file.EnsureScanState();
             _memoryBudget = file.ScanMemoryBudget;
             _pagePayloadCache = file.PagePayloadCache;
             try
@@ -135,8 +125,7 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 throw;
             }
 
-            // The single lane is acquired before idle caches are evicted, so a rejected
-            // overlapping request leaves no cache side effects behind.
+            // Register before evicting idle caches so a rejected overlap leaves them alone.
             try
             {
                 file.EvictIdleColumnCaches(ordinals);
@@ -508,13 +497,8 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
                 var payloadLength = sourceOffsets[sourceOffset + rowCount] - baseOffset;
                 var offsets = PooledArrayOwner<int>.Rent(checked(rowCount + 1), _memoryBudget);
                 ownerStore[ownerCount++] = offsets;
-                _cancellationToken.ThrowIfCancellationRequested();
-                for (var index = 0; index <= rowCount; index++)
-                {
-                    if ((index & 1023) == 0)
-                        _cancellationToken.ThrowIfCancellationRequested();
-                    offsets.Memory.Span[index] = sourceOffsets[sourceOffset + index] - baseOffset;
-                }
+                ParquetScanEnumerable.CopyBinaryOffsets(
+                    sourceOffsets.Slice(sourceOffset, rowCount + 1), offsets.Memory.Span, _cancellationToken);
 
                 ReadOnlyMemory<byte> payloadMemory = ReadOnlyMemory<byte>.Empty;
                 if (payloadLength != 0)
@@ -598,13 +582,9 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             return ValueTask.CompletedTask;
         }
 
-        // Teardown exception policy. The terminating scan always releases its registration,
-        // even when its cleanup throws; a late disposal must not clear a newer scan. The first
-        // cleanup failure is preserved. Rollback while another error is already in flight is
-        // best-effort exhaustive and preserves that primary error instead of masking it.
+        // Only the first termination owns the registration. A later disposal may see a new scan.
         private void TerminateAndUnregister()
         {
-            // Unregistration belongs to the scan that terminates first; a late disposal must not clear a newer scan.
             Exception? failure = null;
             var terminates = true;
             try
@@ -635,37 +615,14 @@ internal sealed class ParquetProjectedScanEnumerable : IAsyncEnumerable<ParquetB
             Exception? failure = null;
             for (var index = 0; index < _sourceBatches.Length; index++)
             {
-                try
-                {
-                    _sourceBatches[index]?.Dispose();
-                }
-                catch (Exception exception) when (failure is null)
-                {
-                    failure = exception;
-                }
-                catch (Exception)
-                {
-                }
-
+                OwnerDisposal.Dispose(_sourceBatches[index], ref failure);
                 _sourceBatches[index] = null;
             }
             foreach (var enumerator in _enumerators)
-            {
-                try
-                {
-                    enumerator.Dispose();
-                }
-                catch (Exception exception) when (failure is null)
-                {
-                    failure = exception;
-                }
-                catch (Exception)
-                {
-                }
-            }
+                OwnerDisposal.Dispose(enumerator, ref failure);
 
-            try { _linkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
-            try { _userLinkedCancellation?.Dispose(); } catch (Exception exception) when (failure is null) { failure = exception; } catch (Exception) { }
+            OwnerDisposal.Dispose(_linkedCancellation, ref failure);
+            OwnerDisposal.Dispose(_userLinkedCancellation, ref failure);
             if (failure is not null)
                 System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
 

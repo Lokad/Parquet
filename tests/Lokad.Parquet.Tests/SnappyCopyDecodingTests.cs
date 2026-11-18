@@ -5,6 +5,29 @@ namespace Lokad.Parquet.Tests;
 // must agree with each other and with locally built oracles.
 public sealed class SnappyCopyDecodingTests
 {
+    private delegate void DecodeBlock(ReadOnlySpan<byte> source, Span<byte> destination, CancellationToken token);
+
+    [Theory]
+    [InlineData(0xfe, 2)]
+    [InlineData(0xff, 4)]
+    public void MaximumLengthCopyRepeatsOnlyAnExistingPrefix(int tag, int distanceBytes)
+    {
+        // A two-byte literal followed by a 64-byte back-reference.
+        var block = new byte[5 + distanceBytes];
+        new byte[] { 66, 4, (byte)'a', (byte)'b', (byte)tag }.CopyTo(block, 0);
+        block[5] = 2;
+
+        var decoder = BenchmarkReflection.RequireType(typeof(ParquetFile).Assembly, "Lokad.Parquet.Internal.SnappyBlockDecoder");
+        var decode = BenchmarkReflection.RequireStaticMethod(decoder, "Decompress", null).CreateDelegate<DecodeBlock>();
+        var output = new byte[66];
+        decode(block, output, default);
+        Assert.Equal(string.Concat(Enumerable.Repeat("ab", 33)), System.Text.Encoding.ASCII.GetString(output));
+
+        block[5] = 3;
+        var error = Assert.Throws<ParquetFormatException>(() => decode(block, output, default));
+        Assert.Contains("invalid backward distance", error.Message);
+    }
+
     [Fact]
     public async Task CopyHeavyZerosScan()
     {

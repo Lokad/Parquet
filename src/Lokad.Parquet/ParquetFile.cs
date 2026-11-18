@@ -217,29 +217,7 @@ public sealed class ParquetFile : IAsyncDisposable
         void CompleteSynchronousDisposal(CancellationTokenSource? disposalCancellation)
         {
             Exception? failure = null;
-            try
-            {
-                _pagePayloadCache?.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
-
-            try
-            {
-                DisposeColumnValueCaches();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
+            DisposeScanCaches(ref failure);
 
             if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
             {
@@ -259,17 +237,7 @@ public sealed class ParquetFile : IAsyncDisposable
                 }
             }
 
-            try
-            {
-                disposalCancellation?.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
+            OwnerDisposal.Dispose(disposalCancellation, ref failure);
 
             Task completedTask = failure is null ? Task.CompletedTask : Task.FromException(failure);
 
@@ -329,29 +297,7 @@ public sealed class ParquetFile : IAsyncDisposable
             {
             }
 
-            try
-            {
-                _pagePayloadCache?.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
-
-            try
-            {
-                DisposeColumnValueCaches();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
+            DisposeScanCaches(ref failure);
 
             if (_sourceOwnership == ParquetSourceOwnership.ParquetFile)
             {
@@ -368,17 +314,7 @@ public sealed class ParquetFile : IAsyncDisposable
                 }
             }
 
-            try
-            {
-                disposalCancellation?.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
+            OwnerDisposal.Dispose(disposalCancellation, ref failure);
 
             if (failure is null)
                 completion.TrySetResult();
@@ -431,19 +367,26 @@ public sealed class ParquetFile : IAsyncDisposable
 
     internal IParquetRandomAccessSource Source => _source;
 
-    // Reads the published scan budget, building scan state on first use. Observing
-    // the budget volatile-read also observes the caches built before it, so later
-    // field reads in the same call need no further synchronization.
     private ParquetScanMemoryBudget ObservedScanBudget()
     {
         var budget = _scanMemoryBudget;
-        if (budget is null)
+        if (budget is not null)
+            return budget;
+
+        lock (_lifetimeLock)
         {
-            EnsureScanState();
-            budget = _scanMemoryBudget ??
-                throw new InvalidOperationException("A scan operation requires a registered scan.");
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            budget = _scanMemoryBudget;
+            if (budget is not null)
+                return budget;
+
+            budget = new ParquetScanMemoryBudget(Options.MaximumScanPooledBytes);
+            _pagePayloadCache = new PooledArrayOwnerCache<byte>(budget);
+            _cacheProvider = new ColumnCacheProvider(this);
+            _columnValueCaches = new IColumnValueCache?[Metadata.Schema.Columns.Count];
+            _scanMemoryBudget = budget;
+            return budget;
         }
-        return budget;
     }
 
     internal ParquetScanMemoryBudget ScanMemoryBudget => ObservedScanBudget();
@@ -534,28 +477,14 @@ public sealed class ParquetFile : IAsyncDisposable
         }
     }
 
-    private void DisposeColumnValueCaches()
+    private void DisposeScanCaches(ref Exception? failure)
     {
-        if (_columnValueCaches is null)
-            return;
-        Exception? failure = null;
-        foreach (var cache in _columnValueCaches)
+        OwnerDisposal.Dispose(_pagePayloadCache, ref failure);
+        if (_columnValueCaches is { } caches)
         {
-            try
-            {
-                cache?.Dispose();
-            }
-            catch (Exception exception) when (failure is null)
-            {
-                failure = exception;
-            }
-            catch (Exception)
-            {
-            }
+            foreach (var cache in caches)
+                OwnerDisposal.Dispose(cache, ref failure);
         }
-
-        if (failure is not null)
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
     internal bool IsDisposed
@@ -574,28 +503,7 @@ public sealed class ParquetFile : IAsyncDisposable
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_activeScan is not null)
                 throw new InvalidOperationException("Only one scan may be active on a Parquet file.");
-            EnsureScanState();
             _activeScan = onFileDisposed;
-        }
-    }
-
-    // Scan-only pooled state is built on the first scan setup, under the lifetime
-    // lock: metadata-only opens never pay for it, disposal drains scan operations
-    // before releasing it, and the single lane keeps setup ordered, so rents always
-    // observe it once any lane starts. The lock is reentrant for the RegisterScan call.
-    internal void EnsureScanState()
-    {
-        if (_scanMemoryBudget is not null)
-            return;
-        lock (_lifetimeLock)
-        {
-            if (_scanMemoryBudget is not null)
-                return;
-            var budget = new ParquetScanMemoryBudget(Options.MaximumScanPooledBytes);
-            _pagePayloadCache = new PooledArrayOwnerCache<byte>(budget);
-            _cacheProvider = new ColumnCacheProvider(this);
-            _columnValueCaches = new IColumnValueCache?[Metadata.Schema.Columns.Count];
-            _scanMemoryBudget = budget;
         }
     }
 
