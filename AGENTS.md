@@ -1,14 +1,15 @@
 # Lokad.Parquet
 
-`Lokad.Parquet` is a dependency-free, read-only Parquet library targeting
-`.NET 10`. The implemented Core 0.1 reader covers bounded footer parsing and
+`Lokad.Parquet` is a dependency-free, read-only Parquet library for .NET 10 and
+.NET 11. The implemented Core 0.1 reader covers bounded footer parsing and
 projected scans of flat required/optional physical columns with PLAIN or
 dictionary encoding and UNCOMPRESSED or SNAPPY pages. `SPEC.md` is the exact
 support contract; do not imply full Parquet compatibility.
 
 ## Standard validation
 
-Run commands from the repository root and disable the dynamic terminal logger:
+Use the SDK selected by `global.json` and install the .NET 10 runtime. Run
+commands from the repository root with the dynamic terminal logger disabled.
 
 ```powershell
 dotnet restore Lokad.Parquet.slnx --tl:off -v minimal

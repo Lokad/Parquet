@@ -1,3 +1,10 @@
+<#
+.SYNOPSIS
+Builds and runs the test suite on both target frameworks.
+.DESCRIPTION
+Accepts a build configuration, an optional test filter, and a forced-scalar switch.
+Use -SkipBuild with existing binaries. The script returns the dotnet exit code.
+#>
 param(
     [ValidateSet("Debug", "Release")]
     [string] $Configuration = "Debug",

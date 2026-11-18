@@ -91,8 +91,9 @@ public sealed class BenchmarkIdentityTests
                 continue;
             using (process)
             {
+                var standardOutput = process.StandardOutput.ReadToEndAsync();
+                var standardError = process.StandardError.ReadToEndAsync();
                 var completed = process.WaitForExit(60000);
-                var output = process.StandardOutput.ReadToEnd() + "\n" + process.StandardError.ReadToEnd();
                 if (!completed)
                 {
                     try
@@ -109,6 +110,7 @@ public sealed class BenchmarkIdentityTests
                     throw new InvalidOperationException("The benchmark identity library timed out.");
                 }
 
+                var output = standardOutput.GetAwaiter().GetResult() + "\n" + standardError.GetAwaiter().GetResult();
                 if (process.ExitCode != 0)
                     throw new InvalidOperationException("The benchmark identity library failed:\n" + output);
                 return output;

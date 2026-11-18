@@ -5,7 +5,8 @@ Status: Draft for the 0.1 preview
 ## 1. Purpose
 
 `Lokad.Parquet` is a high-performance, read-only Apache Parquet library for
-.NET 10. It is intended for trusted and untrusted Parquet inputs where column
+.NET 10 and .NET 11. It is intended for trusted and untrusted Parquet inputs
+where column
 projection, bounded memory, low garbage-collector pressure, predictable
 failure behavior, and exact data semantics matter.
 
@@ -37,7 +38,7 @@ for a later preview or stable release and is not a compatibility promise.
 
 ### 2.2 Memory-safe managed implementation and dependencies
 
-- The shipped package MUST depend only on the .NET 10 standard libraries.
+- Each shipped target MUST depend only on its .NET standard libraries.
 - The shipped package MUST NOT use native libraries, P/Invoke, COM, external
   processes, runtime-downloaded codecs, or direct unmanaged heap allocation.
 - Every shipped source file MUST compile with `AllowUnsafeBlocks=false`.
@@ -873,7 +874,8 @@ validation are prohibited.
 
 ## 14. Platforms, packaging, and compatibility
 
-- Target framework: `net10.0`.
+- The Release NuGet package MUST contain `net10.0` and `net11.0` assemblies
+  and XML documentation. The reviewed public API applies to both targets.
 - Core 0.1 release qualification targets Windows x64 and Linux x64.
 - Correctness MUST NOT depend on an optional instruction set.
 - CI MUST exercise scalar execution and every optimized lane present on each

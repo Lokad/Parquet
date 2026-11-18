@@ -1,3 +1,9 @@
+<#
+.SYNOPSIS
+Builds the Release NuGet package and symbols in artifacts/nuget.
+.DESCRIPTION
+Uses the SDK selected by global.json and restores the library before packing both targets.
+#>
 $ErrorActionPreference = "Stop"
 $project = Join-Path $PSScriptRoot "src/Lokad.Parquet/Lokad.Parquet.csproj"
 

@@ -1,7 +1,8 @@
 # Lokad.Parquet
 
 `Lokad.Parquet` is a high-performance, read-only Parquet library for
-`.NET 10`, designed for analytics workloads and a small dependency footprint.
+`.NET 10` and `.NET 11`, designed for analytics workloads and a small
+dependency footprint.
 The shipped reader is restricted to memory-safe managed C#: it has no unsafe
 blocks, pinning, native interop, or APIs that bypass runtime memory safety.
 
@@ -61,7 +62,8 @@ transferred with `ParquetSourceOwnership.ParquetFile`.
 
 ## Build and test
 
-The .NET 10 SDK is required.
+Use the .NET 11 SDK selected by `global.json` and the .NET 10 runtime. The
+Release checks exercise both target frameworks.
 
 ```powershell
 dotnet restore Lokad.Parquet.slnx --tl:off -v minimal

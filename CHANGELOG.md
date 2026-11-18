@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Include `net10.0` and `net11.0` assets in the same dependency-free NuGet package.
+
 ## 0.2.0 - 2026-09-12
 
 ### Fixed

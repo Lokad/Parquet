@@ -26,6 +26,7 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
+          dotnet-version: '10.0.x'
 
       - name: Release test, vector lane
         shell: pwsh
@@ -45,7 +46,7 @@ jobs:
 
       - name: Benchmark truth verification
         shell: pwsh
-        run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --tl:off --no-launch-profile -- --verify-truth
+        run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --framework net10.0 --tl:off --no-launch-profile -- --verify-truth
 
       # Q01: the full census orchestration (every case, retention probe and
       # catalog reconciliation) with one retention repetition and no timing
@@ -66,7 +67,11 @@ jobs:
           $stage = Join-Path ([System.IO.Path]::GetTempPath()) "nupkg-inspect"
           if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
           Expand-Archive -Path $packages[0].FullName -DestinationPath $stage
-          foreach ($required in @("README.md", "CHANGELOG.md", "LICENSE.txt", "icon.png", "lib/net10.0/Lokad.Parquet.dll", "lib/net10.0/Lokad.Parquet.xml")) {
+          $requiredEntries = @("README.md", "CHANGELOG.md", "LICENSE.txt", "icon.png")
+          foreach ($framework in @("net10.0", "net11.0")) {
+            $requiredEntries += "lib/$framework/Lokad.Parquet.dll", "lib/$framework/Lokad.Parquet.xml"
+          }
+          foreach ($required in $requiredEntries) {
             if (-not (Test-Path (Join-Path $stage $required))) { throw "Package is missing $required." }
           }
           [xml]$nuspec = Get-Content (Join-Path $stage "Lokad.Parquet.nuspec")
