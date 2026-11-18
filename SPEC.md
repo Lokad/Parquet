@@ -1,6 +1,6 @@
 # Lokad.Parquet Specification
 
-Status: Draft for the 0.1 preview
+Status: Current preview contract
 
 ## 1. Purpose
 
@@ -11,13 +11,13 @@ failure behavior, and exact data semantics matter.
 
 The library is deliberately narrower than the full Parquet ecosystem. Its
 primary job is to expose selected columns from large, flat Parquet tables as
-typed, column-oriented batches. It also writes the flat, required column
-profile defined in Section 16.
+typed, column-oriented batches. It also writes flat, required columns.
+[Writer support](#16-flat-writer)
 
 The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY in this document describe
-requirements on the implementation. A support table marked **Core 0.1** is a
-requirement for the first public preview. **Expansion** identifies a candidate
-for a later preview or stable release and is not a compatibility promise.
+requirements on the implementation. **Core 0.1** names the reader profile
+introduced in the first preview and supported by the current package.
+**Expansion** identifies candidates for later releases.
 
 ## 2. Design principles
 
@@ -127,9 +127,9 @@ reads. Encrypted-footer magic and modular encryption are unsupported.
 
 ## 4. Release profiles
 
-### 4.1 Core 0.1 preview
+### 4.1 Core 0.1 reader profile
 
-The first preview MUST support:
+The reader MUST support:
 
 - ordinary `PAR1` files with in-file metadata;
 - zero or more row groups;
@@ -168,9 +168,9 @@ expansions include:
 An expansion becomes supported only when its table entry changes in this
 document. Presence in this list is not a schedule or compatibility guarantee.
 
-### 4.3 Explicitly outside the initial contract
+### 4.3 Scope exclusions
 
-- Writing, appending, updating, or repairing Parquet files.
+- Appending, updating, or repairing Parquet files.
 - Nested groups, structs, lists, maps, repeated primitive columns, or any
   column with a maximum repetition level greater than zero.
 - Object serialization or deserialization.
@@ -874,7 +874,7 @@ validation are prohibited.
 
 - The Release NuGet package MUST contain `net10.0` and `net11.0` assemblies
   and XML documentation. The reviewed public API applies to both targets.
-- Core 0.1 release qualification targets Windows x64 and Linux x64.
+- Release correctness qualification targets Windows x64 and Linux x64.
 - Correctness MUST NOT depend on an optional instruction set.
 - CI MUST exercise scalar execution and every optimized lane present on each
   supported platform.

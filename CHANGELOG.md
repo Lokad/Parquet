@@ -1,14 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (unreleased)
 
 ### Added
 
 - Stream flat required BOOLEAN, FLOAT, INT64, UTF-8 STRING, and DATE columns
   to Parquet using PLAIN Data Page V1 and Snappy.
 - Include `net10.0` and `net11.0` assets in the same dependency-free NuGet package.
-
-## 0.2.0 - 2026-09-12
 
 ### Fixed
 
@@ -85,10 +83,9 @@
 - Measure work-census source reads on the exercised async path with per-pass
   peaks, an uneven multi-row-group case, and warmed competitor retention in the
   snapshot.
-- Recompute paired-report point estimates, Student-t intervals, and log ratios
-  from raw timings in `benchmark-report.ps1`, rejecting raw-time, log, bound,
-  identity, and protocol tampering; schema-8 snapshots use a tested
-  Cornish-Fisher Student-t quantile instead of the flat 1.645 fallback.
+- Publish a single Linux read/write comparison. Verify the complete workload
+  catalog and file sizes before rendering, with a separate source and lock
+  fingerprint check against the current checkout.
 - Bind every benchmark worker to one logical processor from an explicit
   affinity handoff, resolve workspace links against the Linux mount table
   instead of /mnt prefixes, and persist host tuning plus output storage in
@@ -117,17 +114,13 @@
   both readers mutually verify.
 - Retain one baseline live-session destination buffer per projected column, selected from
   the field type and nullability, instead of twelve parallel layouts per column.
-- Report paired allocation per session normalized by that session's own operation, row and
-  column counts, with explicit allocation, GC and 3x CPU budget outcomes beside the separate
-  1.05 parity gate; the 6x census pool budget renders as a failing outcome instead of an
-  early rejection, keeping malformed evidence as a hard rejection.
+- Record paired time, allocation, and GC evidence for diagnostic workloads.
 - Define the work-census catalog once with typed consumers, explicit projections, layouts and
-  expected passes; the census run reconciles every measured case against it, the parity catalog
-  exports it, and the report reconciles snapshots against the export while unfamiliar workloads
-  fail instead of defaulting.
+  expected passes. The census checks every measured case against the catalog and rejects
+  unfamiliar workloads.
 - Fingerprint every benchmark build input including the linked fixture builder and committed
-  fixtures, record the census package lock and both-assemblies runner fingerprint, restore
-  locked for qualification, and reconcile all identities in the report.
+  fixtures, record the package lock and runner fingerprints, and restore locked
+  for qualification.
 - Add reusable optional diagnostic paired cases outside the frozen claim, starting with source
   lanes that pair each Lokad source against a Parquet.NET counterpart with truth-checked
   sentinels and per-observation allocation evidence.

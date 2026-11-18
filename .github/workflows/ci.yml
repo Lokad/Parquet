@@ -28,16 +28,27 @@ jobs:
           global-json-file: global.json
           dotnet-version: '10.0.x'
 
+      - name: Restore and build Release
+        id: compile
+        shell: pwsh
+        run: |
+          $packageDirectory = Join-Path $env:RUNNER_TEMP "lokad-parquet-nuget"
+          "package-directory=$packageDirectory" >> $env:GITHUB_OUTPUT
+          dotnet restore Lokad.Parquet.slnx --locked-mode --tl:off -v minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet build Lokad.Parquet.slnx -c Release --tl:off --nologo -v minimal --no-restore "-p:PackageOutputPath=$packageDirectory"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Release test, vector lane
         shell: pwsh
         run: |
-          ./test.ps1 -Configuration Release | Tee-Object -FilePath test-vector.log
+          ./test.ps1 -Configuration Release -SkipBuild | Tee-Object -FilePath test-vector.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Release test, forced-scalar lane
         shell: pwsh
         run: |
-          ./test.ps1 -Configuration Release -ForceScalar | Tee-Object -FilePath test-scalar.log
+          ./test.ps1 -Configuration Release -ForceScalar -SkipBuild | Tee-Object -FilePath test-scalar.log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Format check
@@ -47,39 +58,40 @@ jobs:
       - name: Benchmark truth verification
         if: runner.os == 'Linux'
         shell: pwsh
-        run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --framework net10.0 --tl:off --no-launch-profile -- --verify-truth
+        run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --framework net10.0 --tl:off --no-build --no-launch-profile -- --verify-truth
 
-      # Q01: the full census orchestration (every case, retention probe and
-      # catalog reconciliation) with one retention repetition and no timing
-      # gates; the smoke snapshot lands in temp and never qualifies.
       - name: Census smoke orchestration
         if: runner.os == 'Linux'
         shell: pwsh
-        run: ./bench.ps1 -Suite CensusSmoke
-
-      - name: Package
-        shell: pwsh
-        run: ./pack.ps1
+        run: ./bench.ps1 -Suite CensusSmoke -SkipBuild
 
       - name: Inspect distributable
         shell: pwsh
+        env:
+          PACKAGE_DIRECTORY: ${{ steps.compile.outputs.package-directory }}
         run: |
-          $packages = @(Get-ChildItem -Path "artifacts/nuget/Lokad.Parquet.*.nupkg")
-          if ($packages.Count -eq 0) { throw "No NuGet package was produced." }
-          $stage = Join-Path ([System.IO.Path]::GetTempPath()) "nupkg-inspect"
-          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-          Expand-Archive -Path $packages[0].FullName -DestinationPath $stage
-          $requiredEntries = @("README.md", "CHANGELOG.md", "LICENSE.txt", "icon.png")
-          foreach ($framework in @("net10.0", "net11.0")) {
-            $requiredEntries += "lib/$framework/Lokad.Parquet.dll", "lib/$framework/Lokad.Parquet.xml"
+          function Read-PackageEntry($entry) {
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { $reader.ReadToEnd() }
+            finally { $reader.Dispose() }
           }
-          foreach ($required in $requiredEntries) {
-            if (-not (Test-Path (Join-Path $stage $required))) { throw "Package is missing $required." }
+
+          $packages = @(Get-ChildItem -LiteralPath $env:PACKAGE_DIRECTORY -Filter "Lokad.Parquet.*.nupkg" -File)
+          if ($packages.Count -ne 1) { throw "Expected exactly one package from this build." }
+          $archive = [IO.Compression.ZipFile]::OpenRead($packages[0].FullName)
+          try {
+            $requiredEntries = @("README.md", "CHANGELOG.md", "LICENSE.txt", "icon.png", "Lokad.Parquet.nuspec")
+            foreach ($framework in @("net10.0", "net11.0")) {
+              $requiredEntries += "lib/$framework/Lokad.Parquet.dll", "lib/$framework/Lokad.Parquet.xml"
+            }
+            foreach ($required in $requiredEntries) {
+              if ($null -eq $archive.GetEntry($required)) { throw "Package is missing $required." }
+            }
+            [xml]$nuspec = Read-PackageEntry $archive.GetEntry("Lokad.Parquet.nuspec")
+            if ($nuspec.SelectNodes("//*[local-name()='dependency']").Count -ne 0) { throw "Package gained a third-party dependency." }
+            if ((Read-PackageEntry $archive.GetEntry("README.md")) -match "\]\((SPEC|BENCHMARKS)\.md\)") { throw "Package README has repository-relative links." }
           }
-          [xml]$nuspec = Get-Content (Join-Path $stage "Lokad.Parquet.nuspec")
-          if ($nuspec.SelectNodes("//*[local-name()='dependency']").Count -ne 0) { throw "Package gained a third-party dependency." }
-          if ((Get-Content (Join-Path $stage "README.md") -Raw) -match "\]\((SPEC|BENCHMARKS)\.md\)") { throw "Package README has repository-relative links." }
-          Remove-Item -Recurse -Force $stage
+          finally { $archive.Dispose() }
 
       - name: Publish test logs
         if: always()
@@ -92,4 +104,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.os }}
-          path: artifacts/nuget/*
+          path: ${{ steps.compile.outputs.package-directory }}/*

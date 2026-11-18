@@ -97,12 +97,15 @@ dotnet restore Lokad.Parquet.slnx --tl:off -v minimal
 
 ## Package
 
-Packages are intentionally restricted to `Release` builds and are emitted to
-`artifacts/nuget`:
+Release builds emit the package to `artifacts/nuget`.
 
 ```powershell
 ./pack.ps1
 ```
+
+The bundled changelog describes the packaged changes. Keep the assembly
+version stable across compatible releases. The file version follows the
+numeric package version.
 
 ## Benchmarks
 
