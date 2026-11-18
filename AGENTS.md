@@ -1,10 +1,11 @@
 # Lokad.Parquet
 
-`Lokad.Parquet` is a dependency-free, read-only Parquet library for .NET 10 and
-.NET 11. The implemented Core 0.1 reader covers bounded footer parsing and
+`Lokad.Parquet` is a dependency-free Parquet library targeting .NET 10 and
+.NET 11. The Core 0.1 reader covers bounded footer parsing and
 projected scans of flat required/optional physical columns with PLAIN or
-dictionary encoding and UNCOMPRESSED or SNAPPY pages. `SPEC.md` is the exact
-support contract; do not imply full Parquet compatibility.
+dictionary encoding and UNCOMPRESSED or SNAPPY pages. The writer emits a flat
+required schema with PLAIN Data Page V1 and Snappy. Use `SPEC.md` for the exact
+support contract.
 
 ## Standard validation
 
@@ -25,6 +26,9 @@ coverage, verify cancellation and pool ownership where applicable, preserve
 the reviewed public API snapshot deliberately, and benchmark any changed hot
 path against the pinned baseline. Scalar behavior remains the oracle for any
 optimized path.
+
+For writer changes, run the independent PyArrow check in
+`tests/fixtures/README.md`.
 
 ## Dependencies
 

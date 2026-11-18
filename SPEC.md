@@ -4,17 +4,15 @@ Status: Draft for the 0.1 preview
 
 ## 1. Purpose
 
-`Lokad.Parquet` is a high-performance, read-only Apache Parquet library for
-.NET 10 and .NET 11. It is intended for trusted and untrusted Parquet inputs
-where column
+`Lokad.Parquet` is an Apache Parquet library for .NET 10 and .NET 11.
+It is intended for trusted and untrusted Parquet inputs where column
 projection, bounded memory, low garbage-collector pressure, predictable
 failure behavior, and exact data semantics matter.
 
 The library is deliberately narrower than the full Parquet ecosystem. Its
 primary job is to expose selected columns from large, flat Parquet tables as
-typed, column-oriented batches. It is not a general object serializer, query
-engine, dataframe, compatibility layer for every historical producer, or
-writer.
+typed, column-oriented batches. It also writes the flat, required column
+profile defined in Section 16.
 
 The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY in this document describe
 requirements on the implementation. A support table marked **Core 0.1** is a
@@ -73,7 +71,7 @@ than pointer access.
 ### 2.4 Lean public surface
 
 - Public types MUST describe file access, immutable metadata, projections,
-  scans, batches, options, and errors.
+  scans, batches, writer schemas, writer operations, options, and errors.
 - Thrift-generated or wire-format implementation types MUST remain internal.
 - Encoding, compression, pooling, SIMD, and page-planning strategies MUST
   remain implementation details.
@@ -911,3 +909,47 @@ Core 0.1 is complete when:
 
 Version 1.0 will require a later SPEC revision that freezes an evidence-backed
 support profile, public API, performance budgets, and platform matrix.
+
+## 16. Flat writer
+
+`ParquetWriter` emits an ordinary `PAR1` file to a writable, caller-owned
+stream at the beginning of a new file. Sequential writes, including to a
+non-seekable stream, MUST suffice. Schema order is preserved. Names are
+nonempty, unique under ordinal comparison, and encoded as strict UTF-8.
+
+The writer uses required flat columns, Data Page V1, PLAIN values, and raw
+Snappy blocks. These are the supported types.
+
+| Physical type | Annotation | Input and wire semantics |
+| --- | --- | --- |
+| BOOLEAN | None | Boolean values packed least-significant bit first. |
+| FLOAT | None | Binary32 bits including signed zeros and NaN payloads. |
+| INT64 | None | Signed 64-bit integers. |
+| BYTE_ARRAY | STRING and legacy UTF8 | Strict UTF-8 bytes and value offsets. A zero-length value is present. |
+| INT32 | DATE and legacy DATE | Signed days from 1970-01-01 without time-zone conversion. |
+
+Validate the schema and page targets before writing the opening magic. A row
+group declares a positive row count. Supply slices in schema order and call
+`CompleteColumnAsync` after each column has supplied exactly that count.
+The last column completes the row group. A slice's buffers are reusable after
+its operation finishes. Caller data errors identify the active column and
+zero-based row-group ordinal and leave the active column available for
+correction.
+
+`CompleteAsync` writes the Compact Thrift footer, little-endian footer length,
+and closing magic. A zero-row file retains its schema and has zero row groups.
+Page header lengths exclude their own bytes. Chunk totals include page headers.
+Dispose the writer to release buffers without closing the destination.
+Cancellation or failure during output faults the writer and returns working
+buffers. Discard any partial output. Overlapping writer operations are rejected.
+
+The default page targets are 256 KiB of PLAIN bytes and 65,536 values. Callers
+can choose 8 bytes through 16 MiB and 1 through 1,048,576 values. A UTF-8 value
+that exceeds the byte target is written alone if its bytes and four-byte length
+fit the 16 MiB page limit. Snappy output capacity includes the worst-case
+expansion. Other limits are 4,096 columns, 4,096 UTF-8 bytes per column name,
+1,048,576 rows per group, and 65,536 groups. The writer caps the conservative
+footer size including its trailer at 32 MiB and aggregate schema and chunk-path
+name bytes at 16 MiB. Page buffers are reused across columns and groups. The
+retained footer descriptors account for completed groups and remain bounded by
+the footer cap.

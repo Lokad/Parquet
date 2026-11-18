@@ -1,18 +1,15 @@
 # Lokad.Parquet
 
-`Lokad.Parquet` is a high-performance, read-only Parquet library for
-`.NET 10` and `.NET 11`, designed for analytics workloads and a small
-dependency footprint.
-The shipped reader is restricted to memory-safe managed C#: it has no unsafe
-blocks, pinning, native interop, or APIs that bypass runtime memory safety.
+`Lokad.Parquet` is a dependency-free Parquet library for .NET 10 and .NET 11.
+The library uses memory-safe managed C# for projected reads and streaming writes.
 
 The Core 0.1 surface includes bounded random-access input, immutable footer
 metadata, projected asynchronous scans, row-group/range selection, and
 disposable aligned column batches. It reads flat required or optional columns
 of every Parquet physical type except `INT96`, using Data Page V1/V2, PLAIN or
 dictionary encoding, and UNCOMPRESSED or SNAPPY payloads. Nested/repeated
-schemas and other codecs remain intentionally unsupported; [SPEC.md](https://github.com/Lokad/Parquet/blob/v0.2.0/SPEC.md)
-is the exact support contract.
+schemas and other codecs remain outside the reader profile. The full support
+contract is in the [specification](https://github.com/Lokad/Parquet/blob/master/SPEC.md).
 
 The primary scan API uses descriptors resolved once from immutable metadata:
 
@@ -52,6 +49,34 @@ Custom range sources fill an `ArraySegment<byte>` and can therefore bridge
 managed array-plus-offset storage APIs without unsafe memory access. Streams
 and custom sources remain caller-owned unless ownership is explicitly
 transferred with `ParquetSourceOwnership.ParquetFile`.
+
+## Writing a flat table
+
+The writer produces required BOOLEAN, FLOAT, INT64, STRING, and DATE columns
+using PLAIN Data Page V1 and Snappy. Declare each row group's size and supply
+its columns in schema order. Each column can arrive in several typed slices.
+STRING takes UTF-8 payload bytes and offsets. DATE takes signed days since
+1970-01-01.
+
+```csharp
+await using var output = File.Create("data.parquet");
+using var writer = await ParquetWriter.CreateAsync(output,
+[
+    new("quantity", ParquetPhysicalType.Int64),
+    new("label", ParquetPhysicalType.ByteArray),
+]);
+
+writer.BeginRowGroup(2);
+await writer.WriteInt64Async(new long[] { 14, 27 });
+await writer.CompleteColumnAsync();
+await writer.WriteUtf8Async("café"u8.ToArray(), new int[] { 0, 5, 5 });
+await writer.CompleteColumnAsync();
+await writer.CompleteAsync();
+```
+
+The second label is an empty string. Call `CompleteAsync` to write the footer,
+including for a schema-only file. The writer leaves the destination open and
+accepts streams that support only sequential writes.
 
 ## Repository layout
 

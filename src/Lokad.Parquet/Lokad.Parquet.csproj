@@ -10,7 +10,7 @@
     <GeneratePackageOnBuild Condition="'$(Configuration)' == 'Release'">true</GeneratePackageOnBuild>
     <PackageId>Lokad.Parquet</PackageId>
     <Title>Lokad.Parquet</Title>
-    <Description>A high-performance, dependency-free, read-only Parquet library for .NET 10 and .NET 11.</Description>
+    <Description>A dependency-free Parquet library for projected reads and flat Snappy-compressed writes on .NET 10 and .NET 11.</Description>
     <Authors>Lokad</Authors>
     <Company>Lokad</Company>
     <Version>0.2.0</Version>

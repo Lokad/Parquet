@@ -4,6 +4,8 @@
 
 ### Added
 
+- Stream flat required BOOLEAN, FLOAT, INT64, UTF-8 STRING, and DATE columns
+  to Parquet using PLAIN Data Page V1 and Snappy.
 - Include `net10.0` and `net11.0` assets in the same dependency-free NuGet package.
 
 ## 0.2.0 - 2026-09-12

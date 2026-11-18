@@ -330,6 +330,16 @@ public sealed class SafetyPolicyTests
                 "page payload acquisition behind the cursor progression boundary",
             ["Lokad.Parquet.Internal.ParquetScanEnumerable+ColumnCursor.DecodeCompressedV2Payload"] =
                 "compressed V2 payload decoder behind the page acquisition boundary",
+            ["Lokad.Parquet.Internal.ParquetWriterWire.WritePageHeader"] =
+                "separate page header wire serialization boundary",
+            ["Lokad.Parquet.Internal.ParquetWriterWire.WriteFooter"] =
+                "separate footer wire serialization boundary",
+            ["Lokad.Parquet.Internal.ThriftCompactWriter.BinaryField"] =
+                "typed Compact Thrift binary field serialization",
+            ["Lokad.Parquet.Internal.SnappyBlockEncoder.MaximumCompressedLength"] =
+                "Snappy output bound shared with the raw-block tests",
+            ["Lokad.Parquet.Internal.SnappyBlockEncoder.Compress"] =
+                "raw Snappy encoder independent of Parquet page emission",
             ["Lokad.Parquet.ParquetFile+ColumnCacheProvider.RentColumnValues"] =
                 "typed column-cache rent behind the file provider boundary",
         };

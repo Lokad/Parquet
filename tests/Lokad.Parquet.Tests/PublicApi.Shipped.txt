@@ -307,3 +307,32 @@ type sealed class Lokad.Parquet.ParquetValidity : System.Object
   property System.Boolean IsAllValid { get; }
   property System.Int32 RowCount { get; }
   method System.Boolean IsValid(System.Int32 rowIndex)
+type sealed class Lokad.Parquet.ParquetWriteColumn : System.Object
+  ctor (System.String name, Lokad.Parquet.ParquetPhysicalType physicalType)
+  property System.String Name { get; }
+  property Lokad.Parquet.ParquetPhysicalType PhysicalType { get; }
+type sealed class Lokad.Parquet.ParquetWriter : System.Object, System.IDisposable
+  method System.Void BeginRowGroup(System.Int32 rowCount)
+  method System.Threading.Tasks.ValueTask CompleteAsync()
+  method System.Threading.Tasks.ValueTask CompleteAsync(System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.ValueTask CompleteColumnAsync()
+  method System.Threading.Tasks.ValueTask CompleteColumnAsync(System.Threading.CancellationToken cancellationToken)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetWriter> CreateAsync(System.IO.Stream destination, System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetWriteColumn> columns)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetWriter> CreateAsync(System.IO.Stream destination, System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetWriteColumn> columns, Lokad.Parquet.ParquetWriterOptions options)
+  method static System.Threading.Tasks.ValueTask<Lokad.Parquet.ParquetWriter> CreateAsync(System.IO.Stream destination, System.Collections.Generic.IReadOnlyList<Lokad.Parquet.ParquetWriteColumn> columns, Lokad.Parquet.ParquetWriterOptions options, System.Threading.CancellationToken cancellationToken)
+  method System.Void Dispose()
+  method System.Threading.Tasks.ValueTask WriteBooleansAsync(System.ReadOnlyMemory<System.Boolean> values)
+  method System.Threading.Tasks.ValueTask WriteBooleansAsync(System.ReadOnlyMemory<System.Boolean> values, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.ValueTask WriteDatesAsync(System.ReadOnlyMemory<System.Int32> days)
+  method System.Threading.Tasks.ValueTask WriteDatesAsync(System.ReadOnlyMemory<System.Int32> days, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.ValueTask WriteFloatsAsync(System.ReadOnlyMemory<System.Single> values)
+  method System.Threading.Tasks.ValueTask WriteFloatsAsync(System.ReadOnlyMemory<System.Single> values, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.ValueTask WriteInt64Async(System.ReadOnlyMemory<System.Int64> values)
+  method System.Threading.Tasks.ValueTask WriteInt64Async(System.ReadOnlyMemory<System.Int64> values, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.ValueTask WriteUtf8Async(System.ReadOnlyMemory<System.Byte> payload, System.ReadOnlyMemory<System.Int32> offsets)
+  method System.Threading.Tasks.ValueTask WriteUtf8Async(System.ReadOnlyMemory<System.Byte> payload, System.ReadOnlyMemory<System.Int32> offsets, System.Threading.CancellationToken cancellationToken)
+type sealed class Lokad.Parquet.ParquetWriterOptions : System.Object
+  ctor ()
+  property static Lokad.Parquet.ParquetWriterOptions Default { get; }
+  property System.Int32 TargetPageBytes { get; init; }
+  property System.Int32 TargetPageValues { get; init; }
