@@ -9,6 +9,7 @@ internal static class SnappyBlockEncoder
     private const int SearchShift = 5;
     private const int InitialSearch = 1 << SearchShift;
     private const int MaximumSearch = 2_048 << SearchShift;
+    private const int MaximumShortCopyLength = 11;
     public const int HashEntries = 1 << HashBits;
 
     // Each copy saves at least one byte, paying for the next literal's tag.
@@ -36,7 +37,10 @@ internal static class SnappyBlockEncoder
         var position = 0;
         var nextCancellationCheck = 0;
         var search = InitialSearch;
+        var recentDistance = 0;
+        var repeatedShortMatches = 0;
         var lastWord = source.Length - sizeof(uint);
+        var lastWideWord = source.Length - sizeof(ulong);
         while (position <= lastWord)
         {
             if (position >= nextCancellationCheck)
@@ -44,26 +48,76 @@ internal static class SnappyBlockEncoder
                 cancellationToken.ThrowIfCancellationRequested();
                 nextCancellationCheck = position + 4096;
             }
-            var word = BinaryPrimitives.ReadUInt32LittleEndian(source[position..]);
-            var hash = Hash(word);
-            var candidate = positions[hash] - 1;
-            positions[hash] = position + 1;
-            var distance = position - candidate;
-            if (candidate < 0 || distance > ushort.MaxValue ||
-                BinaryPrimitives.ReadUInt32LittleEndian(source[candidate..]) != word)
+            int candidate;
+            var recentOffset = -1;
+            if (search == InitialSearch && repeatedShortMatches >= 2 && recentDistance != 0 &&
+                position >= recentDistance && position <= lastWideWord)
             {
-                // Probe less often during a long run of misses. The stride cap
-                // lets large pages still pick up changes in compressibility.
-                var stride = search >> SearchShift;
-                position += stride;
-                search = Math.Min(search + stride, MaximumSearch);
-                continue;
+                // Confirm that short matches keep using this distance before
+                // bypassing the hash search, which can find longer matches.
+                // Two reads check five overlapping windows in order.
+                var difference = BinaryPrimitives.ReadUInt64LittleEndian(source[position..]) ^
+                    BinaryPrimitives.ReadUInt64LittleEndian(source[(position - recentDistance)..]);
+                for (var offset = 0; offset <= 4; offset++, difference >>= 8)
+                {
+                    if ((uint)difference == 0)
+                    {
+                        recentOffset = offset;
+                        break;
+                    }
+                }
+            }
+            if (recentOffset >= 0)
+            {
+                position += recentOffset;
+                candidate = position - recentDistance;
+                positions[Hash(BinaryPrimitives.ReadUInt32LittleEndian(source[position..]))] = position + 1;
+            }
+            else if (search <= InitialSearch * 2 - 4 && position <= lastWideWord)
+            {
+                // The next four probes all have stride one. Load their
+                // overlapping windows together and update the table in order.
+                var words = BinaryPrimitives.ReadUInt64LittleEndian(source[position..]);
+                var batchEnd = position + 4;
+                do
+                {
+                    candidate = FindCandidate((uint)words, source, positions, position);
+                    if (candidate >= 0)
+                        break;
+                    position++;
+                    words >>= 8;
+                }
+                while (position < batchEnd);
+
+                if (candidate < 0)
+                {
+                    search += 4;
+                    continue;
+                }
+            }
+            else
+            {
+                var word = BinaryPrimitives.ReadUInt32LittleEndian(source[position..]);
+                candidate = FindCandidate(word, source, positions, position);
+                if (candidate < 0)
+                {
+                    // Cap the stride so large pages can pick up changes in compressibility.
+                    var stride = search >> SearchShift;
+                    position += stride;
+                    search = Math.Min(search + stride, MaximumSearch);
+                    continue;
+                }
             }
 
+            var distance = position - candidate;
             WriteLiteral(source[literalStart..position], destination, ref output);
             var matchLength = sizeof(uint) +
                 source[(position + sizeof(uint))..].CommonPrefixLength(source[(candidate + sizeof(uint))..]);
             WriteCopy(distance, matchLength, destination, ref output);
+            repeatedShortMatches = matchLength <= MaximumShortCopyLength && distance == recentDistance
+                ? repeatedShortMatches + 1
+                : 0;
+            recentDistance = distance;
             position += matchLength;
             // Include the window starting at the last byte of the match. A
             // later match can start there and reuse the bytes that follow it.
@@ -75,6 +129,17 @@ internal static class SnappyBlockEncoder
         cancellationToken.ThrowIfCancellationRequested();
         WriteLiteral(source[literalStart..], destination, ref output);
         return output;
+
+        static int FindCandidate(uint word, ReadOnlySpan<byte> source, Span<int> positions, int position)
+        {
+            var hash = Hash(word);
+            var candidate = positions[hash] - 1;
+            positions[hash] = position + 1;
+            if (candidate < 0 || position - candidate > ushort.MaxValue ||
+                BinaryPrimitives.ReadUInt32LittleEndian(source[candidate..]) != word)
+                return -1;
+            return candidate;
+        }
 
         static int Hash(uint word) => (int)(unchecked(word * 0x1e35a7bdu) >> (32 - HashBits));
 
@@ -106,7 +171,7 @@ internal static class SnappyBlockEncoder
             while (length != 0)
             {
                 var count = Math.Min(length, 64);
-                if (count is >= 4 and <= 11 && distance < 2048)
+                if (count is >= 4 and <= MaximumShortCopyLength && distance < 2048)
                 {
                     destination[output++] = (byte)(1 | (count - 4) << 2 | (distance >> 8) << 5);
                     destination[output++] = (byte)distance;

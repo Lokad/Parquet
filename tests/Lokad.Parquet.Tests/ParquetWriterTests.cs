@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Reflection;
 using System.Text;
 
@@ -335,6 +336,24 @@ public sealed class ParquetWriterTests
         // at the final "d" of that copy, so that window must be indexed.
         var adjacentMatches = "abcd!wabcdxyz?dxyz#"u8;
         Assert.InRange(RoundTrip(adjacentMatches), 1, adjacentMatches.Length);
+
+        // Confirm the same backward distance repeatedly, then reuse it across
+        // four unmatched bytes and finish with a short literal suffix.
+        var spacedMatches = "abcd0123abcd4567abcd89:;abcd<=>?abcd@ABC!"u8;
+        Assert.InRange(RoundTrip(spacedMatches), 1, spacedMatches.Length - 1);
+
+        // A short incidental match can precede a long run. The hash search
+        // must find those runs before the encoder trusts a recent distance.
+        var numericRuns = new byte[16_384 * sizeof(long)];
+        for (var row = 0; row < 16_384; row++)
+        {
+            var run = row / 7;
+            var value = ((long)Word(run) << 32) | (uint)Word(run + 31);
+            BinaryPrimitives.WriteInt64LittleEndian(numericRuns.AsSpan(row * sizeof(long)), value);
+        }
+        Assert.InRange(RoundTrip(numericRuns), 1, numericRuns.Length / 3);
+
+        static int Word(int value) => unchecked(value * 1_000_003) ^ (value >> 3);
 
         int RoundTrip(ReadOnlySpan<byte> input)
         {

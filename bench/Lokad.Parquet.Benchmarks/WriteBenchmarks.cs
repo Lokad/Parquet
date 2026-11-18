@@ -13,6 +13,7 @@ namespace Lokad.Parquet.Benchmarks;
 public enum WriteWorkload
 {
     FixedWidth,
+    FixedWidthRuns,
     RepeatedUtf8,
     HighCardinalityUtf8,
 }
@@ -45,6 +46,7 @@ public class WriteBenchmarks
     internal int LokadBytes { get; private set; }
     internal int BaselineBytes { get; private set; }
     internal int ColumnCount => _columns.Length;
+    private bool IsFixedWidth => Workload is WriteWorkload.FixedWidth or WriteWorkload.FixedWidthRuns;
 
     [GlobalSetup]
     public async Task Setup()
@@ -55,7 +57,7 @@ public class WriteBenchmarks
 
     internal async Task PrepareAsync()
     {
-        if (Workload == WriteWorkload.FixedWidth)
+        if (IsFixedWidth)
         {
             _columns =
             [
@@ -68,12 +70,15 @@ public class WriteBenchmarks
             _flags = new bool[Rows];
             _measurements = new float[Rows];
             _integers = new long[Rows];
+            var usesRuns = Workload == WriteWorkload.FixedWidthRuns;
+            var secondWordOffset = usesRuns ? 31 : 1;
             for (var row = 0; row < Rows; row++)
             {
-                var integer = ScanChecksum.CreateInt32(row);
-                _flags[row] = (row & 7) == 0;
-                _measurements[row] = row * 0.25f;
-                _integers[row] = ((long)integer << 32) | (uint)ScanChecksum.CreateInt32(row + 1);
+                var sample = usesRuns ? row / 7 : row;
+                var integer = ScanChecksum.CreateInt32(sample);
+                _flags[row] = (sample & 7) == 0;
+                _measurements[row] = sample * 0.25f;
+                _integers[row] = ((long)integer << 32) | (uint)ScanChecksum.CreateInt32(sample + secondWordOffset);
             }
         }
         else
@@ -125,7 +130,7 @@ public class WriteBenchmarks
             {
                 using var rowGroup = writer.CreateRowGroup();
                 var start = group * GroupRows;
-                if (Workload == WriteWorkload.FixedWidth)
+                if (IsFixedWidth)
                 {
                     await rowGroup.WriteAsync<bool>(fields[0], _flags.AsMemory(start, GroupRows));
                     await rowGroup.WriteAsync<float>(fields[1], _measurements.AsMemory(start, GroupRows));
@@ -189,7 +194,7 @@ public class WriteBenchmarks
         {
             writer.BeginRowGroup(GroupRows);
             var start = (group % Groups) * GroupRows;
-            if (Workload == WriteWorkload.FixedWidth)
+            if (IsFixedWidth)
             {
                 await writer.WriteBooleansAsync(_flags.AsMemory(start, GroupRows));
                 await writer.CompleteColumnAsync();
@@ -241,7 +246,7 @@ public class WriteBenchmarks
             using (batch)
             {
                 var rows = batch.RowCount;
-                var matches = Workload == WriteWorkload.FixedWidth
+                var matches = IsFixedWidth
                     ? ((ParquetPrimitiveColumnBatch<bool>)batch.Columns[0]).Values.Span.SequenceEqual(_flags.AsSpan(start, rows)) &&
                       ((ParquetPrimitiveColumnBatch<float>)batch.Columns[1]).Values.Span.SequenceEqual(_measurements.AsSpan(start, rows)) &&
                       ((ParquetPrimitiveColumnBatch<long>)batch.Columns[2]).Values.Span.SequenceEqual(_integers.AsSpan(start, rows))

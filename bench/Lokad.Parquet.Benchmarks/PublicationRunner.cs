@@ -84,6 +84,7 @@ internal static class PublicationRunner
                 var label = workload switch
                 {
                     WriteWorkload.FixedWidth => "Write BOOLEAN, FLOAT, INT64",
+                    WriteWorkload.FixedWidthRuns => "Write fixed-width runs",
                     WriteWorkload.RepeatedUtf8 => "Write repeated UTF-8",
                     WriteWorkload.HighCardinalityUtf8 => "Write high-cardinality UTF-8",
                     _ => throw new InvalidOperationException("The writer workload needs a publication label."),
