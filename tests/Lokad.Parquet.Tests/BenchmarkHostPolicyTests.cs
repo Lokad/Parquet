@@ -2,12 +2,6 @@ using System.Reflection;
 
 namespace Lokad.Parquet.Tests;
 
-// Pins the benchmark-host policy without referencing the benchmark project:
-// pure mount-table, mask, and cpuinfo decisions run anywhere, while live
-// machine reads only assert shape. Linux mount verdicts additionally run on
-// native Linux in the B08 campaign; the synthetic tables below already cover
-// a Windows-backed 9p mount, a symlinked resolution target, and a native
-// mount placed under /mnt.
 public sealed class BenchmarkHostPolicyTests
 {
     [Fact]

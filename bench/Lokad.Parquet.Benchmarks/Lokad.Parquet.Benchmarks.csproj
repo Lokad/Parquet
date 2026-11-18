@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Lokad.Parquet\Lokad.Parquet.csproj" />
+    <EmbeddedResource Include="PublicationCatalog.json" LogicalName="PublicationCatalog.json" />
   </ItemGroup>
 
   <!-- Shared synthetic fixture writer (test tooling, no test-framework dependency).

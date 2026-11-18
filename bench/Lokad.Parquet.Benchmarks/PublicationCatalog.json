@@ -1,0 +1,9 @@
+[
+  { "Id": "read-int32-plain", "Case": "Read INT32, PLAIN", "Benchmark": "PreopenedScanBenchmarks", "Workload": "RequiredInt32Plain", "Rows": 65536, "Columns": 1 },
+  { "Id": "read-int32-snappy", "Case": "Read INT32, PLAIN + Snappy", "Benchmark": "PreopenedScanBenchmarks", "Workload": "RequiredInt32Snappy", "Rows": 65536, "Columns": 1 },
+  { "Id": "read-utf8-snappy", "Case": "Read UTF-8, PLAIN + Snappy", "Benchmark": "PreopenedUtf8ScanBenchmarks", "Workload": "RequiredStringSnappy", "Rows": 65536, "Columns": 1 },
+  { "Id": "write-fixed", "Case": "Write BOOLEAN, FLOAT, INT64", "Benchmark": "WriteBenchmarks", "Workload": "FixedWidth", "Rows": 65536, "Columns": 3 },
+  { "Id": "write-fixed-runs", "Case": "Write fixed-width runs", "Benchmark": "WriteBenchmarks", "Workload": "FixedWidthRuns", "Rows": 65536, "Columns": 3 },
+  { "Id": "write-utf8-repeated", "Case": "Write repeated UTF-8", "Benchmark": "WriteBenchmarks", "Workload": "RepeatedUtf8", "Rows": 65536, "Columns": 1 },
+  { "Id": "write-utf8-high-cardinality", "Case": "Write high-cardinality UTF-8", "Benchmark": "WriteBenchmarks", "Workload": "HighCardinalityUtf8", "Rows": 65536, "Columns": 1 }
+]

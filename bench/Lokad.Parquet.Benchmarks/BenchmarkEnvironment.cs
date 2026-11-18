@@ -2,12 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace Lokad.Parquet.Benchmarks;
 
-// Benchmark-only native-workspace qualification. This stays outside the
-// shipped reader. Path verdicts come from BenchmarkHostPolicy alone: links
-// resolve to a final path and the Linux mount table decides whether the
-// storage is Windows-backed, so symlinks cannot smuggle foreign storage past
-// the check and native mounts under /mnt stay accepted. On other operating
-// systems the same evidence resolves and prints without rejecting.
+// Record the Linux host and check the resolved paths used for timing.
 internal static class BenchmarkEnvironment
 {
     internal static void EnsureNativeWorkspace(string repositoryRoot, string buildOutput, string artifactsOutput)

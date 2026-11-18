@@ -10,6 +10,7 @@ namespace Lokad.Parquet.Tests;
 // per-case checkpoints with a failure marker and no snapshot, a completed
 // session binds its snapshot hash, session directories are unique, and a
 // killed census stays visibly incomplete without a completion marker.
+[Collection("Benchmark integration")]
 public sealed class CensusSessionTests
 {
     [Fact]
@@ -147,81 +148,67 @@ public sealed class CensusSessionTests
             configuration,
             framework,
             "Lokad.Parquet.Benchmarks.dll");
-        var artifacts = Path.Combine(RepositoryTestPaths.Root, "artifacts", "benchmarks");
-        Directory.CreateDirectory(artifacts);
-        var beforeSnapshots = new HashSet<string>(Directory.GetFiles(artifacts, "work-census-*.json"), StringComparer.Ordinal);
-        var beforeSessions = new HashSet<string>(Directory.GetDirectories(artifacts, "work-census-*.session"), StringComparer.Ordinal);
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "dotnet",
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-            WorkingDirectory = RepositoryTestPaths.Root,
-        };
-        startInfo.ArgumentList.Add(benchmarkDll);
-        startInfo.ArgumentList.Add("--census");
-        using var process = Process.Start(startInfo) ??
-            throw new InvalidOperationException("The census probe process failed to start.");
-        static string NewestSessionDirectory(string artifactsDirectory, HashSet<string> knownSessions)
-        {
-            var newest = "";
-            var newestTime = DateTime.MinValue;
-            foreach (var session in Directory.GetDirectories(artifactsDirectory, "work-census-*.session"))
-            {
-                if (knownSessions.Contains(session))
-                    continue;
-                var created = Directory.GetCreationTimeUtc(session);
-                if (created >= newestTime)
-                {
-                    newest = session;
-                    newestTime = created;
-                }
-            }
-            return newest;
-        }
+        var workspace = Directory.CreateTempSubdirectory("lokad-census-probe-");
         try
         {
-            var deadline = DateTimeOffset.UtcNow.AddMinutes(3);
-            var sessionDirectory = "";
-            while (DateTimeOffset.UtcNow < deadline)
+            var artifacts = Path.Combine(workspace.FullName, "artifacts", "benchmarks");
+            var startInfo = new ProcessStartInfo("dotnet")
             {
-                sessionDirectory = NewestSessionDirectory(artifacts, beforeSessions);
-                if (!string.IsNullOrEmpty(sessionDirectory) &&
-                    File.Exists(Path.Combine(sessionDirectory, "checkpoint-01.json")))
-                    break;
-                if (process.HasExited)
-                    throw new InvalidOperationException("The census probe process finished before its second checkpoint.");
-                await Task.Delay(250);
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WorkingDirectory = workspace.FullName,
+            };
+            startInfo.ArgumentList.Add(benchmarkDll);
+            startInfo.ArgumentList.Add("--census");
+            using var process = Process.Start(startInfo) ??
+                throw new InvalidOperationException("The census probe process failed to start.");
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            try
+            {
+                var deadline = DateTimeOffset.UtcNow.AddMinutes(3);
+                string? sessionDirectory = null;
+                while (DateTimeOffset.UtcNow < deadline)
+                {
+                    if (Directory.Exists(artifacts))
+                        sessionDirectory = Directory.GetDirectories(artifacts, "work-census-*.session").SingleOrDefault();
+                    if (sessionDirectory is not null &&
+                        File.Exists(Path.Combine(sessionDirectory, "checkpoint-01.json")))
+                        break;
+                    if (process.HasExited)
+                        throw new InvalidOperationException("The census probe finished before its second checkpoint. " +
+                            (await stdout) + (await stderr));
+                    await Task.Delay(250);
+                }
+
+                Assert.NotNull(sessionDirectory);
+                Assert.True(File.Exists(Path.Combine(sessionDirectory, "checkpoint-01.json")));
+                await StopAsync();
+                Assert.True(File.Exists(Path.Combine(sessionDirectory, "checkpoint-00.json")));
+                Assert.False(File.Exists(Path.Combine(sessionDirectory, "completed.json")));
+                Assert.Empty(Directory.GetFiles(artifacts, "work-census-*.json"));
+                var incomplete = ListIncomplete(BenchmarkReflection.BenchmarkAssembly(), artifacts);
+                Assert.Contains(incomplete, entry =>
+                    string.Equals(DescribeIncomplete(entry).Directory, sessionDirectory, StringComparison.Ordinal));
             }
-            if (string.IsNullOrEmpty(sessionDirectory) ||
-                !File.Exists(Path.Combine(sessionDirectory, "checkpoint-01.json")))
-                throw new InvalidOperationException("The census probe process produced no second checkpoint.");
-            process.Kill();
-            Assert.True(process.WaitForExit(30000));
-            Assert.True(File.Exists(Path.Combine(sessionDirectory, "checkpoint-00.json")));
-            Assert.True(File.Exists(Path.Combine(sessionDirectory, "checkpoint-01.json")));
-            Assert.False(File.Exists(Path.Combine(sessionDirectory, "completed.json")));
-            Assert.True(Directory.GetFiles(artifacts, "work-census-*.json")
-                .All(path => beforeSnapshots.Contains(path)));
-            var assembly = BenchmarkReflection.BenchmarkAssembly();
-            var incomplete = ListIncomplete(assembly, artifacts);
-            Assert.Contains(incomplete, entry => string.Equals(DescribeIncomplete(entry).Directory, sessionDirectory, StringComparison.Ordinal));
+            finally
+            {
+                await StopAsync();
+            }
+
+            async Task StopAsync()
+            {
+                if (!process.HasExited)
+                    process.Kill(entireProcessTree: true);
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                await process.WaitForExitAsync(timeout.Token);
+            }
         }
         finally
         {
-            if (!process.HasExited)
-            {
-                process.Kill();
-                process.WaitForExit(30000);
-            }
-            foreach (var session in Directory.GetDirectories(artifacts, "work-census-*.session"))
-            {
-                if (!beforeSessions.Contains(session))
-                    Directory.Delete(session, recursive: true);
-            }
-
+            workspace.Delete(recursive: true);
         }
     }
 

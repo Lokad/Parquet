@@ -3,7 +3,7 @@
 Builds and runs Release benchmarks on one logical processor on Linux.
 .DESCRIPTION
 Run from a native Linux filesystem with PowerShell and taskset. Select a suite
-or filter.
+or filter. Use -SkipBuild to run an existing Release build.
 Publication runs the representative read and write comparison and records
 timings, allocations, and diagnostics under artifacts/benchmarks/publication.
 #>
@@ -13,7 +13,8 @@ param(
     [string] $Filter = "",
     [string] $PairedCase = "",
     [switch] $EnforceParity,
-    [switch] $ForceScalar
+    [switch] $ForceScalar,
+    [switch] $SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,11 +34,11 @@ try {
     $headRevision = (& git rev-parse --verify HEAD 2>$null)
     $hasHeadRevision = $LASTEXITCODE -eq 0 -and $headRevision
     $workingTreeChanges = @(& git status --porcelain --untracked-files=all 2>$null)
+    $fingerprint = Get-BenchmarkSourceFingerprint -RepositoryRoot $PSScriptRoot
     if ($hasHeadRevision -and $workingTreeChanges.Count -eq 0) {
         $sourceRevision = $headRevision
     }
     else {
-        $fingerprint = Get-BenchmarkSourceFingerprint -RepositoryRoot $PSScriptRoot
         $sourceRevision = if ($hasHeadRevision) {
             "$headRevision-dirty-$fingerprint"
         }
@@ -46,6 +47,7 @@ try {
         }
     }
     $env:LOKAD_PARQUET_SOURCE_REVISION = $sourceRevision
+    $env:LOKAD_PARQUET_SOURCE_FINGERPRINT = $fingerprint
     $lockPath = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/packages.lock.json"
     $env:LOKAD_PARQUET_PACKAGE_LOCK_HASH =
         (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -71,14 +73,18 @@ try {
         }
     }
 
-    & dotnet restore $project --locked-mode --tl:off -v minimal
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
+    if (-not $SkipBuild) {
+        & dotnet restore $project --locked-mode --tl:off -v minimal
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
 
-    & dotnet build $project --configuration Release --tl:off --nologo -v minimal --no-restore
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+        & dotnet build $project --configuration Release --tl:off --nologo -v minimal --no-restore
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } elseif (-not (Test-Path -LiteralPath $benchmarkDll -PathType Leaf)) {
+        throw "The Release benchmark assembly is missing. Run without -SkipBuild to build it."
     }
 
     # Filesystem qualification is decided once in C#: links resolve to a final
@@ -125,9 +131,6 @@ try {
         exit $LASTEXITCODE
     }
 
-    # Q01 public-validation smoke: the full census orchestration with one
-    # retention repetition. Truth, pool-balance and catalog checks are unchanged;
-    # the snapshot lands in an isolated temp directory and never qualifies.
     if ($Suite -eq "CensusSmoke") {
         Invoke-Benchmark --census-smoke
         exit $LASTEXITCODE

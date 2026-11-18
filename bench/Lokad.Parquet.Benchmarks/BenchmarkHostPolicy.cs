@@ -3,27 +3,16 @@ using System.Runtime.InteropServices;
 
 namespace Lokad.Parquet.Benchmarks;
 
-// Single home for benchmark-host qualification: which logical processor the
-// process runs on, what the runtime looks like, and whether a workspace path
-// lives on a native filesystem. The paired/census runners, the BenchmarkDotNet
-// worker setups, bench.ps1 (through --check-path), and benchmark-report.ps1
-// share these answers so snapshots, logs, and the report gate the same
-// evidence. Decision-relevant helpers are either pure over explicit inputs
-// (mount tables, masks, cpuinfo text) or read the live machine through
-// managed APIs only.
+// Shared processor, runtime and native-filesystem checks for the benchmark harness.
 public static class BenchmarkHostPolicy
 {
-    // Explicit per-job affinity travels from the launcher to BenchmarkDotNet
-    // workers through the environment because worker processes start from
-    // their own entry point and must not rely on affinity inheritance alone.
+    // Workers verify the launcher's requested mask in their own process.
     public const string AffinityEnvironmentVariable = "LOKAD_PARQUET_AFFINITY";
 
     public sealed record MountEntry(string MountPoint, string FileSystem, string Source);
 
     public sealed record WorkspacePathEvidence(string Role, string ResolvedPath, string MountPoint, string FileSystem, bool WindowsBacked);
 
-    // Consolidates the former per-runner CPU collectors: PROCESSOR_IDENTIFIER
-    // exists only on Windows, so Linux evidence names the model from cpuinfo.
     public static string GetProcessorName()
     {
         var identifier = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER");
@@ -136,30 +125,27 @@ public static class BenchmarkHostPolicy
         return mask;
     }
 
-    // Applies the launcher-provided mask when present, otherwise keeps the
-    // inherited mask, then proves the process runs on exactly one logical
-    // processor. Workers call this from their own setup because inheritance
-    // alone is never asserted where timing happens.
-    public static long ApplySingleProcessorAffinity()
+    // Select a CPU in the launcher and verify the same mask in the worker.
+    public static long ApplySingleProcessorAffinity(bool selectFromAvailable)
     {
-        using var process = Process.GetCurrentProcess();
-        long mask;
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsWindows())
         {
-            mask = process.ProcessorAffinity.ToInt64();
-            var overrideText = Environment.GetEnvironmentVariable(AffinityEnvironmentVariable);
-            if (!string.IsNullOrEmpty(overrideText))
-            {
-                mask = ParseAffinityMask(overrideText.Trim());
+            using var process = Process.GetCurrentProcess();
+            var inherited = process.ProcessorAffinity.ToInt64();
+            var mask = inherited;
+            if (selectFromAvailable)
+                mask &= -mask;
+            else if (Environment.GetEnvironmentVariable(AffinityEnvironmentVariable) is { Length: > 0 } requested)
+                mask = ParseAffinityMask(requested.Trim());
+            if (mask == 0 || (mask & (mask - 1)) != 0)
+                throw new InvalidOperationException("The benchmark process is not bound to exactly one logical processor: " + FormatAffinity(mask) + ".");
+            if (inherited != mask)
                 process.ProcessorAffinity = (nint)mask;
-                mask = process.ProcessorAffinity.ToInt64();
-            }
+            if (process.ProcessorAffinity.ToInt64() != mask)
+                throw new InvalidOperationException("The benchmark process could not apply affinity " + FormatAffinity(mask) + ".");
+            return mask;
         }
-        else
-            throw new PlatformNotSupportedException("Benchmark processor affinity requires Windows or Linux.");
-        if (mask == 0 || (mask & (mask - 1)) != 0)
-            throw new InvalidOperationException("The benchmark process is not bound to exactly one logical processor: " + FormatAffinity(mask) + ".");
-        return mask;
+        throw new PlatformNotSupportedException("Benchmark processor affinity requires Linux or Windows.");
     }
 
     public static bool GetServerGarbageCollection() =>
@@ -184,7 +170,7 @@ public static class BenchmarkHostPolicy
     {
         if (Environment.GetEnvironmentVariable("LOKAD_PARQUET_BENCHMARK_FORCE_SCALAR") is "1")
             AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
-        var mask = ApplySingleProcessorAffinity();
+        var mask = ApplySingleProcessorAffinity(selectFromAvailable: false);
         var selected = GetSelectedLogicalProcessor(mask);
         Console.WriteLine($"Worker affinity: {FormatAffinity(mask)}; logical processor: {selected}; processors: {Environment.ProcessorCount}.");
         Console.WriteLine($"Worker processor: {GetProcessorModelForCpu(selected)}.");

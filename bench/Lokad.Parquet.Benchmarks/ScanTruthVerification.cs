@@ -77,8 +77,7 @@ public static class ScanTruthVerification
 
         static void CheckScheme(List<string> failures)
         {
-            // Reproduced B01 failure: swapped per-column hashes combined equally because
-            // XOR(Mix(hash, ordinal)) separates into XORs of hashes and ordinals.
+            // Separately XORing hashes and ordinals loses column order.
             var ordered = ScanChecksum.CombineColumns([123, 456]);
             var swapped = ScanChecksum.CombineColumns([456, 123]);
             if (ordered == swapped)

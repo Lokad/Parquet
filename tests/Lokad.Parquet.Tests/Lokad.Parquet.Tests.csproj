@@ -3,7 +3,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <!-- Repository-level benchmark tests share fixture and artifact paths. -->
+    <!-- Parallel target frameworks can time out subprocess checks on Windows. -->
     <TestTfmsInParallel>false</TestTfmsInParallel>
   </PropertyGroup>
 

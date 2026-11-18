@@ -256,8 +256,6 @@ public sealed class SafetyPolicyTests
                 "explicit source-measurement boundary",
             ["Lokad.Parquet.Internal.ParquetScanEnumerable.PreflightSelectedChunks"] =
                 "cohesive selected-chunk preflight planning entry point",
-            ["Lokad.Parquet.Tests.BenchmarkReportQuartet.DiagnosticCensusCase"] =
-                "synthetic frozen census-case builder with one fixture-method caller",
             ["Lokad.Parquet.Tests.OpenFailureTests+PendingFailingSource.Fail"] =
                 "explicit failure-trigger boundary on a pending-read test double",
             ["Lokad.Parquet.Tests.OpenFailureTests+GatedDisposalLengthStream.CompleteDisposal"] =

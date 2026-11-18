@@ -92,8 +92,7 @@ public sealed class CensusLayoutTests
     [Fact]
     public void UnknownWorkloadHasNoCatalogLane()
     {
-        // B04: unfamiliar workloads fail instead of silently defaulting to
-        // required INT32, where a wrong denominator could hide.
+        // A default layout would give unfamiliar workloads the wrong denominator.
         var assembly = BenchmarkReflection.BenchmarkAssembly();
         var layoutType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.CensusCaseLayout");
         var workloadType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.ScanWorkload");
@@ -103,10 +102,8 @@ public sealed class CensusLayoutTests
         Assert.IsType<InvalidOperationException>(thrown.InnerException);
     }
     [Fact]
-    public void StaticCatalogMatchesVerifierCensusShapes()
+    public void StaticCatalogMatchesIndependentCensusFixtures()
     {
-        // B04: the single C# catalog agrees with the independently authored
-        // verifier shapes on names, workloads, consumers, layouts and passes.
         var assembly = BenchmarkReflection.BenchmarkAssembly();
         var catalogType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.CensusCatalog");
         var cases = catalogType.GetProperty("Cases", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null) as System.Collections.IEnumerable ??
@@ -115,12 +112,12 @@ public sealed class CensusLayoutTests
         var snapshotName = BenchmarkReflection.RequireStaticMethod(namesType, "SnapshotName", null);
         var layoutType = BenchmarkReflection.RequireType(assembly, "Lokad.Parquet.Benchmarks.CensusLayout");
         var nameOf = BenchmarkReflection.RequireStaticMethod(layoutType, "NameOf", null);
-        var matched = 0;
+        var remaining = CensusCatalogFixture.Cases.ToDictionary(item => item.Name, StringComparer.Ordinal);
         foreach (var entry in cases)
         {
             var entryType = entry.GetType();
             var name = Assert.IsType<string>(entryType.GetProperty("Name")?.GetValue(entry));
-            var expected = FindDescriptor(name);
+            Assert.True(remaining.Remove(name, out var expected), $"Unexpected census case '{name}'.");
             Assert.Equal(expected.Workload, entryType.GetProperty("Workload")?.GetValue(entry)?.ToString());
             var consumer = entryType.GetProperty("Consumer")?.GetValue(entry) ??
                 throw new InvalidOperationException($"The static catalog case '{name}' has no consumer.");
@@ -132,27 +129,14 @@ public sealed class CensusLayoutTests
             Assert.Equal(expected.Nullable, Assert.IsType<bool>(entryType.GetProperty("Nullable")?.GetValue(entry)));
             var projections = Assert.IsAssignableFrom<System.Collections.Generic.IEnumerable<object>>(entryType.GetProperty("PassProjections")?.GetValue(entry));
             var actual = projections.Select(static projection => Assert.IsAssignableFrom<System.Collections.Generic.IEnumerable<int>>(projection).ToArray()).ToArray();
-            Assert.Equal(expected.Passes.Length, actual.Length);
+            Assert.Equal(expected.PassProjections.Length, actual.Length);
             for (var pass = 0; pass < actual.Length; pass++)
-                Assert.Equal(expected.Passes[pass].Projection, actual[pass]);
-            matched++;
+                Assert.Equal(expected.PassProjections[pass], actual[pass]);
         }
 
-        Assert.Equal(BenchmarkReportQuartet.CensusDiagnosticDescriptors.Length + 1, matched);
-
-        static (string Workload, string Consumer, string PhysicalType, int ValueWidthBytes, bool Nullable, (int[] Projection, int Target)[] Passes) FindDescriptor(string name)
-        {
-            foreach (var descriptor in BenchmarkReportQuartet.CensusDiagnosticDescriptors)
-            {
-                if (descriptor.Name == name)
-                    return (descriptor.Workload, descriptor.Consumer, descriptor.PhysicalType, descriptor.ValueWidthBytes, descriptor.Nullable, descriptor.Passes);
-            }
-
-            if (name == "RequiredInt32Plain")
-                return ("RequiredInt32Plain", "int32", "int32", 4, false, [(new[] { 0 }, 65536), (new[] { 0 }, 4096)]);
-            throw new InvalidOperationException($"The static catalog carries an unexpected case '{name}'.");
-        }
+        Assert.Empty(remaining);
     }
+
     [Fact]
     public void CatalogLaneLayoutsDeriveFromWorkloadTokens()
     {

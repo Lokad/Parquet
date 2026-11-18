@@ -26,6 +26,7 @@ public class PreopenedScanBenchmarks
     {
         BenchmarkHostPolicy.AssertWorkerEnvironment();
         _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
+        _scanCase.LogPublicationEvidence();
         Console.WriteLine($"Fixture SHA-256: {_scanCase.FixtureHash}.");
         Console.WriteLine(
             $"Fixture bytes: {_scanCase.FixtureLength}; rows: {RowCount}; workload: {Workload}; " +
@@ -69,6 +70,7 @@ public class PreopenedUtf8ScanBenchmarks
     {
         BenchmarkHostPolicy.AssertWorkerEnvironment();
         _scanCase = await ParityScanCase.CreateAsync(Workload, RowCount);
+        _scanCase.LogPublicationEvidence();
         Console.WriteLine($"Fixture SHA-256: {_scanCase.FixtureHash}.");
         Console.WriteLine(
             $"Fixture bytes: {_scanCase.FixtureLength}; UTF-8 payload bytes: " +
@@ -210,6 +212,13 @@ internal sealed class ParityScanCase : IAsyncDisposable
     public string FixtureHash { get; }
 
     internal ScanFixture Fixture { get; }
+
+    internal void LogPublicationEvidence() =>
+        new PublicationSetupEvidence(Fixture.Workload.ToString(), Fixture.RowCount, Fixture.ColumnCount)
+        {
+            InputBytes = FixtureLength,
+            FixtureSha256 = FixtureHash,
+        }.Log();
 
     internal IReadOnlyList<ParquetColumn> SchemaColumns => _lokadFile.Metadata.Schema.Columns;
 

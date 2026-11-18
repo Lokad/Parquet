@@ -30,10 +30,7 @@ internal static class WorkCensusRunner
 
     public static Task<int> RunAsync() => RunCensusAsync(16, CensusOutputPath(false));
 
-    // Q01 public-validation smoke: the same orchestration with one retention
-    // repetition instead of sixteen. Truth, pool-balance and catalog checks are
-    // unchanged; only repeat timing is reduced, and the snapshot lands in an
-    // isolated temp directory so smoke evidence can never qualify as a campaign.
+    // Exercise truth, pooling and catalog checks with one retention repetition and temporary output.
     public static Task<int> RunSmokeAsync() => RunCensusAsync(1, CensusOutputPath(true));
 
     private static string CensusOutputPath(bool smoke)
@@ -49,6 +46,7 @@ internal static class WorkCensusRunner
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(retentionRepetitions);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "census output");
         var sessionId = Guid.NewGuid();
         var sessionStartedAt = DateTimeOffset.UtcNow;
         var session = BeginCensusSession(outputPath, sessionId, sessionStartedAt);
@@ -787,7 +785,7 @@ internal static class WorkCensusRunner
                 if (reconciled.Count != CensusCatalog.Cases.Count)
                     throw new InvalidOperationException("The work census is missing catalog cases.");
             }
-            var affinityMask = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
+            var affinityMask = BenchmarkHostPolicy.ApplySingleProcessorAffinity(selectFromAvailable: false);
             var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "work census output");
             var snapshot = new WorkCensusSnapshot(
                 SnapshotSchemaVersion,

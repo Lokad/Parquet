@@ -43,8 +43,6 @@ public class WriteBenchmarks
     [ParamsAllValues]
     public WriteWorkload Workload { get; set; }
 
-    internal int LokadBytes { get; private set; }
-    internal int BaselineBytes { get; private set; }
     internal int ColumnCount => _columns.Length;
     private bool IsFixedWidth => Workload is WriteWorkload.FixedWidth or WriteWorkload.FixedWidthRuns;
 
@@ -56,6 +54,22 @@ public class WriteBenchmarks
     }
 
     internal async Task PrepareAsync()
+    {
+        PrepareInput();
+        var lokadBytes = await LokadWrite();
+        var lokadHash = await VerifyOutputAsync(lokadBytes, "Lokad.Parquet");
+        var baselineBytes = await ParquetNetWrite();
+        var baselineHash = await VerifyOutputAsync(baselineBytes, "Parquet.NET");
+        new PublicationSetupEvidence(Workload.ToString(), Rows, ColumnCount)
+        {
+            LokadFileBytes = lokadBytes,
+            BaselineFileBytes = baselineBytes,
+            LokadFileSha256 = lokadHash,
+            BaselineFileSha256 = baselineHash,
+        }.Log();
+    }
+
+    internal void PrepareInput()
     {
         if (IsFixedWidth)
         {
@@ -98,11 +112,6 @@ public class WriteBenchmarks
             }
             _payload = bytes.ToArray();
         }
-
-        LokadBytes = await LokadWrite();
-        await VerifyOutputAsync(LokadBytes, "Lokad.Parquet");
-        BaselineBytes = await ParquetNetWrite();
-        await VerifyOutputAsync(BaselineBytes, "Parquet.NET");
     }
 
     [GlobalCleanup]
@@ -211,10 +220,9 @@ public class WriteBenchmarks
         }
     }
 
-    private async Task VerifyOutputAsync(int length, string writer)
+    private async Task<string> VerifyOutputAsync(int length, string writer)
     {
         var bytes = (ReadOnlyMemory<byte>)_destination.GetBuffer().AsMemory(0, length);
-        Console.WriteLine($"{Workload}, {writer}, {length} output bytes, SHA-256 {Convert.ToHexStringLower(SHA256.HashData(bytes.Span))}.");
         await using var file = await ParquetFile.OpenAsync(bytes);
         var columns = file.Metadata.Schema.Columns;
         if (file.Metadata.RowCount != Rows || file.Metadata.RowGroups.Count != Groups ||
@@ -258,6 +266,7 @@ public class WriteBenchmarks
         }
         if (start != Rows)
             throw new InvalidOperationException($"{writer} write benchmark decoded {start} rows instead of {Rows}.");
+        return Convert.ToHexStringLower(SHA256.HashData(bytes.Span));
 
         bool MatchesUtf8(ParquetBinaryColumnBatch batch, int row)
         {

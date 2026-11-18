@@ -1,127 +1,75 @@
-using System.Diagnostics;
-
 namespace Lokad.Parquet.Tests;
 
-// B05: the benchmark input fingerprint covers linked sources and fixtures,
-// so a changed input always changes the recorded revision.
+[Collection("Benchmark integration")]
 public sealed class BenchmarkIdentityTests
 {
     [Fact]
-    public void IdentityPathsIncludeLinkedBuilder()
+    public async Task IdentityPathsIncludeLinkedBuilderAndCommittedFixtures()
     {
-        Assert.Contains("tests/Lokad.Parquet.Tests/ParquetFixtureBuilder.cs", IdentityPaths());
-    }
-
-    [Fact]
-    public void IdentityPathsIncludeCommittedFixtures()
-    {
-        var paths = IdentityPaths();
+        var output = await InvokeIdentityLibraryAsync("Get-BenchmarkIdentityPaths", RepositoryTestPaths.Root);
+        var paths = output.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+        Assert.Contains("benchmark-report.ps1", paths);
+        Assert.Contains("tests/Lokad.Parquet.Tests/ParquetFixtureBuilder.cs", paths);
         Assert.Contains("tests/fixtures/manifest.json", paths);
         Assert.Contains("tests/fixtures/apache-parquet-testing/binary.parquet", paths);
     }
 
     [Fact]
-    public void IdentityPathsIncludeUntrackedFixtures()
+    public async Task FingerprintCoversTrackedAndUntrackedFixtureContent()
     {
-        var probe = Path.Combine(RepositoryTestPaths.Root, "tests", "fixtures", "b05-fingerprint-probe.txt");
-        File.WriteAllText(probe, "probe");
+        var repository = Directory.CreateTempSubdirectory("lokad-identity-");
         try
         {
-            Assert.Contains("tests/fixtures/b05-fingerprint-probe.txt", IdentityPaths());
+            var root = repository.FullName;
+            var fixtures = Directory.CreateDirectory(Path.Combine(root, "tests", "fixtures"));
+            var tracked = Path.Combine(fixtures.FullName, "tracked.txt");
+            File.WriteAllText(tracked, "tracked input");
+            await GitAsync(root, "init", "--quiet", "--template=");
+            await GitAsync(root, "add", "--", "tests/fixtures/tracked.txt");
+            var expected = await InvokeIdentityLibraryAsync("Get-BenchmarkSourceFingerprint", root);
+            Assert.Matches("^[0-9a-f]{64}$", expected);
+
+            var probe = Path.Combine(fixtures.FullName, "untracked.txt");
+            File.WriteAllText(probe, "untracked input");
+            var paths = await InvokeIdentityLibraryAsync("Get-BenchmarkIdentityPaths", root);
+            Assert.Contains("tests/fixtures/untracked.txt", paths);
+            Assert.NotEqual(expected, await InvokeIdentityLibraryAsync("Get-BenchmarkSourceFingerprint", root));
+
+            File.Delete(probe);
+            File.WriteAllText(Path.Combine(root, "unrelated.txt"), "unrelated");
+            Assert.Equal(expected, await InvokeIdentityLibraryAsync("Get-BenchmarkSourceFingerprint", root));
+
+            File.WriteAllText(tracked, "changed tracked input");
+            Assert.NotEqual(expected, await InvokeIdentityLibraryAsync("Get-BenchmarkSourceFingerprint", root));
         }
         finally
         {
-            File.Delete(probe);
+            if (OperatingSystem.IsWindows())
+            {
+                foreach (var file in repository.EnumerateFiles("*", SearchOption.AllDirectories))
+                    file.Attributes &= ~FileAttributes.ReadOnly;
+            }
+            repository.Delete(recursive: true);
         }
-    }
 
-    [Fact]
-    public void SourceFingerprintChangesWithUntrackedFixture()
-    {
-        var before = Fingerprint();
-        var probe = Path.Combine(RepositoryTestPaths.Root, "tests", "fixtures", "b05-fingerprint-probe.txt");
-        File.WriteAllText(probe, "probe");
-        try
+        static async Task GitAsync(string root, params string[] arguments)
         {
-            Assert.NotEqual(before, Fingerprint());
+            var result = await BenchmarkProcess.RunAsync("git", ["-C", root, .. arguments]);
+            Assert.True(result.ExitCode == 0, result.Output);
         }
-        finally
-        {
-            File.Delete(probe);
-        }
-
-        Assert.Equal(before, Fingerprint());
-
-        static string Fingerprint() => InvokeIdentityLibrary("Get-BenchmarkSourceFingerprint -RepositoryRoot " + Quote(RepositoryTestPaths.Root)).Trim();
     }
 
-    private static string[] IdentityPaths()
-    {
-        return InvokeIdentityLibrary("Get-BenchmarkIdentityPaths -RepositoryRoot " + Quote(RepositoryTestPaths.Root))
-            .Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
-    }
-
-    private static string InvokeIdentityLibrary(string command)
+    private static async Task<string> InvokeIdentityLibraryAsync(string function, string repository)
     {
         var library = Path.Combine(RepositoryTestPaths.Root, "bench", "benchmark-identity.ps1");
-        var candidates = new[] { "pwsh", "powershell" };
-        foreach (var candidate in candidates)
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = candidate,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            startInfo.ArgumentList.Add("-NoProfile");
-            startInfo.ArgumentList.Add("-Command");
-            startInfo.ArgumentList.Add(". '" + library.Replace("'", "''") + "'; " + command);
-            Process? process = null;
-            try
-            {
-                process = Process.Start(startInfo);
-            }
-            catch (System.ComponentModel.Win32Exception)
-            {
-            }
+        var result = await BenchmarkProcess.RunAsync("pwsh",
+        [
+            "-NoProfile", "-NonInteractive", "-Command",
+            "$ErrorActionPreference = 'Stop'; . " + Quote(library) + "; " + function + " -RepositoryRoot " + Quote(repository),
+        ]);
+        Assert.True(result.ExitCode == 0, result.Output);
+        return result.Output.Trim();
 
-            if (process is null)
-                continue;
-            using (process)
-            {
-                var standardOutput = process.StandardOutput.ReadToEndAsync();
-                var standardError = process.StandardError.ReadToEndAsync();
-                var completed = process.WaitForExit(60000);
-                if (!completed)
-                {
-                    try
-                    {
-                        process.Kill();
-                    }
-                    catch (InvalidOperationException)
-                    {
-                    }
-                    catch (System.ComponentModel.Win32Exception)
-                    {
-                    }
-
-                    throw new InvalidOperationException("The benchmark identity library timed out.");
-                }
-
-                var output = standardOutput.GetAwaiter().GetResult() + "\n" + standardError.GetAwaiter().GetResult();
-                if (process.ExitCode != 0)
-                    throw new InvalidOperationException("The benchmark identity library failed:\n" + output);
-                return output;
-            }
-        }
-
-        throw new InvalidOperationException("Neither pwsh nor powershell is available to verify the benchmark identity.");
-    }
-
-    private static string Quote(string value)
-    {
-        return "'" + value.Replace("'", "''") + "'";
+        static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
     }
 }

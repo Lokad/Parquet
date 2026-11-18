@@ -103,7 +103,7 @@ internal static class PairedParityRunner
         var outputPath = ResolveOutputPath();
         var outputEvidence = BenchmarkHostPolicy.CheckNativeWorkspacePath(outputPath, "paired snapshot output");
         using var process = Process.GetCurrentProcess();
-        var appliedAffinity = BenchmarkHostPolicy.ApplySingleProcessorAffinity();
+        var appliedAffinity = BenchmarkHostPolicy.ApplySingleProcessorAffinity(selectFromAvailable: false);
         var processorAffinity = BenchmarkHostPolicy.FormatAffinity(appliedAffinity);
         var logicalProcessor = BenchmarkHostPolicy.GetSelectedLogicalProcessor(appliedAffinity);
         var operatingSystem = OperatingSystem.IsLinux() && !RuntimeInformation.OSDescription.Contains("Linux", StringComparison.Ordinal) ? "Linux " + RuntimeInformation.OSDescription : RuntimeInformation.OSDescription;

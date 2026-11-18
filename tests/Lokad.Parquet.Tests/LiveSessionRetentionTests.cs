@@ -47,8 +47,7 @@ public sealed class LiveSessionRetentionTests
     [Fact]
     public async Task LokadLiveProbeMatchesNarrowProjectionTruth()
     {
-        // B01: the probes scan the first-pass projection, so a narrow projection
-        // over a wide fixture checks the projected combination, not the full checksum.
+        // The retention probe scans the first-pass projection.
         var fixture = await CreateFixtureAsync("EightRequiredInt32Plain", 64);
         var projection = new int[] { 0 };
         var expected = await ProjectedChecksumAsync(fixture, projection);
@@ -103,7 +102,6 @@ public sealed class LiveSessionRetentionTests
     [InlineData("TwoRequiredInt32Plain", typeof(int[]))]
     public async Task BaselineDestinationsSelectBenchFixtureLayout(string workload, Type layout)
     {
-        // B02: one retained buffer per projected column, chosen from the field.
         var fixture = await CreateFixtureAsync(workload, 64);
         var fields = await BaselineFieldsForFixtureAsync(fixture.Bytes);
         var destinations = CreateDestinations(fields, workload, 128);
@@ -211,8 +209,6 @@ public sealed class LiveSessionRetentionTests
     [Fact]
     public async Task BaselineDestinationsRetainSingleLayoutBuffer()
     {
-        // B02: one required INT32 column retains a single row-group-sized int
-        // buffer instead of twelve parallel layouts.
         const int rows = 65536;
         var fixture = await CreateFixtureAsync("RequiredInt32Plain", 64);
         var fields = await BaselineFieldsForFixtureAsync(fixture.Bytes);

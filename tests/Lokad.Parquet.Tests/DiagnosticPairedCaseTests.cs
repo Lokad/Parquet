@@ -3,8 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace Lokad.Parquet.Tests;
 
-// B06: reusable optional diagnostic paired cases stay outside the frozen claim
-// while pairing one Lokad read path with a Parquet.NET counterpart each.
+[Collection("Benchmark integration")]
 public sealed class DiagnosticPairedCaseTests
 {
     [Fact]

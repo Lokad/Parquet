@@ -2,31 +2,13 @@ using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Engines;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Running;
-using System.Diagnostics;
 using Lokad.Parquet.Benchmarks;
 using Perfolizer.Horology;
-using System.Text.Json;
 
 #if DEBUG
 Console.Error.WriteLine("Lokad.Parquet benchmarks require a Release build.");
 return 1;
 #else
-using var benchmarkProcess = Process.GetCurrentProcess();
-string BindToOneLogicalProcessor()
-{
-    if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
-        return "unsupported";
-
-    var available = benchmarkProcess.ProcessorAffinity.ToInt64();
-    if (available == 0)
-        throw new InvalidOperationException("The benchmark process has no available logical processor.");
-    var selected = available & -available;
-    benchmarkProcess.ProcessorAffinity = (nint)selected;
-    var applied = benchmarkProcess.ProcessorAffinity.ToInt64();
-    if (applied != selected)
-        throw new InvalidOperationException("The benchmark process could not be bound to one logical processor.");
-    return $"0x{applied:x}";
-}
 int CheckPath(string[] arguments)
 {
     string? target = null;
@@ -82,10 +64,9 @@ if (!OperatingSystem.IsLinux())
     return 1;
 }
 BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
-var launcherAffinity = BindToOneLogicalProcessor();
+var launcherAffinity = BenchmarkHostPolicy.FormatAffinity(BenchmarkHostPolicy.ApplySingleProcessorAffinity(selectFromAvailable: true));
 Console.WriteLine($"Processor affinity: {launcherAffinity}");
-if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
-    Environment.SetEnvironmentVariable(BenchmarkHostPolicy.AffinityEnvironmentVariable, launcherAffinity);
+Environment.SetEnvironmentVariable(BenchmarkHostPolicy.AffinityEnvironmentVariable, launcherAffinity);
 Console.WriteLine($"Source revision: {Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded"}");
 if (args.Contains("--publication", StringComparer.Ordinal))
     return await PublicationRunner.RunAsync(repositoryRoot, launcherAffinity);

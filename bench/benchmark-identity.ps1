@@ -12,6 +12,7 @@ function Get-BenchmarkIdentityPaths {
             $_ -eq "Directory.Build.props" -or
             $_ -eq "global.json" -or
             $_ -eq "bench.ps1" -or
+            $_ -eq "benchmark-report.ps1" -or
             $_.StartsWith("src/", [StringComparison]::Ordinal) -or
             $_.StartsWith("bench/", [StringComparison]::Ordinal) -or
             $_ -eq "tests/Lokad.Parquet.Tests/ParquetFixtureBuilder.cs" -or
