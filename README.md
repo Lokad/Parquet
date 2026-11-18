@@ -106,15 +106,15 @@ Packages are intentionally restricted to `Release` builds and are emitted to
 
 ## Benchmarks
 
-Benchmark execution is restricted to `Release` builds:
+Run Release benchmarks on a native Linux filesystem. The harness pins the
+process to one logical processor.
 
 ```powershell
-./bench.ps1
+./bench.ps1 -Suite Publication
 ```
 
-The harness restricts each benchmark process to one logical processor. Linux
-measurements must be built, run, and written on a native Linux filesystem, not
-on a Windows-backed WSL path such as `/mnt/c`; see [BENCHMARKS.md](https://github.com/Lokad/Parquet/blob/v0.2.0/BENCHMARKS.md).
+The [benchmark report](https://github.com/Lokad/Parquet/blob/master/BENCHMARKS.md)
+shows representative read and write comparisons.
 
 ## License
 

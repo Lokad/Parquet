@@ -28,7 +28,8 @@ path against the pinned baseline. Scalar behavior remains the oracle for any
 optimized path.
 
 For writer changes, run the independent PyArrow check in
-`tests/fixtures/README.md`.
+`tests/fixtures/README.md` and qualify write workloads against the pinned
+Parquet.NET baseline.
 
 ## Dependencies
 
@@ -46,9 +47,8 @@ pointers, `fixed`, pinning, `System.Runtime.CompilerServices.Unsafe`,
 NuGet packages must be produced in `Release` and are written to
 `artifacts/nuget`. Use `./pack.ps1` for the standard package command.
 
-Benchmarks must also run in `Release`; use `./bench.ps1` rather than a Debug
-invocation. Qualification is single-logical-processor. Linux evidence must be
-built and run from a native Linux filesystem, never a Windows-backed WSL path.
+Benchmarks run in `Release` on one logical processor. Use `./bench.ps1` from a
+native Linux filesystem for the source, build output, and artifacts.
 
 ## CI
 

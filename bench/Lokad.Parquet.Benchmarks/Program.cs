@@ -70,13 +70,25 @@ if (args.Contains("--force-scalar", StringComparer.Ordinal))
 if (args.Contains("--check-path", StringComparer.Ordinal))
     return CheckPath(args);
 if (args.Contains("--verify-truth", StringComparer.Ordinal))
-    return await ScanTruthVerification.RunAsync();
+{
+    var result = await ScanTruthVerification.RunAsync();
+    if (result == 0)
+        await PublicationRunner.VerifyWritesAsync();
+    return result;
+}
+if (!OperatingSystem.IsLinux())
+{
+    Console.Error.WriteLine("Lokad.Parquet benchmarks run on Linux.");
+    return 1;
+}
 BenchmarkEnvironment.EnsureNativeWorkspace(repositoryRoot, AppContext.BaseDirectory, Path.GetFullPath(Path.Combine(repositoryRoot, "artifacts", "benchmarks")));
 var launcherAffinity = BindToOneLogicalProcessor();
 Console.WriteLine($"Processor affinity: {launcherAffinity}");
 if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
     Environment.SetEnvironmentVariable(BenchmarkHostPolicy.AffinityEnvironmentVariable, launcherAffinity);
 Console.WriteLine($"Source revision: {Environment.GetEnvironmentVariable("LOKAD_PARQUET_SOURCE_REVISION") ?? "unrecorded"}");
+if (args.Contains("--publication", StringComparer.Ordinal))
+    return await PublicationRunner.RunAsync(repositoryRoot, launcherAffinity);
 if (args.Contains("--catalog", StringComparer.Ordinal))
     return await PairedParityRunner.WriteCatalogAsync(Path.Combine("artifacts", "benchmarks", "parity-catalog.json"));
 if (args.Contains("--paired", StringComparer.Ordinal))

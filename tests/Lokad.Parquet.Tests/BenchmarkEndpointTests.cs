@@ -49,7 +49,7 @@ public sealed class BenchmarkEndpointTests
             claimed.Add(benchmarkType + "." + benchmarkMethod);
         }
         var frozen = new HashSet<string>(
-            ["open", "preopened-scan", "open-scan-required", "open-scan-workloads", "consumer-only", "materialization", "source-io", "decoder-codec"],
+            ["open", "preopened-scan", "open-scan-required", "open-scan-workloads", "consumer-only", "materialization", "source-io", "decoder-codec", "write"],
             StringComparer.Ordinal);
         Assert.True(frozen.SetEquals(identifiers), "Benchmark endpoint ids changed: " + string.Join(",", identifiers.OrderBy(static identifier => identifier)));
         Assert.Empty(benchmarks.Except(claimed, StringComparer.Ordinal));

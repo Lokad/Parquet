@@ -182,6 +182,8 @@ public static class BenchmarkHostPolicy
     // processor, named core, runtime tuning, and native BDN artifact storage.
     public static void AssertWorkerEnvironment()
     {
+        if (Environment.GetEnvironmentVariable("LOKAD_PARQUET_BENCHMARK_FORCE_SCALAR") is "1")
+            AppContext.SetSwitch("Lokad.Parquet.ForceScalar", true);
         var mask = ApplySingleProcessorAffinity();
         var selected = GetSelectedLogicalProcessor(mask);
         Console.WriteLine($"Worker affinity: {FormatAffinity(mask)}; logical processor: {selected}; processors: {Environment.ProcessorCount}.");

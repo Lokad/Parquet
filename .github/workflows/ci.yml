@@ -45,6 +45,7 @@ jobs:
         run: dotnet format Lokad.Parquet.slnx --verify-no-changes --no-restore
 
       - name: Benchmark truth verification
+        if: runner.os == 'Linux'
         shell: pwsh
         run: dotnet run --project bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj --configuration Release --framework net10.0 --tl:off --no-launch-profile -- --verify-truth
 
@@ -52,6 +53,7 @@ jobs:
       # catalog reconciliation) with one retention repetition and no timing
       # gates; the smoke snapshot lands in temp and never qualifies.
       - name: Census smoke orchestration
+        if: runner.os == 'Linux'
         shell: pwsh
         run: ./bench.ps1 -Suite CensusSmoke
 

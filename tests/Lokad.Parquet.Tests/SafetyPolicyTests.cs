@@ -340,6 +340,14 @@ public sealed class SafetyPolicyTests
                 "Snappy output bound shared with the raw-block tests",
             ["Lokad.Parquet.Internal.SnappyBlockEncoder.Compress"] =
                 "raw Snappy encoder independent of Parquet page emission",
+            ["Lokad.Parquet.Benchmarks.PublicationRunner.VerifyWritesAsync"] =
+                "command-line writer truth verification entry point",
+            ["Lokad.Parquet.Benchmarks.PublicationRunner.RunAsync"] =
+                "command-line publication benchmark entry point",
+            ["Lokad.Parquet.Benchmarks.WriteBenchmarks.MeasureWorkingBuffersAsync"] =
+                "untimed writer memory measurement",
+            ["Lokad.Parquet.Benchmarks.WriteBenchmarks.VerifyOutputAsync"] =
+                "independent schema and value verification of both writers",
             ["Lokad.Parquet.ParquetFile+ColumnCacheProvider.RentColumnValues"] =
                 "typed column-cache rent behind the file provider boundary",
         };

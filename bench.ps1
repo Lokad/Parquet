@@ -1,5 +1,14 @@
+<#
+.SYNOPSIS
+Builds and runs Release benchmarks on one logical processor on Linux.
+.DESCRIPTION
+Run from a native Linux filesystem with PowerShell and taskset. Select a suite
+or filter.
+Publication runs the representative read and write comparison and records
+timings, allocations, and diagnostics under artifacts/benchmarks/publication.
+#>
 param(
-    [ValidateSet("Core", "Utf8", "Parity", "Paired", "Census", "CensusSmoke", "Catalog", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
+    [ValidateSet("Publication", "Core", "Utf8", "Parity", "Paired", "Census", "CensusSmoke", "Catalog", "Materialization", "ColdOpen", "WarmOpen", "Kernel", "Codec", "SteadyState", "Source", "All")]
     [string] $Suite = "Core",
     [string] $Filter = "",
     [string] $PairedCase = "",
@@ -8,8 +17,15 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $IsLinux) { throw "Benchmarks require Linux and a native Linux checkout." }
 $project = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/Lokad.Parquet.Benchmarks.csproj"
 $benchmarkDll = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/bin/Release/net10.0/Lokad.Parquet.Benchmarks.dll"
+$cpuList = Get-Content -LiteralPath "/proc/self/status" | Select-String '^Cpus_allowed_list:\s*(\d+)'
+$processor = $cpuList.Matches[0].Groups[1].Value
+
+function Invoke-Benchmark {
+    & taskset --cpu-list $processor dotnet $benchmarkDll @args
+}
 
 Push-Location $PSScriptRoot
 . (Join-Path $PSScriptRoot "bench/benchmark-identity.ps1")
@@ -33,11 +49,7 @@ try {
     $lockPath = Join-Path $PSScriptRoot "bench/Lokad.Parquet.Benchmarks/packages.lock.json"
     $env:LOKAD_PARQUET_PACKAGE_LOCK_HASH =
         (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    # powercfg exists only on Windows; collect best-effort evidence per OS without failing.
-    $env:LOKAD_PARQUET_POWER_MODE = if ($IsWindows) {
-        (& powercfg /getactivescheme) -join " "
-    }
-    else {
+    $env:LOKAD_PARQUET_POWER_MODE = & {
         $governor = Get-Content -LiteralPath "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor" -ErrorAction SilentlyContinue
         if ($governor) { "scaling_governor: $($governor -join " ")" } else { "power management unavailable" }
     }
@@ -91,6 +103,11 @@ try {
         $scalarArguments += "--force-scalar"
     }
 
+    if ($Suite -eq "Publication") {
+        Invoke-Benchmark --publication @scalarArguments
+        exit $LASTEXITCODE
+    }
+
     if ($Suite -eq "Paired") {
         $pairedArguments = @("--paired")
         if ($PairedCase) {
@@ -99,12 +116,12 @@ try {
         if ($EnforceParity) {
             $pairedArguments += "--paired-enforce"
         }
-        & dotnet $benchmarkDll @pairedArguments @scalarArguments
+        Invoke-Benchmark @pairedArguments @scalarArguments
         exit $LASTEXITCODE
     }
 
     if ($Suite -eq "Census") {
-        & dotnet $benchmarkDll --census @scalarArguments
+        Invoke-Benchmark --census @scalarArguments
         exit $LASTEXITCODE
     }
 
@@ -112,12 +129,12 @@ try {
     # retention repetition. Truth, pool-balance and catalog checks are unchanged;
     # the snapshot lands in an isolated temp directory and never qualifies.
     if ($Suite -eq "CensusSmoke") {
-        & dotnet $benchmarkDll --census-smoke
+        Invoke-Benchmark --census-smoke
         exit $LASTEXITCODE
     }
 
     if ($Suite -eq "Catalog") {
-        & dotnet $benchmarkDll --catalog
+        Invoke-Benchmark --catalog
         exit $LASTEXITCODE
     }
 
@@ -125,7 +142,7 @@ try {
     # multi-pattern suites like ColdOpen run once per pattern and keep
     # excluding diagnostic benchmarks while sharing the class.
     foreach ($pattern in $Filter.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)) {
-        & dotnet $benchmarkDll --filter $pattern @scalarArguments
+        Invoke-Benchmark --filter $pattern @scalarArguments
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     exit 0

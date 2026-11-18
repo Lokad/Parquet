@@ -25,6 +25,8 @@ public static class BenchmarkEndpoints
         new("preopened-scan", "Pre-opened projected scan", nameof(PreopenedScanBenchmarks), nameof(PreopenedScanBenchmarks.ParquetNetProjectedScan), true),
         new("preopened-scan", "Pre-opened UTF-8 pipeline", nameof(PreopenedUtf8ScanBenchmarks), nameof(PreopenedUtf8ScanBenchmarks.LokadUtf8Pipeline), true),
         new("preopened-scan", "Pre-opened UTF-8 pipeline", nameof(PreopenedUtf8ScanBenchmarks), nameof(PreopenedUtf8ScanBenchmarks.ParquetNetUtf8Pipeline), true),
+        new("write", "Complete PLAIN Snappy file", nameof(WriteBenchmarks), nameof(WriteBenchmarks.LokadWrite), true),
+        new("write", "Complete PLAIN Snappy file", nameof(WriteBenchmarks), nameof(WriteBenchmarks.ParquetNetWrite), true),
         new("open-scan-required", "Required INT32 open and scan", nameof(RequiredInt32Benchmarks), nameof(RequiredInt32Benchmarks.LokadProjectedScan), true),
         new("open-scan-required", "Required INT32 open and scan", nameof(RequiredInt32Benchmarks), nameof(RequiredInt32Benchmarks.ParquetNetProjectedScan), true),
         new("open-scan-required", "Required INT32 public-accessor diagnostic", nameof(RequiredInt32Benchmarks), nameof(RequiredInt32Benchmarks.LokadPublicAccessorDiagnostic), false),

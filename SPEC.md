@@ -806,24 +806,24 @@ material regression on the others.
 
 ## 11. Benchmarking
 
-Benchmarks run only in Release and may depend on Parquet.NET as a comparison
-baseline. Such dependencies MUST remain private to the benchmark project and
-MUST NOT become package dependencies.
+Benchmarks run in Release on Linux and may use Parquet.NET as a comparison
+baseline. Benchmark dependencies MUST remain private to the benchmark project.
 
 Benchmark correctness MUST be checked before timing. Comparison lanes must
-decode the same rows, columns, physical values, and nulls. End-to-end scans and
-isolated decoder microbenchmarks MUST be reported separately.
+decode the same rows, columns, physical values, and nulls. Write comparisons
+must start with equivalent typed data and emit files with matching decoded
+schemas, values, row group sizes, and compression. End-to-end scans and isolated
+decoder microbenchmarks MUST be reported separately.
 
 Release evidence MUST report throughput, allocation and GC activity, peak scan
 memory, relevant input dimensions, runtime, processor, instruction-set mode,
-operating system, source revision, and fixture identity. Budgets are established
-on pinned workloads and machines. A comparison library provides context; the
-reader is not required to win every case.
+operating system, source revision, and fixture identity. Write evidence also
+reports file sizes, peak writer buffers, and retained footer metadata scaling.
+Budgets are established on pinned workloads and machines.
 
-Comparative qualification MUST bind the complete benchmark process, including
-both readers, to one logical processor and record the applied affinity.
-Linux qualification MUST build, execute, and write artifacts on a native Linux
-filesystem; a Windows-backed WSL mount such as `/mnt/c` is not qualifying.
+Comparative qualification MUST bind the complete benchmark process to one
+logical processor and record the applied affinity. Build, execute, and write
+benchmark artifacts on a native Linux filesystem.
 
 ## 12. Testing and conformance
 
@@ -899,8 +899,8 @@ Core 0.1 is complete when:
 - every Core 0.1 support-table entry is implemented;
 - Sections 7–9 API, lifetime, security, and failure contracts pass Section 12
   conformance coverage;
-- Section 10 performance requirements and release budgets pass on the Section
-  14 platform matrix;
+- Section 10 performance requirements and release budgets pass in the Linux
+  qualification defined in Section 11;
 - the package and compiled assembly satisfy Sections 2.2 and 14;
 - Release build, test, package-content, API-snapshot, formatting, and benchmark
   checks pass with zero warnings; and

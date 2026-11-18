@@ -131,6 +131,9 @@ public sealed class CensusSessionTests
     [Fact]
     public async Task KilledCensusRetainsCheckpointsWithoutCompletionMarker()
     {
+        if (!OperatingSystem.IsLinux())
+            return;
+
         var testOutput = Path.GetDirectoryName(typeof(CensusSessionTests).Assembly.Location) ??
             throw new InvalidOperationException("The test assembly has no output directory.");
         var framework = Path.GetFileName(testOutput);

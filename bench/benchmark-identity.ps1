@@ -1,8 +1,10 @@
-# Shared benchmark input-identity helpers for bench.ps1 and its tests.
-# Lists every source and fixture path that identifies a benchmark build and
-# hashes their bytes; paired and census evidence both record the result, so a
-# changed input always changes the recorded revision. Dot-source this file;
-# it defines functions only and runs nothing on load.
+<#
+.SYNOPSIS
+Defines helpers that identify a benchmark build from its source and fixture files.
+.DESCRIPTION
+Dot-source this file and pass the repository root. The helpers list benchmark
+inputs and hash their paths and contents for the recorded source fingerprint.
+#>
 function Get-BenchmarkIdentityPaths {
     param([Parameter(Mandatory)][string]$RepositoryRoot)
     $identityPaths = @(& git -C $RepositoryRoot ls-files --cached --others --exclude-standard 2>$null) |

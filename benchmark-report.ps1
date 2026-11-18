@@ -1,15 +1,98 @@
+<#
+.SYNOPSIS
+Publishes the representative Linux benchmark table from a completed snapshot.
+.DESCRIPTION
+Run bench.ps1 -Suite Publication first. Pass -PublicationSnapshot to select
+another result, -Document to redirect the report, or -Verify to check it.
+The legacy parameter set checks historical paired and census snapshots.
+#>
+[CmdletBinding(DefaultParameterSetName = "Publication")]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(ParameterSetName = "Publication")]
+    [string] $PublicationSnapshot = (Join-Path $PSScriptRoot "artifacts/benchmarks/publication/snapshot.json"),
+    [Parameter(Mandatory, ParameterSetName = "Legacy")]
     [string[]] $PairedSnapshot,
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = "Legacy")]
     [string] $CensusSnapshot,
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = "Legacy")]
     [string] $Catalog,
     [string] $Document = (Join-Path $PSScriptRoot "BENCHMARKS.md"),
     [switch] $Verify
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSCmdlet.ParameterSetName -eq "Publication") {
+    $snapshot = Get-Content -LiteralPath $PublicationSnapshot -Raw | ConvertFrom-Json
+    if ($snapshot.Schema -ne 1 -or $snapshot.OperatingSystem -notlike "Linux *" -or
+        $snapshot.Affinity -notmatch '^0x[1248]0*$' -or
+        $snapshot.Date -notmatch '^\d{4}-\d{2}-\d{2}$' -or
+        -not $snapshot.Source -or -not $snapshot.Processor -or -not $snapshot.Runtime -or
+        -not $snapshot.BaselineVersion -or @($snapshot.Measurements).Count -eq 0) {
+        throw "The snapshot must describe a completed single-processor Linux publication run."
+    }
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    function Format-KiB([double] $bytes) { ($bytes / 1KB).ToString("0.00", $culture) }
+    $rows = foreach ($measurement in $snapshot.Measurements) {
+        $lokad = $measurement.Lokad
+        $baseline = $measurement.Baseline
+        if (-not $measurement.Case -or $measurement.Rows -le 0 -or
+            -not [double]::IsFinite($lokad.MedianNanoseconds) -or $lokad.MedianNanoseconds -le 0 -or
+            -not [double]::IsFinite($baseline.MedianNanoseconds) -or $baseline.MedianNanoseconds -le 0 -or
+            $null -eq $lokad.AllocatedBytes -or $lokad.AllocatedBytes -lt 0 -or
+            $null -eq $baseline.AllocatedBytes -or $baseline.AllocatedBytes -lt 0) {
+            throw "The publication contains an incomplete measurement."
+        }
+        $size = if ($null -ne $measurement.InputBytes) {
+            Format-KiB $measurement.InputBytes
+        } else {
+            "$(Format-KiB $measurement.LokadFileBytes) / $(Format-KiB $measurement.BaselineFileBytes)"
+        }
+        $rowCount = $measurement.Rows.ToString("N0", $culture)
+        $lokadMs = ($lokad.MedianNanoseconds / 1e6).ToString("0.000", $culture)
+        $baselineMs = ($baseline.MedianNanoseconds / 1e6).ToString("0.000", $culture)
+        $ratio = ($lokad.MedianNanoseconds / $baseline.MedianNanoseconds).ToString("0.00", $culture)
+        "| $($measurement.Case) | $rowCount | $size | $lokadMs | $baselineMs | ${ratio}× | $(Format-KiB $lokad.AllocatedBytes) | $(Format-KiB $baseline.AllocatedBytes) |"
+    }
+    $documentText = @(
+        "# Benchmarks"
+        ""
+        "Release source-build medians from $($snapshot.Date) UTC using $($snapshot.Runtime) and Parquet.NET $($snapshot.BaselineVersion)."
+        "Linux on $($snapshot.Processor), with one logical processor (affinity $($snapshot.Affinity))."
+        "Source ``$($snapshot.Source)``."
+        ""
+        "| Case | Rows | File KiB | Lokad ms | Parquet.NET ms | Lokad / Parquet.NET | Lokad allocated KiB | Parquet.NET allocated KiB |"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        $rows
+        ""
+        "Read cases start with open readers over the same bytes and consume all projected values."
+        "Both UTF-8 readers deliver bytes and offsets to reusable sinks. Write cases"
+        "begin with typed buffers or UTF-8 bytes and offsets and finish at footer emission."
+        "Both writers use PLAIN Snappy, four equal row groups, and a preallocated"
+        "memory stream. Parquet.NET's UTF-8 input conversion is timed. File KiB shows"
+        "the shared input for reads and Lokad / Parquet.NET output for writes."
+        ""
+        "BenchmarkDotNet verifies the workload outputs during setup. Run from a native"
+        "Linux checkout. Raw measurements, GC counts, file identities, and writer"
+        "working-buffer and footer scaling probes land in ``artifacts/benchmarks/publication``."
+        ""
+        '```powershell'
+        './bench.ps1 -Suite Publication'
+        './benchmark-report.ps1'
+        '```'
+    ) -join "`n"
+    $documentText += "`n"
+    if ($Verify) {
+        $current = (Get-Content -LiteralPath $Document -Raw).Replace("`r`n", "`n")
+        if ($current -cne $documentText) { throw "The benchmark report differs from the publication snapshot." }
+    } else {
+        [IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Document), $documentText)
+    }
+    return
+}
+
+if (-not $PSBoundParameters.ContainsKey("Document")) {
+    throw "Specify a historical document when validating legacy paired and census snapshots."
+}
 $beginMarker = "<!-- BEGIN GENERATED PARITY REPORT -->"
 $endMarker = "<!-- END GENERATED PARITY REPORT -->"
 $legacyCaseNames = @(
