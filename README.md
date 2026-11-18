@@ -57,7 +57,6 @@ transferred with `ParquetSourceOwnership.ParquetFile`.
 - `src/Lokad.Parquet`: the dependency-free library, published as the `Lokad.Parquet` NuGet package.
 - `tests/Lokad.Parquet.Tests`: the xUnit test project.
 - `bench/Lokad.Parquet.Benchmarks`: the Release-only BenchmarkDotNet project.
-- `assets`: source artwork for the NuGet icon.
 - `artifacts/nuget`: generated packages (ignored by Git).
 
 ## Build and test
