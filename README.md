@@ -9,7 +9,7 @@ disposable aligned column batches. It reads flat required or optional columns
 of every Parquet physical type except `INT96`, using Data Page V1/V2, PLAIN or
 dictionary encoding, and UNCOMPRESSED or SNAPPY payloads. Nested/repeated
 schemas and other codecs remain outside the reader profile. The full support
-contract is in the [specification](https://github.com/Lokad/Parquet/blob/master/SPEC.md).
+contract is in the [specification](SPEC.md).
 
 The primary scan API uses descriptors resolved once from immutable metadata:
 
@@ -116,8 +116,8 @@ process to one logical processor.
 ./bench.ps1 -Suite Publication
 ```
 
-The [benchmark report](https://github.com/Lokad/Parquet/blob/master/BENCHMARKS.md)
-shows representative read and write comparisons.
+The [benchmark report](BENCHMARKS.md) shows representative read and write
+comparisons.
 
 ## License
 

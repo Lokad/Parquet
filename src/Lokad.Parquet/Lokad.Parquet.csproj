@@ -30,12 +30,11 @@
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <PackageOutputPath>..\..\artifacts\nuget\</PackageOutputPath>
-    <BeforePack>RequireReleaseConfigurationForPack;$(BeforePack)</BeforePack>
+    <BeforePack>RequireReleaseConfigurationForPack;PreparePackageReadme;$(BeforePack)</BeforePack>
   </PropertyGroup>
 
   <ItemGroup>
     <None Include="..\..\LICENSE.txt" Pack="true" PackagePath="\" Visible="false" />
-    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
     <None Include="..\..\CHANGELOG.md" Pack="true" PackagePath="\" Visible="false" />
     <None Include="..\..\icon.png" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
@@ -43,6 +42,19 @@
   <Target Name="RequireReleaseConfigurationForPack"
           Condition="'$(Configuration)' != 'Release'">
     <Error Text="Lokad.Parquet packages must be produced from a Release build. Use 'dotnet pack -c Release'." />
+  </Target>
+
+  <!-- NuGet displays the README on its package page, outside the repository. -->
+  <Target Name="PreparePackageReadme">
+    <PropertyGroup>
+      <_PackageReadmePath>$(IntermediateOutputPath)package/README.md</_PackageReadmePath>
+      <_PackageReadme>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/../../README.md'))</_PackageReadme>
+      <_PackageReadme>$([System.Text.RegularExpressions.Regex]::Replace('$(_PackageReadme)', '\]\((SPEC\.md|BENCHMARKS\.md|LICENSE\.txt)\)', ']($(PackageProjectUrl)/blob/master/$1)'))</_PackageReadme>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_PackageReadmePath)" Lines="$(_PackageReadme)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <None Include="$(_PackageReadmePath)" Pack="true" PackagePath="\" />
+    </ItemGroup>
   </Target>
 
 </Project>

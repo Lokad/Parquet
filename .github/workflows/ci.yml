@@ -89,7 +89,13 @@ jobs:
             }
             [xml]$nuspec = Read-PackageEntry $archive.GetEntry("Lokad.Parquet.nuspec")
             if ($nuspec.SelectNodes("//*[local-name()='dependency']").Count -ne 0) { throw "Package gained a third-party dependency." }
-            if ((Read-PackageEntry $archive.GetEntry("README.md")) -match "\]\((SPEC|BENCHMARKS)\.md\)") { throw "Package README has repository-relative links." }
+            $readme = Read-PackageEntry $archive.GetEntry("README.md")
+            $projectUrl = $nuspec.SelectSingleNode("//*[local-name()='projectUrl']").InnerText
+            foreach ($document in @("SPEC.md", "BENCHMARKS.md", "LICENSE.txt")) {
+              if (-not $readme.Contains("]($projectUrl/blob/master/$document)", [StringComparison]::Ordinal)) {
+                throw "Package README is missing the absolute link to $document."
+              }
+            }
           }
           finally { $archive.Dispose() }
 
