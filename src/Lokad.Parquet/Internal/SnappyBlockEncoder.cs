@@ -110,10 +110,27 @@ internal static class SnappyBlockEncoder
             }
 
             var distance = position - candidate;
-            WriteLiteral(source[literalStart..position], destination, ref output);
             var matchLength = sizeof(uint) +
                 source[(position + sizeof(uint))..].CommonPrefixLength(source[(candidate + sizeof(uint))..]);
-            WriteCopy(distance, matchLength, destination, ref output);
+            var literalLength = position - literalStart;
+            if (literalLength is 3 or 4 && matchLength <= MaximumShortCopyLength && distance < 2048 &&
+                output <= destination.Length - sizeof(ulong))
+            {
+                // The following match makes four bytes readable even for a three-byte literal.
+                var literal = BinaryPrimitives.ReadUInt32LittleEndian(source[literalStart..]);
+                var literalMask = (1UL << (literalLength * 8)) - 1;
+                var copyTag = 1 | ((matchLength - 4) << 2) | ((distance >> 8) << 5) | ((distance & 255) << 8);
+                var packed = (uint)((literalLength - 1) << 2) |
+                    (((ulong)literal & literalMask) << 8) | ((ulong)copyTag << ((literalLength + 1) * 8));
+                BinaryPrimitives.WriteUInt64LittleEndian(destination[output..], packed);
+                // Only the emitted bytes count toward the block.
+                output += literalLength + 3;
+            }
+            else
+            {
+                WriteLiteral(source[literalStart..position], destination, ref output);
+                WriteCopy(distance, matchLength, destination, ref output);
+            }
             repeatedShortMatches = matchLength <= MaximumShortCopyLength && distance == recentDistance
                 ? repeatedShortMatches + 1
                 : 0;

@@ -342,6 +342,11 @@ public sealed class ParquetWriterTests
         var spacedMatches = "abcd0123abcd4567abcd89:;abcd<=>?abcd@ABC!"u8;
         Assert.InRange(RoundTrip(spacedMatches), 1, spacedMatches.Length - 1);
 
+        AssertShortPair("ABCDxxxABCDyzwABCD"u8,
+            "\u0012\u0018ABCDxxx\u0001\u0007\u0008yzw\u0001\u0007"u8);
+        AssertShortPair("ABCDxxxxABCDyzwoABCD"u8,
+            "\u0014\u001cABCDxxxx\u0001\u0008\u000cyzwo\u0001\u0008"u8);
+
         // A short incidental match can precede a long run. The hash search
         // must find those runs before the encoder trusts a recent distance.
         var numericRuns = new byte[16_384 * sizeof(long)];
@@ -354,6 +359,21 @@ public sealed class ParquetWriterTests
         Assert.InRange(RoundTrip(numericRuns), 1, numericRuns.Length / 3);
 
         static int Word(int value) => unchecked(value * 1_000_003) ^ (value >> 3);
+
+        void AssertShortPair(ReadOnlySpan<byte> input, ReadOnlySpan<byte> expected)
+        {
+            // Exercise the packed store and the fallback when only the encoded bytes fit.
+            foreach (var capacity in new[] { maximumLength(input.Length), expected.Length })
+            {
+                var compressed = new byte[capacity];
+                var length = compress(input, compressed, positions, default);
+                Assert.Equal(expected.Length, length);
+                Assert.True(expected.SequenceEqual(compressed.AsSpan(0, length)));
+                var actual = new byte[input.Length];
+                decompress(compressed.AsSpan(0, length), actual, default);
+                Assert.True(input.SequenceEqual(actual));
+            }
+        }
 
         int RoundTrip(ReadOnlySpan<byte> input)
         {
