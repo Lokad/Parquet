@@ -134,6 +134,54 @@ public sealed class ParquetWriterTests
     }
 
     [Fact]
+    public async Task FixedWidthBytesMatchSingleValueWritesAcrossSliceAndPageBoundaries()
+    {
+        const int count = 91;
+        var rows = Enumerable.Range(0, count).ToArray();
+        var flags = rows.Select(i => (i % 5) is 0 or 1 or 4).ToArray();
+        var ratios = rows.Select(i => BitConverter.Int32BitsToSingle((i % 5) switch
+        {
+            0 => int.MinValue,
+            1 => 0x7fc01234 + i,
+            2 => unchecked((int)0xff800001) + i,
+            3 => BitConverter.SingleToInt32Bits(i + 0.25f),
+            _ => 0,
+        })).ToArray();
+        var quantities = rows.Select(i => i % 2 == 0 ? long.MinValue + i : long.MaxValue - i).ToArray();
+        var days = rows.Select(i => i % 2 == 0 ? int.MinValue + i : int.MaxValue - i).ToArray();
+
+        var scalar = await WriteAsync(Enumerable.Repeat(1, count).ToArray());
+        Assert.Equal(scalar, await WriteAsync([count]));
+        Assert.Equal(scalar, await WriteAsync([3, 2, 53, 33]));
+
+        async Task<byte[]> WriteAsync(int[] slices)
+        {
+            using var output = new MemoryStream();
+            using var writer = await ParquetWriter.CreateAsync(output,
+                [MixedSchema[0], MixedSchema[2], MixedSchema[3], MixedSchema[5]],
+                new() { TargetPageValues = 37 });
+            writer.BeginRowGroup(count);
+            await WriteColumnAsync(flags, writer.WriteBooleansAsync);
+            await WriteColumnAsync(ratios, writer.WriteFloatsAsync);
+            await WriteColumnAsync(quantities, writer.WriteInt64Async);
+            await WriteColumnAsync(days, writer.WriteDatesAsync);
+            await writer.CompleteAsync();
+            return output.ToArray();
+
+            async Task WriteColumnAsync<T>(T[] values, Func<ReadOnlyMemory<T>, ValueTask> write)
+            {
+                var offset = 0;
+                foreach (var length in slices)
+                {
+                    await write(values.AsMemory(offset, length));
+                    offset += length;
+                }
+                await writer.CompleteColumnAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task EmptyFilePreservesTheEntireSchema()
     {
         using var output = new MemoryStream();

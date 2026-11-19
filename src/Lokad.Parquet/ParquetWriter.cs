@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Text;
 using System.Text.Unicode;
 using Lokad.Parquet.Internal;
@@ -157,14 +158,34 @@ public sealed class ParquetWriter : IDisposable
     public ValueTask WriteBooleansAsync(ReadOnlyMemory<bool> values, CancellationToken cancellationToken) =>
         WriteFixedAsync(values, ParquetPhysicalType.Boolean, 0, static (source, destination, offset) =>
         {
-            for (var i = 0; i < source.Length; i++, offset++)
+            var i = 0;
+            // The first partial byte may already contain values from an earlier slice.
+            for (; i < source.Length && (offset & 7) != 0; i++, offset++)
             {
-                var bit = offset & 7;
-                ref var packed = ref destination[offset / 8];
-                if (bit == 0)
-                    packed = 0;
                 if (source[i])
-                    packed |= (byte)(1 << bit);
+                    destination[offset >> 3] |= (byte)(1 << (offset & 7));
+            }
+
+            for (; i <= source.Length - 8; i += 8, offset += 8)
+            {
+                destination[offset >> 3] = (byte)(
+                    (source[i] ? 1 : 0) |
+                    (source[i + 1] ? 2 : 0) |
+                    (source[i + 2] ? 4 : 0) |
+                    (source[i + 3] ? 8 : 0) |
+                    (source[i + 4] ? 16 : 0) |
+                    (source[i + 5] ? 32 : 0) |
+                    (source[i + 6] ? 64 : 0) |
+                    (source[i + 7] ? 128 : 0));
+            }
+
+            if (i < source.Length)
+            {
+                var packed = 0;
+                for (var bit = 0; i < source.Length; i++, bit++)
+                    if (source[i])
+                        packed |= 1 << bit;
+                destination[offset >> 3] = (byte)packed;
             }
         }, cancellationToken);
 
@@ -176,7 +197,8 @@ public sealed class ParquetWriter : IDisposable
     public ValueTask WriteFloatsAsync(ReadOnlyMemory<float> values, CancellationToken cancellationToken) =>
         WriteFixedAsync(values, ParquetPhysicalType.Float, sizeof(float), static (source, destination, offset) =>
         {
-            for (var i = 0; i < source.Length; i++)
+            var i = CopyLittleEndianVectors(source, destination, offset, sizeof(float));
+            for (; i < source.Length; i++)
                 BinaryPrimitives.WriteInt32LittleEndian(destination[((offset + i) * sizeof(float))..],
                     BitConverter.SingleToInt32Bits(source[i]));
         }, cancellationToken);
@@ -189,7 +211,8 @@ public sealed class ParquetWriter : IDisposable
     public ValueTask WriteInt64Async(ReadOnlyMemory<long> values, CancellationToken cancellationToken) =>
         WriteFixedAsync(values, ParquetPhysicalType.Int64, sizeof(long), static (source, destination, offset) =>
         {
-            for (var i = 0; i < source.Length; i++)
+            var i = CopyLittleEndianVectors(source, destination, offset, sizeof(long));
+            for (; i < source.Length; i++)
                 BinaryPrimitives.WriteInt64LittleEndian(destination[((offset + i) * sizeof(long))..], source[i]);
         }, cancellationToken);
 
@@ -201,7 +224,8 @@ public sealed class ParquetWriter : IDisposable
     public ValueTask WriteDatesAsync(ReadOnlyMemory<int> days, CancellationToken cancellationToken) =>
         WriteFixedAsync(days, ParquetPhysicalType.Int32, sizeof(int), static (source, destination, offset) =>
         {
-            for (var i = 0; i < source.Length; i++)
+            var i = CopyLittleEndianVectors(source, destination, offset, sizeof(int));
+            for (; i < source.Length; i++)
                 BinaryPrimitives.WriteInt32LittleEndian(destination[((offset + i) * sizeof(int))..], source[i]);
         }, cancellationToken);
 
@@ -385,6 +409,19 @@ public sealed class ParquetWriter : IDisposable
         {
             Exit();
         }
+    }
+
+    private static int CopyLittleEndianVectors<T>(ReadOnlySpan<T> source, Span<byte> destination, int offset, int width)
+        where T : struct
+    {
+        var count = Vector<T>.Count;
+        if (source.Length < count || ParquetRuntime.ForceScalar || !Vector.IsHardwareAccelerated || !BitConverter.IsLittleEndian)
+            return 0;
+
+        var i = 0;
+        for (; i <= source.Length - count; i += count)
+            Vector.AsVectorByte(new Vector<T>(source[i..])).CopyTo(destination[((offset + i) * width)..]);
+        return i;
     }
 
     private async ValueTask WriteFixedAsync<T>(
